@@ -1,0 +1,11 @@
+# local runtime + machine-specific config
+config.local.toml
+.runtime/
+logs/
+**/thread.txt
+**/thread.auto.txt
+
+# keep requirements structure, ignore requirement payload files
+requirements/*/*
+!requirements/*/.gitkeep
+!requirements/README.md

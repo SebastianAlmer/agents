@@ -1,0 +1,57 @@
+[paths]
+# Absolute path to the project repository agents should work on.
+repo_root = "/home/you/git/your-project"
+
+# Optional. If omitted, defaults to ./requirements in this agents repo.
+requirements_root = "./requirements"
+
+# Optional. If empty, defaults to <repo_root>/docs.
+docs_dir = ""
+
+[flow]
+default_mode = "standard"
+idle_poll_seconds = 300
+max_retries = 2
+retry_delay_seconds = 2
+
+[run_defaults]
+flow = "standard"
+max_req = 0
+verbose = false
+detail = false
+# hard | soft | none | snapshot
+preflight = "soft"
+
+[preflight]
+# Used in preflight mode "snapshot".
+snapshot_commit_message_prefix = "chore(flow): preflight snapshot"
+
+[deploy]
+# check | commit | commit_push
+mode = "commit"
+final_push_on_success = true
+require_clean_start_for_commits = true
+
+[dev_routing]
+# fullstack_only | split
+mode = "fullstack_only"
+default_scope = "fullstack"
+
+[dev_agents]
+use_fe = false
+use_be = false
+use_fs = true
+
+[qa]
+mandatory_checks = [
+  "node scripts/qa-gate.js",
+  "npm --prefix web-v2 run lint",
+  "npm --prefix web-v2 run build",
+  "npm --prefix app test"
+]
+
+[codex]
+model = "gpt-5.3-codex"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+model_reasoning_effort = "xhigh"

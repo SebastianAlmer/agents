@@ -1,0 +1,51 @@
+[paths]
+# Optional in defaults. Set in config.local.toml for your project.
+repo_root = ""
+requirements_root = "./requirements"
+docs_dir = ""
+
+[flow]
+default_mode = "standard"
+idle_poll_seconds = 300
+max_retries = 2
+retry_delay_seconds = 2
+
+[run_defaults]
+flow = "standard"
+max_req = 0
+verbose = false
+detail = false
+preflight = "soft"
+
+[preflight]
+snapshot_commit_message_prefix = "chore(flow): preflight snapshot"
+
+[deploy]
+# check | commit | commit_push
+mode = "commit"
+final_push_on_success = true
+require_clean_start_for_commits = true
+
+[dev_routing]
+# fullstack_only | split
+mode = "fullstack_only"
+default_scope = "fullstack"
+
+[dev_agents]
+use_fe = false
+use_be = false
+use_fs = true
+
+[qa]
+mandatory_checks = [
+  "node scripts/qa-gate.js",
+  "npm --prefix web-v2 run lint",
+  "npm --prefix web-v2 run build",
+  "npm --prefix app test"
+]
+
+[codex]
+model = "gpt-5.3-codex"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+model_reasoning_effort = "xhigh"

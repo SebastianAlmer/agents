@@ -1,0 +1,11 @@
+{
+  "name": "codex-agents-flow",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Codex agent flow runner",
+  "scripts": {
+    "start": "node run.js",
+    "flow": "node run.js",
+    "setup": "node scripts/setup-project.js"
+  }
+}
