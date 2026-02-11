@@ -76,6 +76,11 @@ Queue folder structure is tracked; queue file content is ignored by git.
 Agent thread/session files are written to `.runtime/threads/` and are ignored by git.
 `refinement` and `backlog` are customer-managed intake/planning queues; delivery runs start from `selected`.
 
+Agent thread handling:
+- Each role keeps its own local thread file under `.runtime/threads/<role>/`.
+- On context overflow, the role thread is reset automatically and the turn is retried once.
+- In auto mode, a compact turn is attempted every 20 successful agent turns (default) via `codex exec resume <thread_id> \"/compact\"`. Override with env `CODEX_AUTO_COMPACT_EVERY` (`0` disables). Compact failures are logged as warnings and do not stop the flow.
+
 ## Requirement intake workflow
 
 - Drop unstructured incoming requirements (`Anforderungen`) into `requirements/refinement`.

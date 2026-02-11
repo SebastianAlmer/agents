@@ -9,7 +9,6 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  getLatestSessionId,
   runCodexExecFiltered,
   runCodexExec,
   readInputWithHotkeys,
@@ -124,30 +123,39 @@ async function main() {
       const promptToSend = threadId
         ? `${context}\n\nUser: ${msg}`
         : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const start = new Date();
-      await runCodexExecFiltered({
+      const result = await runCodexExecFiltered({
         prompt: promptToSend,
         repoRoot,
         configArgs,
         threadId,
         verboseRef: verbose,
+        threadFile,
+        agentsRoot: runtime.agentsRoot,
+        agentLabel: "DEPLOY",
+        autoCompact: auto,
       });
-      const latestId = getLatestSessionId({ since: start, cwd: repoRoot });
-      if (latestId) {
-        writeThreadId(threadFile, latestId);
-        threadId = latestId;
+      if (result.threadId) {
+        writeThreadId(threadFile, result.threadId);
+        threadId = result.threadId;
       }
     }
     process.exit(0);
   }
 
-  const start = new Date();
-  await runCodexExec({ prompt: fullPrompt, repoRoot, configArgs, threadId });
+  const result = await runCodexExec({
+    prompt: fullPrompt,
+    repoRoot,
+    configArgs,
+    threadId,
+    threadFile,
+    agentsRoot: runtime.agentsRoot,
+    agentLabel: "DEPLOY",
+    autoCompact: auto,
+  });
 
-  const latestId = getLatestSessionId({ since: start, cwd: repoRoot });
-  if (latestId) {
-    writeThreadId(threadFile, latestId);
-    console.log(`DEPLOY: thread saved ${latestId}`);
+  if (result.threadId) {
+    writeThreadId(threadFile, result.threadId);
+    console.log(`DEPLOY: thread saved ${result.threadId}`);
   } else {
     console.log("DEPLOY: warning - no session id found");
   }

@@ -8,7 +8,6 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  getLatestSessionId,
   runCodexExecFiltered,
   readInputWithHotkeys,
 } = require("../lib/agent");
@@ -106,26 +105,28 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   async function runReqEng(message) {
-    const start = new Date();
     const fullPrompt = threadId
       ? `${context}\n\nUser: ${message}`
       : `${prompt}\n\n${context}\n\nUser: ${message}`;
 
     console.log("REQENG: running");
     const verbose = { value: false };
-    await runCodexExecFiltered({
+    const result = await runCodexExecFiltered({
       prompt: fullPrompt,
       repoRoot,
       configArgs,
       threadId,
       verboseRef: verbose,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      agentLabel: "REQENG",
+      autoCompact: false,
     });
 
-    const latestId = getLatestSessionId({ since: start, cwd: repoRoot });
-    if (latestId) {
-      writeThreadId(threadFile, latestId);
-      console.log(`REQENG: thread saved ${latestId}`);
-      threadId = latestId;
+    if (result.threadId) {
+      writeThreadId(threadFile, result.threadId);
+      console.log(`REQENG: thread saved ${result.threadId}`);
+      threadId = result.threadId;
     } else {
       console.log("REQENG: warning - no session id found");
     }
