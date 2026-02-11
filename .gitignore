@@ -5,7 +5,6 @@ logs/
 **/thread.txt
 **/thread.auto.txt
 
-# keep requirements structure, ignore requirement payload files
-requirements/*/*
-!requirements/*/.gitkeep
+# requirements: ignore markdown payloads only
+requirements/**/*.md
 !requirements/README.md
