@@ -537,6 +537,7 @@ async function main() {
     const uxCount = countFiles(queue.ux);
     const deployCount = countFiles(queue.deploy);
     const releasedCount = countFiles(queue.released);
+    const forReviewCount = queue.forReview ? countFiles(queue.forReview) : 0;
     const clarifyCount = countFiles(queue.toClarify);
     const needCheckCount = countFiles(queue.needToCheck);
     const blockedCount = countFiles(queue.blocked);
@@ -556,7 +557,7 @@ async function main() {
     );
     writeLog(`STATUS: deploy=${deployCount} released=${releasedCount}`);
     writeLog(
-      `STATUS: clarify=${clarifyCount} need_to_check=${needCheckCount} blocked=${blockedCount}`
+      `STATUS: for_review=${forReviewCount} clarify=${clarifyCount} need_to_check=${needCheckCount} blocked=${blockedCount}`
     );
     writeLog(`STATUS: active_pipeline=${countActivePipeline()}`);
   }
@@ -913,6 +914,7 @@ async function main() {
       ux: path.join(queue.ux, name),
       deploy: path.join(queue.deploy, name),
       released: path.join(queue.released, name),
+      forReview: queue.forReview ? path.join(queue.forReview, name) : "",
       clarify: path.join(queue.toClarify, name),
       needCheck: path.join(queue.needToCheck, name),
       blocked: path.join(queue.blocked, name),
@@ -920,6 +922,9 @@ async function main() {
   }
 
   function hasTerminalState(paths) {
+    if (paths.forReview && fs.existsSync(paths.forReview)) {
+      return "for-review";
+    }
     if (fs.existsSync(paths.clarify)) {
       return "to-clarify";
     }
@@ -933,6 +938,10 @@ async function main() {
       return "released";
     }
     return "";
+  }
+
+  function terminalStateFor(name) {
+    return hasTerminalState(getRequirementPaths(name));
   }
 
   async function processRequirement({ name, fastBypass }) {
@@ -990,7 +999,7 @@ async function main() {
         scriptPath: devAgent.scriptPath,
         args: ["--auto", "--requirement", paths.dev],
         reqName: name,
-        successPaths: [paths.qa, paths.blocked],
+        successPaths: [paths.qa, paths.clarify],
       });
     }
 
@@ -1005,7 +1014,7 @@ async function main() {
         scriptPath: scripts.QA,
         args: ["--auto", "--requirement", paths.qa],
         reqName: name,
-        successPaths: [paths.sec, paths.needCheck],
+        successPaths: [paths.sec, paths.clarify, paths.blocked, paths.needCheck],
       });
     }
 
@@ -1028,7 +1037,7 @@ async function main() {
           scriptPath: scripts.SEC,
           args: ["--auto", "--requirement", paths.sec],
           reqName: name,
-          successPaths: [paths.ux, paths.needCheck],
+          successPaths: [paths.ux, paths.clarify, paths.blocked, paths.needCheck],
         });
       }
     }
@@ -1052,7 +1061,7 @@ async function main() {
           scriptPath: scripts.UX,
           args: ["--auto", "--requirement", paths.ux],
           reqName: name,
-          successPaths: [paths.deploy, paths.needCheck],
+          successPaths: [paths.deploy, paths.clarify, paths.blocked, paths.needCheck],
         });
       }
     }
@@ -1165,7 +1174,7 @@ async function main() {
   }
 
   async function runDetailedOrFast() {
-    const stageOrder = ["deploy", "ux", "sec", "qa", "dev", "arch", "selected"];
+    const stageOrder = ["selected"];
     const fastBypass = flow === "fast";
 
     while (true) {
@@ -1176,6 +1185,17 @@ async function main() {
 
       const target = getNextTarget(stageOrder);
       if (!target) {
+        const active = countActivePipeline();
+        if (active > 0) {
+          writeLog(
+            "FLOW: active requirements exist outside selected; run starts from selected only. Move items back to selected or finish manually."
+          );
+          if (maxReq > 0) {
+            break;
+          }
+          await sleep(idlePollMs);
+          continue;
+        }
         await runFinalPassIfNeeded();
         writeLog("FLOW: active queues empty");
         if (maxReq > 0) {
@@ -1192,7 +1212,7 @@ async function main() {
       }
 
       const result = await processRequirement({ name, fastBypass });
-      if (["released", "to-clarify", "need-to-check", "blocked", "none"].includes(result)) {
+      if (["released", "for-review", "to-clarify", "need-to-check", "blocked", "none"].includes(result)) {
         writeLog(`FLOW: terminal req=${name} status=${result}`);
         state.processed += 1;
       } else if (result === "pending") {
@@ -1220,6 +1240,17 @@ async function main() {
           break;
         }
         writeLog(`FLOW: waiting ${idlePollSeconds}s before next selected check`);
+        await sleep(idlePollMs);
+        continue;
+      }
+
+      if (countFiles(queue.selected) === 0) {
+        writeLog(
+          "FLOW: active requirements exist outside selected; run starts from selected only. Move items back to selected or finish manually."
+        );
+        if (maxReq > 0) {
+          break;
+        }
         await sleep(idlePollMs);
         continue;
       }
@@ -1289,13 +1320,13 @@ async function main() {
               scriptPath: devAgent.scriptPath,
               args: ["--auto", "--requirement", file],
               reqName: name,
-              successPaths: [path.join(queue.qa, name), path.join(queue.blocked, name)],
+              successPaths: [
+                path.join(queue.qa, name),
+                path.join(queue.toClarify, name),
+              ],
             });
           },
-          terminalCheck: (name) => {
-            const p = getRequirementPaths(name);
-            return fs.existsSync(p.blocked) ? "blocked" : "";
-          },
+          terminalCheck: (name) => terminalStateFor(name),
         });
 
         const planningAfter = countPlanningQueues();
@@ -1323,13 +1354,15 @@ async function main() {
             scriptPath: scripts.QA,
             args: ["--auto", "--requirement", file],
             reqName: name,
-            successPaths: [path.join(queue.sec, name), path.join(queue.needToCheck, name)],
+            successPaths: [
+              path.join(queue.sec, name),
+              path.join(queue.toClarify, name),
+              path.join(queue.blocked, name),
+              path.join(queue.needToCheck, name),
+            ],
           });
         },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
-        },
+        terminalCheck: (name) => terminalStateFor(name),
       });
 
       if (maxReq > 0 && state.processed >= maxReq) {
@@ -1345,13 +1378,15 @@ async function main() {
             scriptPath: scripts.SEC,
             args: ["--auto", "--requirement", file],
             reqName: name,
-            successPaths: [path.join(queue.ux, name), path.join(queue.needToCheck, name)],
+            successPaths: [
+              path.join(queue.ux, name),
+              path.join(queue.toClarify, name),
+              path.join(queue.blocked, name),
+              path.join(queue.needToCheck, name),
+            ],
           });
         },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
-        },
+        terminalCheck: (name) => terminalStateFor(name),
       });
 
       if (maxReq > 0 && state.processed >= maxReq) {
@@ -1367,13 +1402,15 @@ async function main() {
             scriptPath: scripts.UX,
             args: ["--auto", "--requirement", file],
             reqName: name,
-            successPaths: [path.join(queue.deploy, name), path.join(queue.needToCheck, name)],
+            successPaths: [
+              path.join(queue.deploy, name),
+              path.join(queue.toClarify, name),
+              path.join(queue.blocked, name),
+              path.join(queue.needToCheck, name),
+            ],
           });
         },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
-        },
+        terminalCheck: (name) => terminalStateFor(name),
       });
 
       if (maxReq > 0 && state.processed >= maxReq) {
@@ -1467,6 +1504,17 @@ async function main() {
         continue;
       }
 
+      if (countFiles(queue.selected) === 0) {
+        writeLog(
+          "FLOW: active requirements exist outside selected; run starts from selected only. Move items back to selected or finish manually."
+        );
+        if (maxReq > 0) {
+          break;
+        }
+        await sleep(idlePollMs);
+        continue;
+      }
+
       await processQueueStage({
         inputDir: queue.selected,
         runOne: async ({ file, name }) => {
@@ -1516,13 +1564,13 @@ async function main() {
             scriptPath: devAgent.scriptPath,
             args: ["--auto", "--requirement", file],
             reqName: name,
-            successPaths: [path.join(queue.qa, name), path.join(queue.blocked, name)],
+            successPaths: [
+              path.join(queue.qa, name),
+              path.join(queue.toClarify, name),
+            ],
           });
         },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.blocked) ? "blocked" : "";
-        },
+        terminalCheck: (name) => terminalStateFor(name),
       });
 
       await processQueueStage({
@@ -1533,13 +1581,15 @@ async function main() {
             scriptPath: scripts.QA,
             args: ["--auto", "--requirement", file],
             reqName: name,
-            successPaths: [path.join(queue.sec, name), path.join(queue.needToCheck, name)],
+            successPaths: [
+              path.join(queue.sec, name),
+              path.join(queue.toClarify, name),
+              path.join(queue.blocked, name),
+              path.join(queue.needToCheck, name),
+            ],
           });
         },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
-        },
+        terminalCheck: (name) => terminalStateFor(name),
       });
 
       await processQueueStage({
@@ -1550,13 +1600,15 @@ async function main() {
             scriptPath: scripts.SEC,
             args: ["--auto", "--requirement", file],
             reqName: name,
-            successPaths: [path.join(queue.ux, name), path.join(queue.needToCheck, name)],
+            successPaths: [
+              path.join(queue.ux, name),
+              path.join(queue.toClarify, name),
+              path.join(queue.blocked, name),
+              path.join(queue.needToCheck, name),
+            ],
           });
         },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
-        },
+        terminalCheck: (name) => terminalStateFor(name),
       });
 
       await processQueueStage({
@@ -1567,13 +1619,15 @@ async function main() {
             scriptPath: scripts.UX,
             args: ["--auto", "--requirement", file],
             reqName: name,
-            successPaths: [path.join(queue.deploy, name), path.join(queue.needToCheck, name)],
+            successPaths: [
+              path.join(queue.deploy, name),
+              path.join(queue.toClarify, name),
+              path.join(queue.blocked, name),
+              path.join(queue.needToCheck, name),
+            ],
           });
         },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
-        },
+        terminalCheck: (name) => terminalStateFor(name),
       });
 
       await processQueueStage({

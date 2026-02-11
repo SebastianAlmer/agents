@@ -19,11 +19,12 @@ Requirement mode (`Final pass: false`)
 2) Fix requirement-scoped issues where needed.
 3) Update requirement:
    - add `Security Results`
-   - optional `Security Findings` for unresolved blockers
+   - optional `Security Findings` for unresolved issues
    - add `Changes:` line
 4) Decision:
    - pass: move to `ux`, status `ux`
-   - fail: move to `need-to-check`, status `need-to-check`
+   - hard blocker (security/compliance/critical violation): move to `blocked`, status `blocked`
+   - unclear, follow-up questions, or non-blocking findings: move to `to-clarify`, status `to-clarify`
 
 Final mode (`Final pass: true`)
 - Perform global final security sanity pass.
@@ -38,5 +39,5 @@ Logging
 Print short progress lines, e.g.:
 - `SEC: reading ...`
 - `SEC: checking security ...`
-- `SEC: moving to ux/need-to-check ...`
+- `SEC: moving to ux/to-clarify/blocked ...`
 - `SEC: final pass summary ...`

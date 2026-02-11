@@ -20,11 +20,12 @@ Requirement mode (`Final pass: false`)
 3) Fix requirement-scoped issues if needed.
 4) Update requirement:
    - add `QA Results`
-   - optional `QA Findings` for unresolved blockers
+   - optional `QA Findings` for unresolved issues
    - add `Changes:` line
 5) Decision:
    - pass: move to `sec`, status `sec`
-   - fail: move to `need-to-check`, status `need-to-check`
+   - hard blocker (security/compliance/critical quality violation): move to `blocked`, status `blocked`
+   - unclear, follow-up questions, or non-blocking findings: move to `to-clarify`, status `to-clarify`
 
 Final mode (`Final pass: true`)
 - Perform a global QA sanity pass for released scope.
@@ -39,5 +40,5 @@ Logging
 Print short progress lines, e.g.:
 - `QA: reading ...`
 - `QA: running checks ...`
-- `QA: moving to sec/need-to-check ...`
+- `QA: moving to sec/to-clarify/blocked ...`
 - `QA: final pass summary ...`

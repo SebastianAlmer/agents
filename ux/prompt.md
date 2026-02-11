@@ -19,11 +19,12 @@ Requirement mode (`Final pass: false`)
 2) Fix requirement-scoped UX issues where needed.
 3) Update requirement:
    - add `UX Results`
-   - optional `UX Findings` for unresolved blockers
+   - optional `UX Findings` for unresolved issues
    - add `Changes:` line
 4) Decision:
    - pass: move to `deploy`, status `deploy`
-   - fail: move to `need-to-check`, status `need-to-check`
+   - hard blocker (critical UX/accessibility/compliance violation): move to `blocked`, status `blocked`
+   - unclear, follow-up questions, or non-blocking findings: move to `to-clarify`, status `to-clarify`
 
 Final mode (`Final pass: true`)
 - Perform global final UX sanity pass.
@@ -38,5 +39,5 @@ Logging
 Print short progress lines, e.g.:
 - `UX: reading ...`
 - `UX: checking UX/copy ...`
-- `UX: moving to deploy/need-to-check ...`
+- `UX: moving to deploy/to-clarify/blocked ...`
 - `UX: final pass summary ...`

@@ -77,7 +77,8 @@ async function main() {
   const docsDir = runtime.docsDir;
   const uxDir = runtime.queues.ux;
   const deployDir = runtime.queues.deploy;
-  const needToCheckDir = runtime.queues.needToCheck;
+  const clarifyDir = runtime.queues.toClarify;
+  const blockedDir = runtime.queues.blocked;
   const releasedDir = runtime.queues.released;
 
   let reqFile = "";
@@ -110,7 +111,8 @@ async function main() {
     console.log(`UX: using ${reqFile}`);
   }
   console.log(`UX: deploy dir ${deployDir}`);
-  console.log(`UX: need-to-check dir ${needToCheckDir}`);
+  console.log(`UX: to-clarify dir ${clarifyDir}`);
+  console.log(`UX: blocked dir ${blockedDir}`);
 
   const promptPath = path.join(agentRoot, "prompt.md");
   if (!fs.existsSync(promptPath)) {
@@ -120,7 +122,7 @@ async function main() {
 
   const reqLine = reqFile || "None";
   const gateLine = gateFile ? gateFile : "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nUX dir: ${uxDir}\nDeploy dir: ${deployDir}\nNeed-to-check dir: ${needToCheckDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nUX dir: ${uxDir}\nDeploy dir: ${deployDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.codexConfigPath);
