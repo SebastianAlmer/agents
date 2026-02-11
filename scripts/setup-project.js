@@ -336,12 +336,7 @@ function main() {
     ? args.qaChecks
     : Array.isArray(base.qa && base.qa.mandatory_checks) && base.qa.mandatory_checks.length > 0
       ? base.qa.mandatory_checks.map((x) => String(x))
-      : [
-          "node scripts/qa-gate.js",
-          "npm --prefix web-v2 run lint",
-          "npm --prefix web-v2 run build",
-          "npm --prefix app test",
-        ];
+      : [];
 
   const codex = {
     model: (base.codex && base.codex.model) || "gpt-5.3-codex",

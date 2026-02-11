@@ -43,12 +43,10 @@ use_be = false
 use_fs = true
 
 [qa]
-mandatory_checks = [
-  "node scripts/qa-gate.js",
-  "npm --prefix web-v2 run lint",
-  "npm --prefix web-v2 run build",
-  "npm --prefix app test"
-]
+# Project-specific QA baseline checks. Add checks that exist in your target repository.
+# Example:
+# mandatory_checks = ["npm test", "npm run lint"]
+mandatory_checks = []
 
 [codex]
 model = "gpt-5.3-codex"

@@ -121,7 +121,7 @@ async function main() {
   const mandatoryChecks = runtime.qa.mandatoryChecks || [];
   const checksText = mandatoryChecks
     .map((check, idx) => `${idx + 1}) ${check}`)
-    .join("\n");
+    .join("\n") || "none configured (set [qa].mandatory_checks in config.local.toml)";
 
   const reqLine = reqFile || "None";
   const gateLine = gateFile ? gateFile : "None";

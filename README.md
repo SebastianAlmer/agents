@@ -44,6 +44,9 @@ Important fields:
 - `[qa].mandatory_checks`: project-specific QA baseline checks.
 - `[codex]`: Codex runtime settings rendered to `.runtime/codex.generated.toml`.
 
+By default, setup writes `mandatory_checks = []` for project agnostic behavior.
+Set QA checks per project with `--qa-check ...` or by editing `config.local.toml`.
+
 You can override config file path with `AGENTS_CONFIG=/path/to/config.local.toml`.
 
 ## Requirement queues
