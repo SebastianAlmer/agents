@@ -17,3 +17,4 @@ Default queues:
 - `to-clarify`
 - `need-to-check`
 - `blocked`
+- `wont do`
