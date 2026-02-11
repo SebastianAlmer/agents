@@ -537,9 +537,7 @@ async function main() {
     const uxCount = countFiles(queue.ux);
     const deployCount = countFiles(queue.deploy);
     const releasedCount = countFiles(queue.released);
-    const forReviewCount = queue.forReview ? countFiles(queue.forReview) : 0;
     const clarifyCount = countFiles(queue.toClarify);
-    const needCheckCount = countFiles(queue.needToCheck);
     const blockedCount = countFiles(queue.blocked);
 
     const activeLine = state.currentPhase
@@ -556,9 +554,7 @@ async function main() {
       `STATUS: arch=${archCount} dev=${devCount} qa=${qaCount} sec=${secCount} ux=${uxCount}`
     );
     writeLog(`STATUS: deploy=${deployCount} released=${releasedCount}`);
-    writeLog(
-      `STATUS: for_review=${forReviewCount} clarify=${clarifyCount} need_to_check=${needCheckCount} blocked=${blockedCount}`
-    );
+    writeLog(`STATUS: clarify=${clarifyCount} blocked=${blockedCount}`);
     writeLog(`STATUS: active_pipeline=${countActivePipeline()}`);
   }
 
@@ -914,22 +910,14 @@ async function main() {
       ux: path.join(queue.ux, name),
       deploy: path.join(queue.deploy, name),
       released: path.join(queue.released, name),
-      forReview: queue.forReview ? path.join(queue.forReview, name) : "",
       clarify: path.join(queue.toClarify, name),
-      needCheck: path.join(queue.needToCheck, name),
       blocked: path.join(queue.blocked, name),
     };
   }
 
   function hasTerminalState(paths) {
-    if (paths.forReview && fs.existsSync(paths.forReview)) {
-      return "for-review";
-    }
     if (fs.existsSync(paths.clarify)) {
       return "to-clarify";
-    }
-    if (fs.existsSync(paths.needCheck)) {
-      return "need-to-check";
     }
     if (fs.existsSync(paths.blocked)) {
       return "blocked";
@@ -1014,7 +1002,7 @@ async function main() {
         scriptPath: scripts.QA,
         args: ["--auto", "--requirement", paths.qa],
         reqName: name,
-        successPaths: [paths.sec, paths.clarify, paths.blocked, paths.needCheck],
+        successPaths: [paths.sec, paths.clarify, paths.blocked],
       });
     }
 
@@ -1037,7 +1025,7 @@ async function main() {
           scriptPath: scripts.SEC,
           args: ["--auto", "--requirement", paths.sec],
           reqName: name,
-          successPaths: [paths.ux, paths.clarify, paths.blocked, paths.needCheck],
+          successPaths: [paths.ux, paths.clarify, paths.blocked],
         });
       }
     }
@@ -1061,7 +1049,7 @@ async function main() {
           scriptPath: scripts.UX,
           args: ["--auto", "--requirement", paths.ux],
           reqName: name,
-          successPaths: [paths.deploy, paths.clarify, paths.blocked, paths.needCheck],
+          successPaths: [paths.deploy, paths.clarify, paths.blocked],
         });
       }
     }
@@ -1212,7 +1200,7 @@ async function main() {
       }
 
       const result = await processRequirement({ name, fastBypass });
-      if (["released", "for-review", "to-clarify", "need-to-check", "blocked", "none"].includes(result)) {
+      if (["released", "to-clarify", "blocked", "none"].includes(result)) {
         writeLog(`FLOW: terminal req=${name} status=${result}`);
         state.processed += 1;
       } else if (result === "pending") {
@@ -1244,9 +1232,10 @@ async function main() {
         continue;
       }
 
-      if (countFiles(queue.selected) === 0) {
+      const planningAtStart = countPlanningQueues();
+      if (planningAtStart > 0 && countFiles(queue.selected) === 0) {
         writeLog(
-          "FLOW: active requirements exist outside selected; run starts from selected only. Move items back to selected or finish manually."
+          "FLOW: planning requirements exist outside selected; move items to selected or finish PO/ARCH/DEV queues manually."
         );
         if (maxReq > 0) {
           break;
@@ -1255,87 +1244,91 @@ async function main() {
         continue;
       }
 
-      // Phase 1: iterate PO -> ARCH -> DEV until upstream planning queues are empty.
-      while (countPlanningQueues() > 0) {
+      // Phase 1: process each selected requirement through PO -> ARCH -> DEV.
+      let upstreamMadeProgress = false;
+      while (true) {
         if (maxReq > 0 && state.processed >= maxReq) {
           break;
         }
 
-        const planningBefore = countPlanningQueues();
-
-        await processQueueStage({
-          inputDir: queue.selected,
-          runOne: async ({ file, name }) => {
-            await runPhase({
-              phase: "PO",
-              scriptPath: scripts.PO,
-              args: ["--auto", "--requirement", file],
-              reqName: name,
-              successPaths: [path.join(queue.arch, name), path.join(queue.toClarify, name)],
-            });
-          },
-          terminalCheck: (name) => {
-            const p = getRequirementPaths(name);
-            return fs.existsSync(p.clarify) ? "to-clarify" : "";
-          },
-        });
-
-        if (maxReq > 0 && state.processed >= maxReq) {
+        const selectedFile = getFirstFile(queue.selected);
+        if (!selectedFile) {
           break;
         }
 
-        await processQueueStage({
-          inputDir: queue.arch,
-          runOne: async ({ file, name }) => {
-            await runPhase({
-              phase: "ARCH",
-              scriptPath: scripts.ARCH,
-              args: ["--auto", "--requirement", file],
-              reqName: name,
-              successPaths: [path.join(queue.dev, name), path.join(queue.toClarify, name)],
-            });
-          },
-          terminalCheck: (name) => {
-            const p = getRequirementPaths(name);
-            return fs.existsSync(p.clarify) ? "to-clarify" : "";
-          },
+        upstreamMadeProgress = true;
+        const name = path.basename(selectedFile);
+
+        await runPhase({
+          phase: "PO",
+          scriptPath: scripts.PO,
+          args: ["--auto", "--requirement", selectedFile],
+          reqName: name,
+          successPaths: [path.join(queue.arch, name), path.join(queue.toClarify, name)],
         });
 
-        if (maxReq > 0 && state.processed >= maxReq) {
-          break;
+        let terminal = terminalStateFor(name);
+        if (terminal) {
+          writeLog(`FLOW: terminal req=${name} status=${terminal}`);
+          state.processed += 1;
+          continue;
         }
 
-        await processQueueStage({
-          inputDir: queue.dev,
-          runOne: async ({ file, name }) => {
-            const devAgent = resolveDevAgent(file);
-            if (state.detail || state.verbose) {
-              const reasonSuffix = devAgent.reasons.length > 0 ? ` reason=${devAgent.reasons.join(",")}` : "";
-              writeLog(
-                `FLOW: dev-routing req=${name} requested=${devAgent.requestedScope} selected=${devAgent.selectedScope} source=${devAgent.source}${reasonSuffix}`
-              );
-            }
-            await runPhase({
-              phase: devAgent.phase,
-              scriptPath: devAgent.scriptPath,
-              args: ["--auto", "--requirement", file],
-              reqName: name,
-              successPaths: [
-                path.join(queue.qa, name),
-                path.join(queue.toClarify, name),
-              ],
-            });
-          },
-          terminalCheck: (name) => terminalStateFor(name),
-        });
+        let p = getRequirementPaths(name);
+        if (fs.existsSync(p.arch)) {
+          await runPhase({
+            phase: "ARCH",
+            scriptPath: scripts.ARCH,
+            args: ["--auto", "--requirement", p.arch],
+            reqName: name,
+            successPaths: [path.join(queue.dev, name), path.join(queue.toClarify, name)],
+          });
+        }
 
-        const planningAfter = countPlanningQueues();
-        if (planningAfter >= planningBefore && planningAfter > 0) {
-          writeLog("FLOW: standard no progress in PO/ARCH/DEV phase, waiting for manual intervention");
-          if (maxReq > 0) {
-            break;
+        terminal = terminalStateFor(name);
+        if (terminal) {
+          writeLog(`FLOW: terminal req=${name} status=${terminal}`);
+          state.processed += 1;
+          continue;
+        }
+
+        p = getRequirementPaths(name);
+        if (fs.existsSync(p.dev)) {
+          const devAgent = resolveDevAgent(p.dev);
+          if (state.detail || state.verbose) {
+            const reasonSuffix = devAgent.reasons.length > 0 ? ` reason=${devAgent.reasons.join(",")}` : "";
+            writeLog(
+              `FLOW: dev-routing req=${name} requested=${devAgent.requestedScope} selected=${devAgent.selectedScope} source=${devAgent.source}${reasonSuffix}`
+            );
           }
-          await sleep(idlePollMs);
+          await runPhase({
+            phase: devAgent.phase,
+            scriptPath: devAgent.scriptPath,
+            args: ["--auto", "--requirement", p.dev],
+            reqName: name,
+            successPaths: [path.join(queue.qa, name), path.join(queue.toClarify, name)],
+          });
+        }
+
+        terminal = terminalStateFor(name);
+        if (terminal) {
+          writeLog(`FLOW: terminal req=${name} status=${terminal}`);
+          state.processed += 1;
+          continue;
+        }
+
+        p = getRequirementPaths(name);
+        if (
+          !fs.existsSync(p.qa) &&
+          (fs.existsSync(p.selected) || fs.existsSync(p.arch) || fs.existsSync(p.dev))
+        ) {
+          writeLog(
+            `FLOW: standard no progress for req=${name} in PO/ARCH/DEV chain; waiting for manual intervention`
+          );
+          break;
+        }
+
+        if (maxReq > 0 && state.processed >= maxReq) {
           break;
         }
       }
@@ -1343,6 +1336,18 @@ async function main() {
       if (maxReq > 0 && state.processed >= maxReq) {
         writeLog(`FLOW: max req reached (${state.processed})`);
         break;
+      }
+
+      const planningLeft = countPlanningQueues();
+      if (planningLeft > 0) {
+        if (!upstreamMadeProgress) {
+          writeLog("FLOW: standard no progress in PO/ARCH/DEV phase, waiting for manual intervention");
+        }
+        if (maxReq > 0) {
+          break;
+        }
+        await sleep(idlePollMs);
+        continue;
       }
 
       // Phase 2: one global QA -> SEC -> UX -> DEPLOY pass over accumulated work.
@@ -1358,7 +1363,6 @@ async function main() {
               path.join(queue.sec, name),
               path.join(queue.toClarify, name),
               path.join(queue.blocked, name),
-              path.join(queue.needToCheck, name),
             ],
           });
         },
@@ -1382,7 +1386,6 @@ async function main() {
               path.join(queue.ux, name),
               path.join(queue.toClarify, name),
               path.join(queue.blocked, name),
-              path.join(queue.needToCheck, name),
             ],
           });
         },
@@ -1406,7 +1409,6 @@ async function main() {
               path.join(queue.deploy, name),
               path.join(queue.toClarify, name),
               path.join(queue.blocked, name),
-              path.join(queue.needToCheck, name),
             ],
           });
         },
@@ -1585,7 +1587,6 @@ async function main() {
               path.join(queue.sec, name),
               path.join(queue.toClarify, name),
               path.join(queue.blocked, name),
-              path.join(queue.needToCheck, name),
             ],
           });
         },
@@ -1604,7 +1605,6 @@ async function main() {
               path.join(queue.ux, name),
               path.join(queue.toClarify, name),
               path.join(queue.blocked, name),
-              path.join(queue.needToCheck, name),
             ],
           });
         },
@@ -1623,7 +1623,6 @@ async function main() {
               path.join(queue.deploy, name),
               path.join(queue.toClarify, name),
               path.join(queue.blocked, name),
-              path.join(queue.needToCheck, name),
             ],
           });
         },

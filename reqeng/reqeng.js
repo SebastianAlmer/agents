@@ -94,7 +94,7 @@ async function main() {
   const prompt = fs.readFileSync(promptPath, "utf8");
 
   const reqPathLine = reqPath || "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqPathLine}\nRequirements root: ${requirementsRoot}\nRefinement dir: ${refinementDir}\nBacklog dir: ${backlogDir}\nSelected dir: ${selectedDir}\nDocs dir: ${docsDir}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqPathLine}\nRequirements root: ${requirementsRoot}\nRefinement dir: ${refinementDir}\nBacklog dir: ${backlogDir}\nSelected dir: ${selectedDir}\nDocs dir: ${docsDir}\nReqEng routing policy (outside run.js):\n- unclear/incomplete/conflicting -> refinement (status refinement)\n- clear but not immediate -> backlog (status backlog)\n- clear and immediate -> selected (status selected)\n- never route ReqEng output to arch/dev/qa/sec/ux/deploy/released/to-clarify/blocked queues\n`;
 
   const configArgs = readConfigArgs(runtime.codexConfigPath);
 
@@ -135,6 +135,9 @@ async function main() {
   if (reqPath) {
     console.log(`REQENG: requirement ${reqPath}`);
   }
+  console.log(`REQENG: refinement dir ${refinementDir}`);
+  console.log(`REQENG: backlog dir ${backlogDir}`);
+  console.log(`REQENG: selected dir ${selectedDir}`);
 
   const verbose = { value: false };
   const detail = { value: false };

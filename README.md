@@ -19,6 +19,10 @@ It is project-agnostic: project-specific paths and defaults are configured local
 - `npm run flow -- --flow bulk`
 - `npm run flow -- --flow fast`
 
+3) Optional: requirements discussion/triage with ReqEng:
+- `npm run reqeng`
+- `npm run reqeng -- --requirement requirements/refinement/REQ-NEW-example.md`
+
 ### Windows
 
 Use the same Node commands from PowerShell, CMD, or Git Bash.
@@ -27,6 +31,8 @@ Use the same Node commands from PowerShell, CMD, or Git Bash.
   - `npm run setup -- --repo-root "C:\\git\\my-project"`
 - Run:
   - `npm run flow -- --flow standard`
+- ReqEng:
+  - `npm run reqeng -- --requirement requirements\\refinement\\REQ-NEW-example.md`
 
 ## Local config
 
@@ -56,7 +62,6 @@ Default queues under `requirements/`:
 - `refinement`
 - `backlog`
 - `selected`
-- `for_review`
 - `arch`
 - `dev`
 - `qa`
@@ -65,7 +70,6 @@ Default queues under `requirements/`:
 - `deploy`
 - `released`
 - `to-clarify`
-- `need-to-check`
 - `blocked`
 
 Queue folder structure is tracked; queue file content is ignored by git.
@@ -82,12 +86,18 @@ Agent thread/session files are written to `.runtime/threads/` and are ignored by
 - Regularly sweep `requirements/to-clarify` with an AI chat to resolve open questions quickly, then move clarified items to `selected` (delivery-ready) or back to `backlog` (needs planning).
 - `QA`/`SEC`/`UX` use `blocked` only for hard blockers. Non-blocking findings/questions go to `to-clarify`.
 
+ReqEng triage rules (outside `run.js`):
+- unclear/incomplete/conflicting requirement state: `refinement`
+- clear but not intended for immediate implementation: `backlog`
+- clear and intended for immediate implementation: `selected`
+- ReqEng outcomes should not be routed to run/review queues (`arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, `blocked`)
+
 ## Flows
 
 ### `standard` (default)
 
 Two-phase cycle:
-1. Upstream phase (iterative until empty): `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa`
+1. Upstream phase (per requirement): each item runs `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa` before the next selected item starts
 2. Downstream phase (single global pass): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY -> released`
 
 After active queues are empty, final global pass runs:
@@ -100,7 +110,7 @@ Only if all QA/SEC/UX gates pass, final push may run (config-dependent).
 
 ### `detailed`
 
-Legacy per-requirement deep pipeline:
+Per-requirement deep pipeline:
 1. `selected -> PO -> arch`
 2. `arch -> ARCH -> dev`
 3. `dev -> DEV_* -> qa`
@@ -213,4 +223,3 @@ Requirement-level human-readable sections remain required (`QA Results`, `Securi
 - `to-clarify` is also used for unclear DEV/QA/SEC/UX outcomes and follow-up questions.
 - `DEV_*` routes only to `qa` or `to-clarify`; it should not use `blocked`.
 - `blocked` is reserved for hard blockers (for example security/compliance violations).
-- `need-to-check` remains available for legacy/manual usage but is not the primary review-fail target.

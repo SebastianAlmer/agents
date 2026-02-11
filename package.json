@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node run.js",
     "flow": "node run.js",
-    "setup": "node scripts/setup-project.js"
+    "setup": "node scripts/setup-project.js",
+    "reqeng": "node reqeng/reqeng.js"
   }
 }
