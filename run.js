@@ -71,6 +71,10 @@ function parseArgs(argv) {
       args.flow = "standard";
       continue;
     }
+    if (arg === "--detailed") {
+      args.flow = "detailed";
+      continue;
+    }
     if (arg === "--bulk") {
       args.flow = "bulk";
       continue;
@@ -101,7 +105,7 @@ function parseArgs(argv) {
       if (value === "lean" || value === "compact" || value === "fast") {
         args.flow = "fast";
       } else if (value === "full") {
-        args.flow = "standard";
+        args.flow = "detailed";
       }
       continue;
     }
@@ -110,7 +114,7 @@ function parseArgs(argv) {
       if (value === "lean" || value === "compact" || value === "fast") {
         args.flow = "fast";
       } else if (value === "full") {
-        args.flow = "standard";
+        args.flow = "detailed";
       }
       continue;
     }
@@ -192,7 +196,7 @@ function isRetryable(stderrText) {
 
 function printUsage() {
   console.log(
-    "Usage: node run.js [--flow standard|bulk|fast] [--preflight hard|soft|none|snapshot] [--max-req N] [--verbose|--no-verbose] [--detail|--no-detail]"
+    "Usage: node run.js [--flow standard|detailed|bulk|fast] [--preflight hard|soft|none|snapshot] [--max-req N] [--verbose|--no-verbose] [--detail|--no-detail]"
   );
 }
 
@@ -236,7 +240,7 @@ function compareVersions(a, b) {
 
 function normalizeFlow(value, fallback) {
   const v = String(value || fallback || "").toLowerCase();
-  return ["standard", "bulk", "fast"].includes(v) ? v : fallback;
+  return ["standard", "detailed", "bulk", "fast"].includes(v) ? v : fallback;
 }
 
 function normalizePreflight(value, fallback) {
@@ -1134,7 +1138,7 @@ async function main() {
   }
 
   async function runFinalPassIfNeeded() {
-    if (flow !== "standard") {
+    if (flow !== "standard" && flow !== "detailed") {
       return;
     }
     if (releasedSinceFinal.size === 0) {
@@ -1160,7 +1164,7 @@ async function main() {
     releasedSinceFinal.clear();
   }
 
-  async function runStandardOrFast() {
+  async function runDetailedOrFast() {
     const stageOrder = ["deploy", "ux", "sec", "qa", "dev", "arch", "selected"];
     const fastBypass = flow === "fast";
 
@@ -1193,6 +1197,229 @@ async function main() {
         state.processed += 1;
       } else if (result === "pending") {
         writeLog(`FLOW: req=${name} remains pending in active pipeline`);
+      }
+    }
+  }
+
+  function countPlanningQueues() {
+    return countFiles(queue.selected) + countFiles(queue.arch) + countFiles(queue.dev);
+  }
+
+  async function runStandard() {
+    while (true) {
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      const before = countActivePipeline();
+      if (before === 0) {
+        await runFinalPassIfNeeded();
+        writeLog("FLOW: active queues empty");
+        if (maxReq > 0) {
+          break;
+        }
+        writeLog(`FLOW: waiting ${idlePollSeconds}s before next selected check`);
+        await sleep(idlePollMs);
+        continue;
+      }
+
+      // Phase 1: iterate PO -> ARCH -> DEV until upstream planning queues are empty.
+      while (countPlanningQueues() > 0) {
+        if (maxReq > 0 && state.processed >= maxReq) {
+          break;
+        }
+
+        const planningBefore = countPlanningQueues();
+
+        await processQueueStage({
+          inputDir: queue.selected,
+          runOne: async ({ file, name }) => {
+            await runPhase({
+              phase: "PO",
+              scriptPath: scripts.PO,
+              args: ["--auto", "--requirement", file],
+              reqName: name,
+              successPaths: [path.join(queue.arch, name), path.join(queue.toClarify, name)],
+            });
+          },
+          terminalCheck: (name) => {
+            const p = getRequirementPaths(name);
+            return fs.existsSync(p.clarify) ? "to-clarify" : "";
+          },
+        });
+
+        if (maxReq > 0 && state.processed >= maxReq) {
+          break;
+        }
+
+        await processQueueStage({
+          inputDir: queue.arch,
+          runOne: async ({ file, name }) => {
+            await runPhase({
+              phase: "ARCH",
+              scriptPath: scripts.ARCH,
+              args: ["--auto", "--requirement", file],
+              reqName: name,
+              successPaths: [path.join(queue.dev, name), path.join(queue.toClarify, name)],
+            });
+          },
+          terminalCheck: (name) => {
+            const p = getRequirementPaths(name);
+            return fs.existsSync(p.clarify) ? "to-clarify" : "";
+          },
+        });
+
+        if (maxReq > 0 && state.processed >= maxReq) {
+          break;
+        }
+
+        await processQueueStage({
+          inputDir: queue.dev,
+          runOne: async ({ file, name }) => {
+            const devAgent = resolveDevAgent(file);
+            if (state.detail || state.verbose) {
+              const reasonSuffix = devAgent.reasons.length > 0 ? ` reason=${devAgent.reasons.join(",")}` : "";
+              writeLog(
+                `FLOW: dev-routing req=${name} requested=${devAgent.requestedScope} selected=${devAgent.selectedScope} source=${devAgent.source}${reasonSuffix}`
+              );
+            }
+            await runPhase({
+              phase: devAgent.phase,
+              scriptPath: devAgent.scriptPath,
+              args: ["--auto", "--requirement", file],
+              reqName: name,
+              successPaths: [path.join(queue.qa, name), path.join(queue.blocked, name)],
+            });
+          },
+          terminalCheck: (name) => {
+            const p = getRequirementPaths(name);
+            return fs.existsSync(p.blocked) ? "blocked" : "";
+          },
+        });
+
+        const planningAfter = countPlanningQueues();
+        if (planningAfter >= planningBefore && planningAfter > 0) {
+          writeLog("FLOW: standard no progress in PO/ARCH/DEV phase, waiting for manual intervention");
+          if (maxReq > 0) {
+            break;
+          }
+          await sleep(idlePollMs);
+          break;
+        }
+      }
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      // Phase 2: one global QA -> SEC -> UX -> DEPLOY pass over accumulated work.
+      await processQueueStage({
+        inputDir: queue.qa,
+        runOne: async ({ file, name }) => {
+          await runPhase({
+            phase: "QA",
+            scriptPath: scripts.QA,
+            args: ["--auto", "--requirement", file],
+            reqName: name,
+            successPaths: [path.join(queue.sec, name), path.join(queue.needToCheck, name)],
+          });
+        },
+        terminalCheck: (name) => {
+          const p = getRequirementPaths(name);
+          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
+        },
+      });
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      await processQueueStage({
+        inputDir: queue.sec,
+        runOne: async ({ file, name }) => {
+          await runPhase({
+            phase: "SEC",
+            scriptPath: scripts.SEC,
+            args: ["--auto", "--requirement", file],
+            reqName: name,
+            successPaths: [path.join(queue.ux, name), path.join(queue.needToCheck, name)],
+          });
+        },
+        terminalCheck: (name) => {
+          const p = getRequirementPaths(name);
+          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
+        },
+      });
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      await processQueueStage({
+        inputDir: queue.ux,
+        runOne: async ({ file, name }) => {
+          await runPhase({
+            phase: "UX",
+            scriptPath: scripts.UX,
+            args: ["--auto", "--requirement", file],
+            reqName: name,
+            successPaths: [path.join(queue.deploy, name), path.join(queue.needToCheck, name)],
+          });
+        },
+        terminalCheck: (name) => {
+          const p = getRequirementPaths(name);
+          return fs.existsSync(p.needCheck) ? "need-to-check" : "";
+        },
+      });
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      await processQueueStage({
+        inputDir: queue.deploy,
+        runOne: async ({ file, name }) => {
+          await runPhase({
+            phase: "DEPLOY",
+            scriptPath: scripts.DEPLOY,
+            args: ["--auto", "--requirement", file],
+            reqName: name,
+            successPaths: [path.join(queue.released, name)],
+          });
+          const p = getRequirementPaths(name);
+          if (fs.existsSync(p.released)) {
+            gitCommitRequirement(name);
+          }
+        },
+        terminalCheck: (name) => {
+          const p = getRequirementPaths(name);
+          return fs.existsSync(p.released) ? "released" : "";
+        },
+      });
+
+      const after = countActivePipeline();
+      if (after === 0) {
+        await runFinalPassIfNeeded();
+        writeLog("FLOW: active queues empty");
+        if (maxReq > 0) {
+          break;
+        }
+        writeLog(`FLOW: waiting ${idlePollSeconds}s before next selected check`);
+        await sleep(idlePollMs);
+        continue;
+      }
+
+      if (after >= before) {
+        writeLog("FLOW: standard no progress detected, waiting for manual intervention");
+        if (maxReq > 0) {
+          break;
+        }
+        await sleep(idlePollMs);
       }
     }
   }
@@ -1500,8 +1727,10 @@ async function main() {
 
     if (flow === "bulk") {
       await runBulk();
+    } else if (flow === "standard") {
+      await runStandard();
     } else {
-      await runStandardOrFast();
+      await runDetailedOrFast();
     }
 
     await runFinalPassIfNeeded();

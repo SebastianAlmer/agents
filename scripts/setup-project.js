@@ -212,7 +212,7 @@ function deepMerge(base, override) {
 
 function usage() {
   console.log(
-    "Usage: node scripts/setup-project.js --repo-root /abs/path [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--preflight hard|soft|none|snapshot] [--qa-check <cmd>]"
+    "Usage: node scripts/setup-project.js --repo-root /abs/path [--flow standard|detailed|bulk|fast] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--preflight hard|soft|none|snapshot] [--qa-check <cmd>]"
   );
 }
 
@@ -274,7 +274,7 @@ function main() {
 
   const flow = normalizeEnum(
     args.flow || (base.run_defaults && base.run_defaults.flow) || "standard",
-    ["standard", "bulk", "fast"],
+    ["standard", "detailed", "bulk", "fast"],
     "standard"
   );
 

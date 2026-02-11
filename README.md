@@ -15,6 +15,7 @@ It is project-agnostic: project-specific paths and defaults are configured local
 2) Run the flow:
 - `npm run flow`
 - `npm run flow -- --flow standard`
+- `npm run flow -- --flow detailed`
 - `npm run flow -- --flow bulk`
 - `npm run flow -- --flow fast`
 
@@ -80,14 +81,9 @@ Agent thread/session files are written to `.runtime/threads/` and are ignored by
 
 ### `standard` (default)
 
-Per requirement pipeline:
-1. `selected -> PO -> arch`
-2. `arch -> ARCH -> dev`
-3. `dev -> DEV_* -> qa`
-4. `qa -> QA -> sec`
-5. `sec -> SEC -> ux`
-6. `ux -> UX -> deploy`
-7. `deploy -> DEPLOY -> released`
+Two-phase cycle:
+1. Upstream phase (iterative until empty): `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa`
+2. Downstream phase (single global pass): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY -> released`
 
 After active queues are empty, final global pass runs:
 - `QA final` (must output gate `pass`)
@@ -96,6 +92,17 @@ After active queues are empty, final global pass runs:
 - `DEPLOY final`
 
 Only if all QA/SEC/UX gates pass, final push may run (config-dependent).
+
+### `detailed`
+
+Legacy per-requirement deep pipeline:
+1. `selected -> PO -> arch`
+2. `arch -> ARCH -> dev`
+3. `dev -> DEV_* -> qa`
+4. `qa -> QA -> sec`
+5. `sec -> SEC -> ux`
+6. `ux -> UX -> deploy`
+7. `deploy -> DEPLOY -> released`
 
 ### `bulk`
 
@@ -114,7 +121,7 @@ Skips architecture and deep review steps:
 ## CLI switches and config defaults
 
 CLI switches:
-- `--flow standard|bulk|fast`
+- `--flow standard|detailed|bulk|fast`
 - `--preflight hard|soft|none|snapshot`
 - `--max-req N`
 - `--verbose | --no-verbose`
