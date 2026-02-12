@@ -16,7 +16,14 @@ const {
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
 function parseArgs(argv) {
-  const args = { requirement: "", auto: false, finalPass: false, gateFile: "" };
+  const args = {
+    requirement: "",
+    auto: false,
+    finalPass: false,
+    gateFile: "",
+    reviewOnly: false,
+    decisionFile: "",
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const normalized = arg.toLowerCase();
@@ -30,6 +37,15 @@ function parseArgs(argv) {
     }
     if (normalized === "--gate-file" || normalized === "-gate-file") {
       args.gateFile = argv[i + 1] || "";
+      i++;
+      continue;
+    }
+    if (normalized === "--review-only" || normalized === "-review-only") {
+      args.reviewOnly = true;
+      continue;
+    }
+    if (normalized === "--decision-file" || normalized === "-decision-file") {
+      args.decisionFile = argv[i + 1] || "";
       i++;
       continue;
     }
@@ -61,12 +77,39 @@ function validateGateFile(gateFile) {
   }
 }
 
+function validateReviewDecisionFile(decisionFile) {
+  if (!decisionFile) {
+    throw new Error("QA review-only requires --decision-file");
+  }
+  if (!fs.existsSync(decisionFile)) {
+    throw new Error(`QA review decision file missing: ${decisionFile}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(decisionFile, "utf8"));
+  } catch (err) {
+    throw new Error(`QA review decision file invalid JSON: ${err.message}`);
+  }
+  const status = String(parsed.status || "").toLowerCase();
+  if (!["pass", "clarify", "block"].includes(status)) {
+    throw new Error(`QA review decision has invalid status: ${status || "<empty>"}`);
+  }
+  const summary = String(parsed.summary || "").trim();
+  if (!summary) {
+    throw new Error("QA review decision requires non-empty summary");
+  }
+}
+
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
-  const { requirement, auto, finalPass, gateFile } = parsed;
+  const { requirement, auto, finalPass, gateFile, reviewOnly, decisionFile } = parsed;
+
+  if (reviewOnly && finalPass) {
+    throw new Error("QA --review-only cannot be combined with --final-pass");
+  }
 
   const agentRoot = __dirname;
   const runtime = loadRuntimeConfig(path.resolve(agentRoot, ".."));
@@ -82,6 +125,10 @@ async function main() {
 
   let reqFile = "";
   if (!finalPass) {
+    if (reviewOnly && !requirement) {
+      throw new Error("QA --review-only requires --requirement");
+    }
+
     console.log(`QA: scan qa ${qaDir}`);
     if (requirement) {
       const reqPath = path.isAbsolute(requirement)
@@ -109,6 +156,7 @@ async function main() {
   if (reqFile) {
     console.log(`QA: using ${reqFile}`);
   }
+  console.log(`QA: review-only ${reviewOnly}`);
   console.log(`QA: sec dir ${secDir}`);
   console.log(`QA: to-clarify dir ${clarifyDir}`);
   console.log(`QA: blocked dir ${blockedDir}`);
@@ -126,7 +174,8 @@ async function main() {
 
   const reqLine = reqFile || "None";
   const gateLine = gateFile ? gateFile : "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
+  const decisionLine = decisionFile ? decisionFile : "None";
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.codexConfigPath);
@@ -190,6 +239,9 @@ async function main() {
 
   if (finalPass) {
     validateGateFile(gateFile);
+  }
+  if (reviewOnly) {
+    validateReviewDecisionFile(decisionFile);
   }
 
   if (result.threadId) {

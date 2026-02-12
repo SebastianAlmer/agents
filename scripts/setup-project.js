@@ -338,6 +338,26 @@ function main() {
       ? base.qa.mandatory_checks.map((x) => String(x))
       : [];
 
+  const reviewStrategy = normalizeEnum(
+    (base.review && base.review.strategy) || "bundle",
+    ["bundle", "classic"],
+    "bundle"
+  );
+  const reviewParallel = normalizeBool(
+    base.review && base.review.parallel,
+    true
+  );
+  const reviewDefaultRisk = normalizeEnum(
+    (base.review && base.review.default_risk) || "medium",
+    ["low", "medium", "high"],
+    "medium"
+  );
+  const reviewMediumScopePolicy = normalizeEnum(
+    (base.review && base.review.medium_scope_policy) || "single_specialist",
+    ["single_specialist", "full"],
+    "single_specialist"
+  );
+
   const codex = {
     model: (base.codex && base.codex.model) || "gpt-5.3-codex",
     approval_policy: (base.codex && base.codex.approval_policy) || "never",
@@ -388,6 +408,12 @@ function main() {
     "[qa]",
     `mandatory_checks = ${toTomlArray(qaChecks)}`,
     "",
+    "[review]",
+    `strategy = ${toTomlString(reviewStrategy)}`,
+    `parallel = ${toTomlBool(reviewParallel)}`,
+    `default_risk = ${toTomlString(reviewDefaultRisk)}`,
+    `medium_scope_policy = ${toTomlString(reviewMediumScopePolicy)}`,
+    "",
     "[codex]",
     `model = ${toTomlString(codex.model)}`,
     `approval_policy = ${toTomlString(codex.approval_policy)}`,
@@ -405,6 +431,7 @@ function main() {
   console.log(`- deploy.mode: ${deployMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
+  console.log(`- review: strategy=${reviewStrategy}, parallel=${reviewParallel}, default_risk=${reviewDefaultRisk}, medium_scope_policy=${reviewMediumScopePolicy}`);
   console.log("If you change dev_routing mode later, run setup-project again to realign defaults.");
 }
 

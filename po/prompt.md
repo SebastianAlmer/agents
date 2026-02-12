@@ -24,6 +24,8 @@ Decision
 Required structure updates
 - Keep/ensure YAML front matter: `id`, `title`, `status`, `source`.
 - Ensure front matter contains `implementation_scope`.
+- Set/refresh front matter `review_risk` as `low`, `medium`, or `high` based on expected review effort.
+- Optional: set front matter `review_scope` as `qa_only`, `qa_sec`, `qa_ux`, or `full` when you want to override default review routing.
 - Ensure sections:
   - Summary
   - Scope

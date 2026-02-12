@@ -16,7 +16,14 @@ const {
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
 function parseArgs(argv) {
-  const args = { requirement: "", auto: false, finalPass: false, gateFile: "" };
+  const args = {
+    requirement: "",
+    auto: false,
+    finalPass: false,
+    gateFile: "",
+    reviewOnly: false,
+    decisionFile: "",
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const normalized = arg.toLowerCase();
@@ -30,6 +37,15 @@ function parseArgs(argv) {
     }
     if (normalized === "--gate-file" || normalized === "-gate-file") {
       args.gateFile = argv[i + 1] || "";
+      i++;
+      continue;
+    }
+    if (normalized === "--review-only" || normalized === "-review-only") {
+      args.reviewOnly = true;
+      continue;
+    }
+    if (normalized === "--decision-file" || normalized === "-decision-file") {
+      args.decisionFile = argv[i + 1] || "";
       i++;
       continue;
     }
@@ -61,12 +77,39 @@ function validateGateFile(gateFile) {
   }
 }
 
+function validateReviewDecisionFile(decisionFile) {
+  if (!decisionFile) {
+    throw new Error("SEC review-only requires --decision-file");
+  }
+  if (!fs.existsSync(decisionFile)) {
+    throw new Error(`SEC review decision file missing: ${decisionFile}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(decisionFile, "utf8"));
+  } catch (err) {
+    throw new Error(`SEC review decision file invalid JSON: ${err.message}`);
+  }
+  const status = String(parsed.status || "").toLowerCase();
+  if (!["pass", "clarify", "block"].includes(status)) {
+    throw new Error(`SEC review decision has invalid status: ${status || "<empty>"}`);
+  }
+  const summary = String(parsed.summary || "").trim();
+  if (!summary) {
+    throw new Error("SEC review decision requires non-empty summary");
+  }
+}
+
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
-  const { requirement, auto, finalPass, gateFile } = parsed;
+  const { requirement, auto, finalPass, gateFile, reviewOnly, decisionFile } = parsed;
+
+  if (reviewOnly && finalPass) {
+    throw new Error("SEC --review-only cannot be combined with --final-pass");
+  }
 
   const agentRoot = __dirname;
   const runtime = loadRuntimeConfig(path.resolve(agentRoot, ".."));
@@ -82,6 +125,10 @@ async function main() {
 
   let reqFile = "";
   if (!finalPass) {
+    if (reviewOnly && !requirement) {
+      throw new Error("SEC --review-only requires --requirement");
+    }
+
     console.log(`SEC: scan sec ${secDir}`);
     if (requirement) {
       const reqPath = path.isAbsolute(requirement)
@@ -109,6 +156,7 @@ async function main() {
   if (reqFile) {
     console.log(`SEC: using ${reqFile}`);
   }
+  console.log(`SEC: review-only ${reviewOnly}`);
   console.log(`SEC: ux dir ${uxDir}`);
   console.log(`SEC: to-clarify dir ${clarifyDir}`);
   console.log(`SEC: blocked dir ${blockedDir}`);
@@ -121,7 +169,8 @@ async function main() {
 
   const reqLine = reqFile || "None";
   const gateLine = gateFile ? gateFile : "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nSec dir: ${secDir}\nUX dir: ${uxDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\n`;
+  const decisionLine = decisionFile ? decisionFile : "None";
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nSec dir: ${secDir}\nUX dir: ${uxDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.codexConfigPath);
@@ -185,6 +234,9 @@ async function main() {
 
   if (finalPass) {
     validateGateFile(gateFile);
+  }
+  if (reviewOnly) {
+    validateReviewDecisionFile(decisionFile);
   }
 
   if (result.threadId) {

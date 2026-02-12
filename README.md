@@ -49,9 +49,10 @@ Important fields:
 - `[dev_routing].mode`: `fullstack_only | split`.
 - `[dev_agents]`: enable/disable FE/BE/FS dev agents.
 - `[qa].mandatory_checks`: project-specific QA baseline checks.
+- `[review]`: review strategy (`bundle|classic`), parallel execution, and default risk routing.
 - `[codex]`: Codex runtime settings rendered to `.runtime/codex.generated.toml`.
 
-By default, setup writes `mandatory_checks = []` for project agnostic behavior.
+By default, setup writes `mandatory_checks = []` for project-agnostic behavior.
 Set QA checks per project with `--qa-check ...` or by editing `config.local.toml`.
 
 You can override config file path with `AGENTS_CONFIG=/path/to/config.local.toml`.
@@ -79,16 +80,16 @@ Agent thread/session files are written to `.runtime/threads/` and are ignored by
 Agent thread handling:
 - Each role keeps its own local thread file under `.runtime/threads/<role>/`.
 - On context overflow, the role thread is reset automatically and the turn is retried once.
-- In auto mode, a compact turn is attempted every 20 successful agent turns (default) via `codex exec resume <thread_id> \"/compact\"`. Override with env `CODEX_AUTO_COMPACT_EVERY` (`0` disables). Compact failures are logged as warnings and do not stop the flow.
+- In auto mode, a compact turn is attempted every 20 successful agent turns (default) via `codex exec resume <thread_id> "/compact"`.
+- Override compact interval with env `CODEX_AUTO_COMPACT_EVERY` (`0` disables).
 
 ## Requirement intake workflow
 
 - Drop unstructured incoming requirements (`Anforderungen`) into `requirements/refinement`.
 - Process refinement items with an AI chat (for example ReqEng) and convert them into backlog-ready requirements in `requirements/backlog`.
 - Before starting a flow run, move the relevant backlog package into `requirements/selected`.
-- The runner starts delivery processing from `selected`.
-- Unclear items from all stages should be moved to `to-clarify` (PO/ARCH/DEV and review follow-ups).
-- Regularly sweep `requirements/to-clarify` with an AI chat to resolve open questions quickly, then move clarified items to `selected` (delivery-ready), `backlog` (clear but later), or `refinement` (still unclear).
+- Unclear items from all stages should be moved to `to-clarify`.
+- Regularly sweep `requirements/to-clarify` with an AI chat, then move clarified items to `selected` (delivery-ready), `backlog` (clear but later), or `refinement` (still unclear).
 - `QA`/`SEC`/`UX` use `blocked` only for hard blockers. Non-blocking findings/questions go to `to-clarify`.
 
 ReqEng triage rules (outside `run.js`):
@@ -106,8 +107,10 @@ ReqEng triage rules (outside `run.js`):
 ### `standard` (default)
 
 Two-phase cycle:
-1. Upstream phase (per requirement): each item runs `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa` before the next selected item starts
-2. Downstream phase (single global pass): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY -> released`
+1. Upstream phase (per requirement): `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa`
+2. Downstream phase (single global pass):
+- default (`[review].strategy = "bundle"`): `qa -> review bundle (QA always, SEC/UX risk-based, optional parallel) -> deploy -> DEPLOY -> released`
+- fallback (`[review].strategy = "classic"`): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY -> released`
 
 After active queues are empty, final global pass runs:
 - `QA final` (must output gate `pass`)
@@ -146,6 +149,28 @@ Skips architecture and deep review steps:
 - bypasses `ARCH`, `SEC`, `UX`
 - keeps `PO -> DEV_* -> QA -> DEPLOY`
 
+## Review optimization (`standard`)
+
+Configured via `[review]`:
+- `strategy = "bundle"` (default): risk-based review bundle with aggregator.
+- `strategy = "classic"`: sequential review path (`QA -> SEC -> UX`).
+- `parallel = true|false`: run bundle reviewers in parallel or sequentially.
+- `default_risk = "low|medium|high"`: fallback risk if requirement has no explicit risk tag.
+- `medium_scope_policy = "single_specialist|full"`: controls medium-risk routing.
+- `single_specialist` means medium frontend scope routes to `QA+UX` and backend scope routes to `QA+SEC`.
+- `full` means medium scope routes to `QA+SEC+UX`.
+
+Bundle front matter hints (optional):
+- `review_risk` (or `risk` / `risk_level`): `low|medium|high`
+- `review_scope`: `qa_only|qa_sec|qa_ux|full`
+
+Bundle aggregation rules:
+- any reviewer returns `block` => move to `blocked`
+- else any reviewer returns `clarify` => move to `to-clarify`
+- else => move to `deploy`
+
+Runner writes a human-readable `Review Bundle Results` section into the requirement and updates front matter status before routing.
+
 ## CLI switches and config defaults
 
 CLI switches:
@@ -180,14 +205,8 @@ Default: `commit` (commit without immediate push).
 
 Configured via `[dev_routing]` and `[dev_agents]`.
 
-- `fullstack_only`:
-  - PO should set `implementation_scope: fullstack`
-  - runner routes all dev work to `DEV_FS`
-
-- `split`:
-  - PO sets `implementation_scope: frontend|backend|fullstack`
-  - runner routes to `DEV_FE`, `DEV_BE`, or `DEV_FS`
-  - PO may split a broad requirement into FE/BE requirements when useful
+- `fullstack_only`: PO should set `implementation_scope: fullstack`; runner routes all dev work to `DEV_FS`.
+- `split`: PO sets `implementation_scope: frontend|backend|fullstack`; runner routes to `DEV_FE`, `DEV_BE`, or `DEV_FS`. PO may split a broad requirement into FE/BE requirements when useful.
 
 If you change routing strategy, run setup script again.
 

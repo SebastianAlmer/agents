@@ -355,6 +355,40 @@ function normalizeRequirementScope(value) {
   return "";
 }
 
+function normalizeReviewRisk(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["low", "small", "minor", "trivial"].includes(normalized)) {
+    return "low";
+  }
+  if (["high", "critical", "major", "severe"].includes(normalized)) {
+    return "high";
+  }
+  if (["medium", "med", "normal", "default"].includes(normalized)) {
+    return "medium";
+  }
+  return "";
+}
+
+function normalizeReviewScopeHint(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return [];
+  }
+  if (["qa_only", "qa-only", "qa", "quick", "fast"].includes(normalized)) {
+    return ["QA"];
+  }
+  if (["qa_sec", "qa-sec", "sec", "security"].includes(normalized)) {
+    return ["QA", "SEC"];
+  }
+  if (["qa_ux", "qa-ux", "ux", "design"].includes(normalized)) {
+    return ["QA", "UX"];
+  }
+  if (["full", "full_review", "qa_sec_ux", "qa-sec-ux", "all"].includes(normalized)) {
+    return ["QA", "SEC", "UX"];
+  }
+  return [];
+}
+
 function writeJson(filePath, data) {
   ensureDir(path.dirname(filePath));
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
@@ -396,6 +430,14 @@ async function main() {
   const flow = normalizeFlow(cli.flow, runtime.runDefaults.flow || runtime.flow.defaultMode);
   const maxReq = Number.isFinite(cli.maxReq) ? cli.maxReq : runtime.runDefaults.maxReq;
   const preflightMode = normalizePreflight(cli.preflight, runtime.runDefaults.preflight);
+
+  const reviewStrategy = runtime.review && runtime.review.strategy === "classic" ? "classic" : "bundle";
+  const reviewParallel =
+    runtime.review && typeof runtime.review.parallel === "boolean" ? runtime.review.parallel : true;
+  const reviewDefaultRisk =
+    runtime.review && runtime.review.defaultRisk ? runtime.review.defaultRisk : "medium";
+  const reviewMediumScopePolicy =
+    runtime.review && runtime.review.mediumScopePolicy ? runtime.review.mediumScopePolicy : "single_specialist";
 
   const queue = runtime.queues;
   ensureQueueDirs(queue);
@@ -737,6 +779,354 @@ async function main() {
         }
       }
       throw err;
+    }
+  }
+
+  async function runAgentScriptDetached({ phase, scriptPath, args: agentArgs, reqName }) {
+    const phaseStart = Date.now();
+
+    const emitStatus = () => {
+      if (!state.verbose) {
+        writeLog(
+          `FLOW: ${phase} running req=${reqName} elapsed=${formatDuration(
+            Date.now() - phaseStart
+          )}`
+        );
+      }
+    };
+
+    if (state.verbose) {
+      writeLog(`FLOW: ${phase} start req=${reqName}`);
+    } else {
+      emitStatus();
+    }
+
+    const statusTimer = setInterval(emitStatus, 10000);
+    try {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (attempt > 0) {
+          writeLog(`FLOW: retrying ${phase} attempt ${attempt + 1}`);
+          await sleep(retryBaseDelay * attempt * 1000);
+        }
+
+        const suffix = attempt > 0 ? `-r${attempt + 1}` : "";
+        const timestamp = formatTimestamp(new Date());
+        const stdoutPath = path.join(logDir, `agent-${phase}-${timestamp}${suffix}.out`);
+        const stderrPath = path.join(logDir, `agent-${phase}-${timestamp}${suffix}.err`);
+
+        const { exitCode, stderrText } = await spawnAgent({
+          scriptPath,
+          args: agentArgs,
+          stdoutPath,
+          stderrPath,
+        });
+
+        if (exitCode === 0) {
+          writeLog(
+            `FLOW: ${phase} done req=${reqName} duration=${formatDuration(Date.now() - phaseStart)}`
+          );
+          return;
+        }
+
+        if (isRetryable(stderrText)) {
+          writeLog(
+            `FLOW: ${phase} network error detected; retrying (set CODEX_FLOW_RETRIES/CODEX_FLOW_RETRY_DELAY to adjust)`
+          );
+          continue;
+        }
+
+        throw new Error(
+          `${phase} failed for ${reqName} after ${formatDuration(Date.now() - phaseStart)}`
+        );
+      }
+    } finally {
+      clearInterval(statusTimer);
+    }
+  }
+
+  function sanitizePathToken(value) {
+    return String(value || "")
+      .replace(/[^A-Za-z0-9._-]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "req";
+  }
+
+  function setRequirementStatus(filePath, nextStatus) {
+    if (!filePath || !nextStatus || !fs.existsSync(filePath)) {
+      return;
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    if (!match) {
+      return;
+    }
+
+    let frontMatter = match[1];
+    if (/^status\s*:/m.test(frontMatter)) {
+      frontMatter = frontMatter.replace(/^status\s*:.*$/m, `status: ${nextStatus}`);
+    } else {
+      frontMatter = `${frontMatter}\nstatus: ${nextStatus}`;
+    }
+
+    const start = match.index || 0;
+    const end = start + match[0].length;
+    const updated = `---\n${frontMatter}\n---\n${raw.slice(end)}`;
+    fs.writeFileSync(filePath, updated, "utf8");
+  }
+
+  function escapeRegExp(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function upsertMarkdownSection(filePath, heading, lines) {
+    if (!filePath || !heading || !fs.existsSync(filePath)) {
+      return;
+    }
+    const content = fs.readFileSync(filePath, "utf8");
+    const body = Array.isArray(lines) ? lines.filter(Boolean).join("\n") : String(lines || "");
+    const block = `## ${heading}\n${body}`.trimEnd();
+    const escapedHeading = escapeRegExp(heading);
+    const sectionPattern = new RegExp(`\n## ${escapedHeading}\n[\\s\\S]*?(?=\n## [^\n]+\n|$)`, "m");
+
+    let next = content;
+    if (sectionPattern.test(next)) {
+      next = next.replace(sectionPattern, `\n${block}\n`);
+    } else {
+      next = next.endsWith("\n") ? next : `${next}\n`;
+      next = `${next}\n${block}\n`;
+    }
+    fs.writeFileSync(filePath, next, "utf8");
+  }
+
+  function deriveReviewPlan(reqPath) {
+    const fm = parseFrontMatter(reqPath);
+    const scopeCandidate =
+      fm.implementation_scope || fm.dev_scope || fm.scope || fm.implementation || "";
+    const scope = normalizeRequirementScope(scopeCandidate) || runtime.devRouting.defaultScope || "fullstack";
+
+    const explicitReviewRoles = normalizeReviewScopeHint(
+      fm.review_scope || fm.review_path || fm.review_mode || ""
+    );
+
+    const explicitRisk = normalizeReviewRisk(fm.review_risk || fm.risk_level || fm.risk || "");
+    const fallbackRisk = normalizeReviewRisk(reviewDefaultRisk) || "medium";
+    const risk = explicitRisk || fallbackRisk;
+
+    let roles = [];
+    let roleSource = "risk";
+
+    if (explicitReviewRoles.length > 0) {
+      roles = explicitReviewRoles;
+      roleSource = "front_matter_scope";
+    } else if (risk === "low") {
+      roles = ["QA"];
+    } else if (risk === "high") {
+      roles = ["QA", "SEC", "UX"];
+    } else if (reviewMediumScopePolicy === "full") {
+      roles = ["QA", "SEC", "UX"];
+    } else if (scope === "frontend") {
+      roles = ["QA", "UX"];
+    } else if (scope === "backend") {
+      roles = ["QA", "SEC"];
+    } else {
+      roles = ["QA", "SEC", "UX"];
+    }
+
+    const seen = new Set();
+    const deduped = [];
+    for (const role of ["QA", ...roles]) {
+      if (!role || seen.has(role)) {
+        continue;
+      }
+      seen.add(role);
+      deduped.push(role);
+    }
+
+    return {
+      risk,
+      scope,
+      roles: deduped,
+      riskSource: explicitRisk ? "front_matter" : "config_default",
+      roleSource,
+    };
+  }
+
+  function readReviewDecisionFile({ role, decisionFile, fallbackMessage }) {
+    if (!decisionFile || !fs.existsSync(decisionFile)) {
+      return {
+        role,
+        status: "clarify",
+        summary: fallbackMessage || "missing decision file",
+        findings: ["missing decision file"],
+      };
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(decisionFile, "utf8"));
+    } catch (err) {
+      return {
+        role,
+        status: "clarify",
+        summary: `invalid decision JSON: ${err.message}`,
+        findings: ["invalid decision file"],
+      };
+    }
+
+    const status = String(parsed.status || "").toLowerCase();
+    const normalizedStatus = ["pass", "clarify", "block"].includes(status)
+      ? status
+      : "clarify";
+    const summary = String(parsed.summary || "").trim() || "no summary";
+    const findings = Array.isArray(parsed.findings)
+      ? parsed.findings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+
+    return {
+      role,
+      status: normalizedStatus,
+      summary,
+      findings,
+    };
+  }
+
+  function aggregateReviewDecisions(decisions) {
+    const hasBlock = decisions.some((decision) => decision.status === "block");
+    if (hasBlock) {
+      return { targetQueue: queue.blocked, status: "blocked", label: "blocked" };
+    }
+
+    const hasClarify = decisions.some((decision) => decision.status === "clarify");
+    if (hasClarify) {
+      return { targetQueue: queue.toClarify, status: "to-clarify", label: "to-clarify" };
+    }
+
+    return { targetQueue: queue.deploy, status: "deploy", label: "deploy" };
+  }
+
+  async function runReviewBundleForRequirement({ file, name }) {
+    const plan = deriveReviewPlan(file);
+    const keepWorkspace = process.env.CODEX_KEEP_REVIEW_BUNDLE === "1";
+    const workspace = path.join(
+      runtime.agentsRoot,
+      ".runtime",
+      "review-bundle",
+      `${formatTimestamp(new Date())}-${sanitizePathToken(name)}`
+    );
+    ensureDir(workspace);
+
+    if (state.detail || state.verbose) {
+      writeLog(
+        `FLOW: review-plan req=${name} risk=${plan.risk} scope=${plan.scope} roles=${plan.roles.join(",")} risk_source=${plan.riskSource} role_source=${plan.roleSource} parallel=${reviewParallel}`
+      );
+    }
+
+    const roleScripts = {
+      QA: { phase: "QA-BUNDLE", scriptPath: scripts.QA },
+      SEC: { phase: "SEC-BUNDLE", scriptPath: scripts.SEC },
+      UX: { phase: "UX-BUNDLE", scriptPath: scripts.UX },
+    };
+
+    const tasks = plan.roles.map((role) => {
+      const token = String(role || "").toLowerCase();
+      return {
+        role,
+        script: roleScripts[role],
+        reqCopy: path.join(workspace, `${token}-${name}`),
+        decisionFile: path.join(workspace, `${token}.decision.json`),
+      };
+    });
+
+    for (const task of tasks) {
+      fs.copyFileSync(file, task.reqCopy);
+    }
+
+    const runTask = async (task) => {
+      if (!task.script || !task.script.scriptPath) {
+        return {
+          role: task.role,
+          ok: false,
+          error: `missing script mapping for role ${task.role}`,
+          decisionFile: task.decisionFile,
+        };
+      }
+      try {
+        await runAgentScriptDetached({
+          phase: task.script.phase,
+          scriptPath: task.script.scriptPath,
+          args: [
+            "--auto",
+            "--review-only",
+            "--requirement",
+            task.reqCopy,
+            "--decision-file",
+            task.decisionFile,
+          ],
+          reqName: name,
+        });
+        return { role: task.role, ok: true, error: "", decisionFile: task.decisionFile };
+      } catch (err) {
+        return {
+          role: task.role,
+          ok: false,
+          error: err && err.message ? err.message : String(err),
+          decisionFile: task.decisionFile,
+        };
+      }
+    };
+
+    let runResults = [];
+    try {
+      if (reviewParallel && tasks.length > 1) {
+        runResults = await Promise.all(tasks.map((task) => runTask(task)));
+      } else {
+        for (const task of tasks) {
+          runResults.push(await runTask(task));
+        }
+      }
+
+      const decisions = runResults.map((result) => {
+        const fallbackMessage = result.ok
+          ? "missing decision output"
+          : `review agent failed: ${result.error}`;
+        const decision = readReviewDecisionFile({
+          role: result.role,
+          decisionFile: result.decisionFile,
+          fallbackMessage,
+        });
+        if (!result.ok && decision.status === "pass") {
+          return {
+            ...decision,
+            status: "clarify",
+            summary: `agent error: ${result.error}`,
+            findings: ["agent execution error"],
+          };
+        }
+        return decision;
+      });
+
+      const aggregate = aggregateReviewDecisions(decisions);
+      const sectionLines = [
+        `- Risk: ${plan.risk}`,
+        `- Scope: ${plan.scope}`,
+        `- Roles: ${plan.roles.join(", ")}`,
+        ...decisions.map((decision) => `- ${decision.role}: ${decision.status} - ${decision.summary}`),
+        `- Aggregated outcome: ${aggregate.label}`,
+      ];
+      upsertMarkdownSection(file, "Review Bundle Results", sectionLines);
+      setRequirementStatus(file, aggregate.status);
+
+      const targetPath = path.join(aggregate.targetQueue, name);
+      if (fs.existsSync(targetPath)) {
+        fs.unlinkSync(targetPath);
+      }
+      moveRequirementFile(file, targetPath);
+      writeLog(
+        `FLOW: review-bundle req=${name} outcome=${aggregate.label} target=${path.basename(aggregate.targetQueue)}`
+      );
+    } finally {
+      if (!keepWorkspace) {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
     }
   }
 
@@ -1403,23 +1793,42 @@ async function main() {
       }
 
       // Phase 2: one global QA -> SEC -> UX -> DEPLOY pass over accumulated work.
-      await processQueueStage({
-        inputDir: queue.qa,
-        runOne: async ({ file, name }) => {
-          await runPhase({
-            phase: "QA",
-            scriptPath: scripts.QA,
-            args: ["--auto", "--requirement", file],
-            reqName: name,
-            successPaths: [
-              path.join(queue.sec, name),
-              path.join(queue.toClarify, name),
-              path.join(queue.blocked, name),
-            ],
-          });
-        },
-        terminalCheck: (name) => terminalStateFor(name),
-      });
+      if (reviewStrategy === "bundle") {
+        await processQueueStage({
+          inputDir: queue.qa,
+          runOne: async ({ file, name }) => {
+            await runReviewBundleForRequirement({ file, name });
+          },
+          terminalCheck: (name) => {
+            const p = getRequirementPaths(name);
+            if (fs.existsSync(p.clarify)) {
+              return "to-clarify";
+            }
+            if (fs.existsSync(p.blocked)) {
+              return "blocked";
+            }
+            return "";
+          },
+        });
+      } else {
+        await processQueueStage({
+          inputDir: queue.qa,
+          runOne: async ({ file, name }) => {
+            await runPhase({
+              phase: "QA",
+              scriptPath: scripts.QA,
+              args: ["--auto", "--requirement", file],
+              reqName: name,
+              successPaths: [
+                path.join(queue.sec, name),
+                path.join(queue.toClarify, name),
+                path.join(queue.blocked, name),
+              ],
+            });
+          },
+          terminalCheck: (name) => terminalStateFor(name),
+        });
+      }
 
       if (maxReq > 0 && state.processed >= maxReq) {
         writeLog(`FLOW: max req reached (${state.processed})`);
@@ -1813,6 +2222,9 @@ async function main() {
   );
   writeLog(
     `FLOW: deploy_mode=${runtime.deploy.mode} final_push_on_success=${runtime.deploy.finalPushOnSuccess} require_clean_start_for_commits=${runtime.deploy.requireCleanStartForCommits}`
+  );
+  writeLog(
+    `FLOW: review strategy=${reviewStrategy} parallel=${reviewParallel} default_risk=${reviewDefaultRisk} medium_scope_policy=${reviewMediumScopePolicy}`
   );
 
   try {

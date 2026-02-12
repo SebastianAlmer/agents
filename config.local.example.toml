@@ -49,6 +49,16 @@ use_fs = true
 # mandatory_checks = ["npm test", "npm run lint"]
 mandatory_checks = []
 
+[review]
+# bundle = risk-based review bundle with aggregator (optimized)
+# classic = sequential qa -> sec -> ux
+strategy = "bundle"
+parallel = true
+# low | medium | high
+default_risk = "medium"
+# single_specialist | full
+medium_scope_policy = "single_specialist"
+
 [codex]
 model = "gpt-5.3-codex"
 approval_policy = "never"
