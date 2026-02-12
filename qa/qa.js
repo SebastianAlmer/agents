@@ -23,6 +23,8 @@ function parseArgs(argv) {
     gateFile: "",
     reviewOnly: false,
     decisionFile: "",
+    quickReview: false,
+    batchTests: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -49,6 +51,14 @@ function parseArgs(argv) {
       i++;
       continue;
     }
+    if (normalized === "--quick-review" || normalized === "-quick-review") {
+      args.quickReview = true;
+      continue;
+    }
+    if (normalized === "--batch-tests" || normalized === "-batch-tests") {
+      args.batchTests = true;
+      continue;
+    }
     if (normalized === "-requirement" || normalized === "--requirement") {
       args.requirement = argv[i + 1] || "";
       i++;
@@ -58,22 +68,48 @@ function parseArgs(argv) {
   return args;
 }
 
-function validateGateFile(gateFile) {
+function listRequirementFiles(dir) {
+  if (!dir || !fs.existsSync(dir)) {
+    return [];
+  }
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .map((entry) => path.join(dir, entry.name))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
+
+function resolveRequirementPath(requirement, candidateDirs) {
+  if (!requirement) {
+    return "";
+  }
+  if (path.isAbsolute(requirement)) {
+    return requirement;
+  }
+  for (const dir of candidateDirs) {
+    const candidate = path.join(dir, requirement);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return path.join(candidateDirs[0], requirement);
+}
+
+function validateGateFile(gateFile, label) {
   if (!gateFile) {
-    return;
+    throw new Error(`QA ${label} requires --gate-file`);
   }
   if (!fs.existsSync(gateFile)) {
-    throw new Error(`QA final gate file missing: ${gateFile}`);
+    throw new Error(`QA ${label} gate file missing: ${gateFile}`);
   }
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(gateFile, "utf8"));
   } catch (err) {
-    throw new Error(`QA final gate file invalid JSON: ${err.message}`);
+    throw new Error(`QA ${label} gate file invalid JSON: ${err.message}`);
   }
   const status = String(parsed.status || "").toLowerCase();
   if (!["pass", "fail"].includes(status)) {
-    throw new Error(`QA final gate file has invalid status: ${status || "<empty>"}`);
+    throw new Error(`QA ${label} gate file has invalid status: ${status || "<empty>"}`);
   }
 }
 
@@ -105,10 +141,25 @@ async function main() {
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
-  const { requirement, auto, finalPass, gateFile, reviewOnly, decisionFile } = parsed;
+  const {
+    requirement,
+    auto,
+    finalPass,
+    gateFile,
+    reviewOnly,
+    decisionFile,
+    quickReview,
+    batchTests,
+  } = parsed;
 
   if (reviewOnly && finalPass) {
     throw new Error("QA --review-only cannot be combined with --final-pass");
+  }
+  if (batchTests && finalPass) {
+    throw new Error("QA --batch-tests cannot be combined with --final-pass");
+  }
+  if (batchTests && reviewOnly) {
+    throw new Error("QA --batch-tests cannot be combined with --review-only");
   }
 
   const agentRoot = __dirname;
@@ -124,29 +175,47 @@ async function main() {
   const releasedDir = runtime.queues.released;
 
   let reqFile = "";
+  let batchTargets = [];
   if (!finalPass) {
     if (reviewOnly && !requirement) {
       throw new Error("QA --review-only requires --requirement");
     }
 
-    console.log(`QA: scan qa ${qaDir}`);
-    if (requirement) {
-      const reqPath = path.isAbsolute(requirement)
-        ? requirement
-        : path.join(qaDir, requirement);
-      if (!fs.existsSync(reqPath)) {
-        throw new Error(`Requirement not found: ${reqPath}`);
-      }
-      reqFile = reqPath;
-    } else {
-      const firstFile = getFirstFile(qaDir);
-      if (!firstFile) {
-        console.log("QA: qa queue empty");
+    if (batchTests) {
+      console.log(`QA: scan sec ${secDir}`);
+      batchTargets = listRequirementFiles(secDir);
+      if (requirement) {
+        const reqPath = resolveRequirementPath(requirement, [secDir, qaDir]);
+        if (!fs.existsSync(reqPath)) {
+          throw new Error(`Requirement not found: ${reqPath}`);
+        }
+        reqFile = reqPath;
+      } else if (batchTargets.length > 0) {
+        reqFile = batchTargets[0];
+      } else {
+        console.log("QA: sec queue empty for batch tests");
         if (auto) {
           process.exit(0);
         }
+      }
+    } else {
+      console.log(`QA: scan qa ${qaDir}`);
+      if (requirement) {
+        const reqPath = resolveRequirementPath(requirement, [qaDir]);
+        if (!fs.existsSync(reqPath)) {
+          throw new Error(`Requirement not found: ${reqPath}`);
+        }
+        reqFile = reqPath;
       } else {
-        reqFile = firstFile;
+        const firstFile = getFirstFile(qaDir);
+        if (!firstFile) {
+          console.log("QA: qa queue empty");
+          if (auto) {
+            process.exit(0);
+          }
+        } else {
+          reqFile = firstFile;
+        }
       }
     }
   } else {
@@ -157,6 +226,8 @@ async function main() {
     console.log(`QA: using ${reqFile}`);
   }
   console.log(`QA: review-only ${reviewOnly}`);
+  console.log(`QA: quick-review ${quickReview}`);
+  console.log(`QA: batch-tests ${batchTests}`);
   console.log(`QA: sec dir ${secDir}`);
   console.log(`QA: to-clarify dir ${clarifyDir}`);
   console.log(`QA: blocked dir ${blockedDir}`);
@@ -175,7 +246,10 @@ async function main() {
   const reqLine = reqFile || "None";
   const gateLine = gateFile ? gateFile : "None";
   const decisionLine = decisionFile ? decisionFile : "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
+  const batchListText = batchTargets.length > 0
+    ? batchTargets.map((item) => `- ${path.basename(item)}`).join("\n")
+    : "- None";
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.codexConfigPath);
@@ -238,7 +312,10 @@ async function main() {
   });
 
   if (finalPass) {
-    validateGateFile(gateFile);
+    validateGateFile(gateFile, "final");
+  }
+  if (batchTests) {
+    validateGateFile(gateFile, "batch-tests");
   }
   if (reviewOnly) {
     validateReviewDecisionFile(decisionFile);

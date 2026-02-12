@@ -45,8 +45,8 @@ use_fs = true
 mandatory_checks = []
 
 [review]
-# bundle = risk-based review bundle with aggregator (optimized)
-# classic = sequential qa -> sec -> ux
+# Legacy review-bundle settings (kept for compatibility).
+# Standard and bulk flows use QA/UX batch pipeline.
 strategy = "bundle"
 parallel = false
 # low | medium | high

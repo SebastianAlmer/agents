@@ -23,6 +23,7 @@ function parseArgs(argv) {
     gateFile: "",
     reviewOnly: false,
     decisionFile: "",
+    batch: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -49,6 +50,10 @@ function parseArgs(argv) {
       i++;
       continue;
     }
+    if (normalized === "--batch" || normalized === "-batch") {
+      args.batch = true;
+      continue;
+    }
     if (normalized === "-requirement" || normalized === "--requirement") {
       args.requirement = argv[i + 1] || "";
       i++;
@@ -58,9 +63,35 @@ function parseArgs(argv) {
   return args;
 }
 
+function listRequirementFiles(dir) {
+  if (!dir || !fs.existsSync(dir)) {
+    return [];
+  }
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .map((entry) => path.join(dir, entry.name))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
+
+function resolveRequirementPath(requirement, candidateDirs) {
+  if (!requirement) {
+    return "";
+  }
+  if (path.isAbsolute(requirement)) {
+    return requirement;
+  }
+  for (const dir of candidateDirs) {
+    const candidate = path.join(dir, requirement);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return path.join(candidateDirs[0], requirement);
+}
+
 function validateGateFile(gateFile) {
   if (!gateFile) {
-    return;
+    throw new Error("UX final pass requires --gate-file");
   }
   if (!fs.existsSync(gateFile)) {
     throw new Error(`UX final gate file missing: ${gateFile}`);
@@ -105,10 +136,16 @@ async function main() {
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
-  const { requirement, auto, finalPass, gateFile, reviewOnly, decisionFile } = parsed;
+  const { requirement, auto, finalPass, gateFile, reviewOnly, decisionFile, batch } = parsed;
 
   if (reviewOnly && finalPass) {
     throw new Error("UX --review-only cannot be combined with --final-pass");
+  }
+  if (batch && finalPass) {
+    throw new Error("UX --batch cannot be combined with --final-pass");
+  }
+  if (batch && reviewOnly) {
+    throw new Error("UX --batch cannot be combined with --review-only");
   }
 
   const agentRoot = __dirname;
@@ -124,20 +161,30 @@ async function main() {
   const releasedDir = runtime.queues.released;
 
   let reqFile = "";
+  let uxFiles = [];
   if (!finalPass) {
     if (reviewOnly && !requirement) {
       throw new Error("UX --review-only requires --requirement");
     }
 
     console.log(`UX: scan ux ${uxDir}`);
+    uxFiles = listRequirementFiles(uxDir);
+
     if (requirement) {
-      const reqPath = path.isAbsolute(requirement)
-        ? requirement
-        : path.join(uxDir, requirement);
+      const reqPath = resolveRequirementPath(requirement, [uxDir]);
       if (!fs.existsSync(reqPath)) {
         throw new Error(`Requirement not found: ${reqPath}`);
       }
       reqFile = reqPath;
+    } else if (batch) {
+      if (uxFiles.length > 0) {
+        reqFile = uxFiles[0];
+      } else {
+        console.log("UX: ux queue empty");
+        if (auto) {
+          process.exit(0);
+        }
+      }
     } else {
       const firstFile = getFirstFile(uxDir);
       if (!firstFile) {
@@ -157,6 +204,7 @@ async function main() {
     console.log(`UX: using ${reqFile}`);
   }
   console.log(`UX: review-only ${reviewOnly}`);
+  console.log(`UX: batch ${batch}`);
   console.log(`UX: deploy dir ${deployDir}`);
   console.log(`UX: to-clarify dir ${clarifyDir}`);
   console.log(`UX: blocked dir ${blockedDir}`);
@@ -170,7 +218,10 @@ async function main() {
   const reqLine = reqFile || "None";
   const gateLine = gateFile ? gateFile : "None";
   const decisionLine = decisionFile ? decisionFile : "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nUX dir: ${uxDir}\nDeploy dir: ${deployDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\n`;
+  const uxListText = uxFiles.length > 0
+    ? uxFiles.map((item) => `- ${path.basename(item)}`).join("\n")
+    : "- None";
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nUX dir: ${uxDir}\nDeploy dir: ${deployDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nUX queue files:\n${uxListText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.codexConfigPath);

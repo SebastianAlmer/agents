@@ -1045,7 +1045,268 @@ async function main() {
     return { targetQueue: queue.deploy, status: "deploy", label: "deploy" };
   }
 
+  function mapQaDecisionToRoute(status) {
+    if (status === "pass") {
+      return { targetQueue: queue.sec, status: "sec", label: "sec" };
+    }
+    if (status === "block") {
+      return { targetQueue: queue.blocked, status: "blocked", label: "blocked" };
+    }
+    return { targetQueue: queue.toClarify, status: "to-clarify", label: "to-clarify" };
+  }
+
+  function isTerminalStatus(status) {
+    return status === "to-clarify" || status === "blocked" || status === "released";
+  }
+
+  function bypassQueueToDeploy({ phase, inputDir }) {
+    const files = listQueueFiles(inputDir);
+    if (files.length === 0) {
+      return [];
+    }
+
+    const fromLabel = path.basename(inputDir);
+    const outcomes = [];
+
+    for (const file of files) {
+      const name = path.basename(file);
+      const paths = getRequirementPaths(name);
+      const terminal = hasTerminalState(paths);
+      if (terminal) {
+        outcomes.push({ name, status: terminal });
+        continue;
+      }
+
+      if (!fs.existsSync(file)) {
+        continue;
+      }
+
+      setRequirementStatus(file, "deploy");
+      if (fs.existsSync(paths.deploy)) {
+        fs.unlinkSync(paths.deploy);
+      }
+      moveRequirementFile(file, paths.deploy);
+      writeLog(`FLOW: ${phase} bypass req=${name} from=${fromLabel} to=deploy`);
+      outcomes.push({ name, status: "deploy" });
+    }
+
+    return outcomes;
+  }
+
+  async function runQaRequirementReviewStage() {
+    const qaFiles = listQueueFiles(queue.qa);
+    if (qaFiles.length === 0) {
+      return [];
+    }
+
+    const workspace = path.join(
+      runtime.agentsRoot,
+      ".runtime",
+      "qa-review",
+      `${formatTimestamp(new Date())}-batch`
+    );
+    ensureDir(workspace);
+
+    const outcomes = [];
+    for (const file of qaFiles) {
+      const name = path.basename(file);
+      const decisionFile = path.join(workspace, `${sanitizePathToken(name)}.decision.json`);
+      writeJson(decisionFile, {
+        status: "clarify",
+        summary: "QA review decision file missing",
+        findings: ["missing QA review decision"],
+      });
+
+      await runPhase({
+        phase: "QA-REVIEW",
+        scriptPath: scripts.QA,
+        args: [
+          "--auto",
+          "--review-only",
+          "--quick-review",
+          "--requirement",
+          file,
+          "--decision-file",
+          decisionFile,
+        ],
+        reqName: name,
+        successPaths: [decisionFile],
+      });
+
+      const decision = readReviewDecisionFile({
+        role: "QA",
+        decisionFile,
+        fallbackMessage: "missing QA review decision output",
+      });
+      const route = mapQaDecisionToRoute(decision.status);
+      const reqPath = path.join(queue.qa, name);
+      if (!fs.existsSync(reqPath)) {
+        const terminal = terminalStateFor(name);
+        if (terminal) {
+          outcomes.push({ name, status: terminal });
+        }
+        continue;
+      }
+
+      const findings = decision.findings.length > 0 ? decision.findings : ["none"];
+      const sectionLines = [
+        `- Mode: quick per-requirement code review`,
+        `- Decision: ${decision.status}`,
+        `- Summary: ${decision.summary}`,
+        `- Findings: ${findings.join(" | ")}`,
+      ];
+      upsertMarkdownSection(reqPath, "QA Review Results", sectionLines);
+      setRequirementStatus(reqPath, route.status);
+
+      const targetPath = path.join(route.targetQueue, name);
+      if (fs.existsSync(targetPath)) {
+        fs.unlinkSync(targetPath);
+      }
+      moveRequirementFile(reqPath, targetPath);
+      writeLog(`FLOW: qa-review req=${name} decision=${decision.status} target=${route.label}`);
+
+      outcomes.push({ name, status: route.status });
+    }
+
+    return outcomes;
+  }
+
+  async function runQaBatchTestsStage() {
+    const secFiles = listQueueFiles(queue.sec);
+    if (secFiles.length === 0) {
+      return [];
+    }
+
+    const names = secFiles.map((file) => path.basename(file));
+    const workspace = path.join(
+      runtime.agentsRoot,
+      ".runtime",
+      "qa-batch-tests",
+      `${formatTimestamp(new Date())}-batch`
+    );
+    ensureDir(workspace);
+    const gateFile = path.join(workspace, "qa-batch-gate.json");
+    writeJson(gateFile, {
+      status: "fail",
+      summary: "Batch QA gate output missing",
+      blocking_findings: ["missing batch QA gate output"],
+    });
+
+    const batchReqName = names.length === 1 ? names[0] : `BATCH:${names.length}`;
+    await runPhase({
+      phase: "QA-TEST-BATCH",
+      scriptPath: scripts.QA,
+      args: [
+        "--auto",
+        "--batch-tests",
+        "--requirement",
+        secFiles[0],
+        "--gate-file",
+        gateFile,
+      ],
+      reqName: batchReqName,
+      successPaths: [gateFile],
+    });
+
+    let gate;
+    try {
+      gate = readGateFile(gateFile, "QA-BATCH");
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      gate = {
+        status: "fail",
+        summary: "invalid QA batch gate: " + msg,
+        blockingFindings: ["invalid QA batch gate output"],
+      };
+    }
+
+    writeLog(`FLOW: qa-batch-tests status=${gate.status} summary=${gate.summary}`);
+    if (gate.status === "pass") {
+      return [];
+    }
+
+    const findings =
+      gate.blockingFindings.length > 0 ? gate.blockingFindings : ["batch FE/BE tests failed"];
+    const outcomes = [];
+    for (const name of names) {
+      const secPath = path.join(queue.sec, name);
+      if (!fs.existsSync(secPath)) {
+        continue;
+      }
+
+      const sectionLines = [
+        "- Status: fail",
+        `- Summary: ${gate.summary}`,
+        `- Blocking findings: ${findings.join(" | ")}`,
+      ];
+      upsertMarkdownSection(secPath, "QA Batch Test Results", sectionLines);
+      setRequirementStatus(secPath, "blocked");
+
+      const targetPath = path.join(queue.blocked, name);
+      if (fs.existsSync(targetPath)) {
+        fs.unlinkSync(targetPath);
+      }
+      moveRequirementFile(secPath, targetPath);
+      writeLog(`FLOW: qa-batch-tests req=${name} target=blocked`);
+      outcomes.push({ name, status: "blocked" });
+    }
+
+    return outcomes;
+  }
+
+  async function runUxBatchStage() {
+    const uxFiles = listQueueFiles(queue.ux);
+    if (uxFiles.length === 0) {
+      return [];
+    }
+
+    const names = uxFiles.map((file) => path.basename(file));
+    const anchorRequirement = uxFiles[0];
+    const batchReqName = names.length === 1 ? names[0] : `BATCH:${names.length}`;
+
+    await runPhase({
+      phase: "UX-BATCH",
+      scriptPath: scripts.UX,
+      args: ["--auto", "--batch", "--requirement", anchorRequirement],
+      reqName: batchReqName,
+      successPaths: [
+        ...names.map((name) => path.join(queue.deploy, name)),
+        ...names.map((name) => path.join(queue.toClarify, name)),
+        ...names.map((name) => path.join(queue.blocked, name)),
+      ],
+    });
+
+    const outcomes = [];
+    for (const name of names) {
+      const paths = getRequirementPaths(name);
+      const terminal = hasTerminalState(paths);
+      if (terminal) {
+        outcomes.push({ name, status: terminal });
+        continue;
+      }
+
+      if (fs.existsSync(paths.ux)) {
+        setRequirementStatus(paths.ux, "deploy");
+        if (fs.existsSync(paths.deploy)) {
+          fs.unlinkSync(paths.deploy);
+        }
+        moveRequirementFile(paths.ux, paths.deploy);
+        writeLog(`FLOW: ux-batch auto-forward req=${name} target=deploy`);
+      }
+
+      if (fs.existsSync(paths.deploy)) {
+        outcomes.push({ name, status: "deploy" });
+        continue;
+      }
+
+      throw new Error(`ux batch produced no output state for ${name}`);
+    }
+
+    return outcomes;
+  }
+
   async function runReviewBundleForRequirement({ file, name }) {
+
     const plan = deriveReviewPlan(file);
     const keepWorkspace = process.env.CODEX_KEEP_REVIEW_BUNDLE === "1";
     const workspace = path.join(
@@ -1475,8 +1736,9 @@ async function main() {
     state.processed += 1;
   }
 
-  async function processRequirement({ name, fastBypass }) {
+  async function processRequirement({ name, fastBypass, stopAfterDev }) {
     const paths = getRequirementPaths(name);
+    const planningOnly = Boolean(stopAfterDev);
 
     if (fs.existsSync(paths.selected)) {
       await runPhase({
@@ -1537,6 +1799,17 @@ async function main() {
     terminal = hasTerminalState(paths);
     if (terminal) {
       return terminal;
+    }
+
+    if (planningOnly) {
+      if (
+        fs.existsSync(paths.qa) ||
+        fs.existsSync(paths.sec) ||
+        fs.existsSync(paths.ux) ||
+        fs.existsSync(paths.deploy)
+      ) {
+        return "pending";
+      }
     }
 
     if (fs.existsSync(paths.qa)) {
@@ -1689,13 +1962,31 @@ async function main() {
   }
 
   async function runDetailedOrFast() {
-    const stageOrder = ["selected", "arch", "dev", "qa", "sec", "ux"];
     const fastBypass = flow === "fast";
+    const stageOrder = fastBypass
+      ? ["selected", "arch", "dev", "qa"]
+      : ["selected", "arch", "dev", "qa", "sec", "ux"];
 
     while (true) {
       if (maxReq > 0 && state.processed >= maxReq) {
         writeLog(`FLOW: max req reached (${state.processed})`);
         break;
+      }
+
+      if (fastBypass) {
+        const fastBypassOutcomes = [
+          ...bypassQueueToDeploy({ phase: "SEC", inputDir: queue.sec }),
+          ...bypassQueueToDeploy({ phase: "UX", inputDir: queue.ux }),
+        ];
+        for (const outcome of fastBypassOutcomes) {
+          if (isTerminalStatus(outcome.status)) {
+            recordTerminal(outcome.name, outcome.status);
+          }
+        }
+        if (maxReq > 0 && state.processed >= maxReq) {
+          writeLog(`FLOW: max req reached (${state.processed})`);
+          break;
+        }
       }
 
       const target = getNextTarget(stageOrder);
@@ -1735,7 +2026,73 @@ async function main() {
         writeLog(`FLOW: start ${name} (from ${target.stage})`);
       }
 
-      const result = await processRequirement({ name, fastBypass });
+      if (target.stage === "qa") {
+        const qaReviewOutcomes = await runQaRequirementReviewStage();
+        for (const outcome of qaReviewOutcomes) {
+          if (isTerminalStatus(outcome.status)) {
+            recordTerminal(outcome.name, outcome.status);
+          }
+        }
+
+        if (maxReq > 0 && state.processed >= maxReq) {
+          writeLog(`FLOW: max req reached (${state.processed})`);
+          break;
+        }
+
+        const qaBatchOutcomes = await runQaBatchTestsStage();
+        for (const outcome of qaBatchOutcomes) {
+          if (isTerminalStatus(outcome.status)) {
+            recordTerminal(outcome.name, outcome.status);
+          }
+        }
+
+        if (fastBypass) {
+          const postQaBypassOutcomes = [
+            ...bypassQueueToDeploy({ phase: "SEC", inputDir: queue.sec }),
+            ...bypassQueueToDeploy({ phase: "UX", inputDir: queue.ux }),
+          ];
+          for (const outcome of postQaBypassOutcomes) {
+            if (isTerminalStatus(outcome.status)) {
+              recordTerminal(outcome.name, outcome.status);
+            }
+          }
+        }
+
+        continue;
+      }
+
+      if (target.stage === "sec") {
+        await processQueueStage({
+          inputDir: queue.sec,
+          runOne: async ({ file, name: secName }) => {
+            await runPhase({
+              phase: "SEC",
+              scriptPath: scripts.SEC,
+              args: ["--auto", "--requirement", file],
+              reqName: secName,
+              successPaths: [
+                path.join(queue.ux, secName),
+                path.join(queue.toClarify, secName),
+                path.join(queue.blocked, secName),
+              ],
+            });
+          },
+          terminalCheck: (secName) => terminalStateFor(secName),
+        });
+        continue;
+      }
+
+      if (target.stage === "ux") {
+        const uxBatchOutcomes = await runUxBatchStage();
+        for (const outcome of uxBatchOutcomes) {
+          if (isTerminalStatus(outcome.status)) {
+            recordTerminal(outcome.name, outcome.status);
+          }
+        }
+        continue;
+      }
+
+      const result = await processRequirement({ name, fastBypass, stopAfterDev: true });
       if (["released", "to-clarify", "blocked", "none"].includes(result)) {
         if (result === "none") {
           writeLog(`FLOW: terminal req=${name} status=${result}`);
@@ -1909,42 +2266,24 @@ async function main() {
         writeLog("FLOW: standard downstream trigger accepted; running QA/SEC/UX/DEPLOY");
       }
 
-      // Phase 2: one global QA -> SEC -> UX -> DEPLOY pass over accumulated work.
-      if (reviewStrategy === "bundle") {
-        await processQueueStage({
-          inputDir: queue.qa,
-          runOne: async ({ file, name }) => {
-            await runReviewBundleForRequirement({ file, name });
-          },
-          terminalCheck: (name) => {
-            const p = getRequirementPaths(name);
-            if (fs.existsSync(p.clarify)) {
-              return "to-clarify";
-            }
-            if (fs.existsSync(p.blocked)) {
-              return "blocked";
-            }
-            return "";
-          },
-        });
-      } else {
-        await processQueueStage({
-          inputDir: queue.qa,
-          runOne: async ({ file, name }) => {
-            await runPhase({
-              phase: "QA",
-              scriptPath: scripts.QA,
-              args: ["--auto", "--requirement", file],
-              reqName: name,
-              successPaths: [
-                path.join(queue.sec, name),
-                path.join(queue.toClarify, name),
-                path.join(queue.blocked, name),
-              ],
-            });
-          },
-          terminalCheck: (name) => terminalStateFor(name),
-        });
+      // Phase 2: one global QA review + QA batch tests + SEC + UX batch + DEPLOY batch pass.
+      const qaReviewOutcomes = await runQaRequirementReviewStage();
+      for (const outcome of qaReviewOutcomes) {
+        if (isTerminalStatus(outcome.status)) {
+          recordTerminal(outcome.name, outcome.status);
+        }
+      }
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      const qaBatchOutcomes = await runQaBatchTestsStage();
+      for (const outcome of qaBatchOutcomes) {
+        if (isTerminalStatus(outcome.status)) {
+          recordTerminal(outcome.name, outcome.status);
+        }
       }
 
       if (maxReq > 0 && state.processed >= maxReq) {
@@ -1975,23 +2314,12 @@ async function main() {
         break;
       }
 
-      await processQueueStage({
-        inputDir: queue.ux,
-        runOne: async ({ file, name }) => {
-          await runPhase({
-            phase: "UX",
-            scriptPath: scripts.UX,
-            args: ["--auto", "--requirement", file],
-            reqName: name,
-            successPaths: [
-              path.join(queue.deploy, name),
-              path.join(queue.toClarify, name),
-              path.join(queue.blocked, name),
-            ],
-          });
-        },
-        terminalCheck: (name) => terminalStateFor(name),
-      });
+      const uxBatchOutcomes = await runUxBatchStage();
+      for (const outcome of uxBatchOutcomes) {
+        if (isTerminalStatus(outcome.status)) {
+          recordTerminal(outcome.name, outcome.status);
+        }
+      }
 
       if (maxReq > 0 && state.processed >= maxReq) {
         writeLog(`FLOW: max req reached (${state.processed})`);
@@ -2180,23 +2508,29 @@ async function main() {
         terminalCheck: (name) => terminalStateFor(name),
       });
 
-      await processQueueStage({
-        inputDir: queue.qa,
-        runOne: async ({ file, name }) => {
-          await runPhase({
-            phase: "QA",
-            scriptPath: scripts.QA,
-            args: ["--auto", "--requirement", file],
-            reqName: name,
-            successPaths: [
-              path.join(queue.sec, name),
-              path.join(queue.toClarify, name),
-              path.join(queue.blocked, name),
-            ],
-          });
-        },
-        terminalCheck: (name) => terminalStateFor(name),
-      });
+      const bulkQaReviewOutcomes = await runQaRequirementReviewStage();
+      for (const outcome of bulkQaReviewOutcomes) {
+        if (isTerminalStatus(outcome.status)) {
+          recordTerminal(outcome.name, outcome.status);
+        }
+      }
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      const bulkQaBatchOutcomes = await runQaBatchTestsStage();
+      for (const outcome of bulkQaBatchOutcomes) {
+        if (isTerminalStatus(outcome.status)) {
+          recordTerminal(outcome.name, outcome.status);
+        }
+      }
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
 
       await processQueueStage({
         inputDir: queue.sec,
@@ -2216,23 +2550,22 @@ async function main() {
         terminalCheck: (name) => terminalStateFor(name),
       });
 
-      await processQueueStage({
-        inputDir: queue.ux,
-        runOne: async ({ file, name }) => {
-          await runPhase({
-            phase: "UX",
-            scriptPath: scripts.UX,
-            args: ["--auto", "--requirement", file],
-            reqName: name,
-            successPaths: [
-              path.join(queue.deploy, name),
-              path.join(queue.toClarify, name),
-              path.join(queue.blocked, name),
-            ],
-          });
-        },
-        terminalCheck: (name) => terminalStateFor(name),
-      });
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
+
+      const bulkUxBatchOutcomes = await runUxBatchStage();
+      for (const outcome of bulkUxBatchOutcomes) {
+        if (isTerminalStatus(outcome.status)) {
+          recordTerminal(outcome.name, outcome.status);
+        }
+      }
+
+      if (maxReq > 0 && state.processed >= maxReq) {
+        writeLog(`FLOW: max req reached (${state.processed})`);
+        break;
+      }
 
       const bulkDeployOutcomes = await runDeployBatchStage();
       for (const outcome of bulkDeployOutcomes) {
@@ -2375,7 +2708,7 @@ async function main() {
     `FLOW: deploy_mode=${runtime.deploy.mode} final_push_on_success=${runtime.deploy.finalPushOnSuccess} require_clean_start_for_commits=${runtime.deploy.requireCleanStartForCommits}`
   );
   writeLog(
-    `FLOW: review strategy=${reviewStrategy} parallel=${reviewParallel} default_risk=${reviewDefaultRisk} medium_scope_policy=${reviewMediumScopePolicy}`
+    `FLOW: review strategy=${reviewStrategy} parallel=${reviewParallel} default_risk=${reviewDefaultRisk} medium_scope_policy=${reviewMediumScopePolicy} (legacy bundle settings)`
   );
 
   try {

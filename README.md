@@ -51,7 +51,7 @@ Important fields:
 - `[dev_routing].mode`: `fullstack_only | split`.
 - `[dev_agents]`: enable/disable FE/BE/FS dev agents.
 - `[qa].mandatory_checks`: project-specific QA baseline checks.
-- `[review]`: review strategy (`bundle|classic`), parallel execution, and default risk routing.
+- `[review]`: legacy bundle settings (kept for compatibility; standard/bulk use QA/UX batch pipeline).
 - `[codex]`: Codex runtime settings rendered to `.runtime/codex.generated.toml`.
 
 By default, setup writes `mandatory_checks = []` for project-agnostic behavior.
@@ -114,8 +114,11 @@ ReqEng triage rules (outside `run.js`):
 Two-phase cycle:
 1. Upstream phase (per requirement): `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa`
 2. Downstream phase (single global pass):
-- default (`[review].strategy = "bundle"`): `qa -> review bundle (QA always, SEC/UX risk-based, optional parallel) -> deploy -> DEPLOY(batch) -> released`
-- fallback (`[review].strategy = "classic"`): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY(batch) -> released`
+- `qa -> QA quick review per requirement (no tests) -> sec`
+- `sec -> QA batch FE/BE tests once for all sec items`
+- `sec -> SEC -> ux`
+- `ux -> UX(batch, diff-based FE polish) -> deploy`
+- `deploy -> DEPLOY(batch) -> released`
 
 Optional manual downstream gate (standard flow only):
 - enable via `--manual-downstream` or `[run_defaults].manual_downstream = true`
@@ -132,14 +135,15 @@ Only if all QA/SEC/UX gates pass, final push may run (config-dependent).
 
 ### `detailed`
 
-Per-requirement deep pipeline:
+Detailed staged pipeline:
 1. `selected -> PO -> arch`
 2. `arch -> ARCH -> dev`
 3. `dev -> DEV_* -> qa`
-4. `qa -> QA -> sec`
-5. `sec -> SEC -> ux`
-6. `ux -> UX -> deploy`
-7. `deploy -> DEPLOY(batch) -> released`
+4. QA quick review per requirement (no tests)
+5. one QA FE/BE batch test pass over current `sec` queue
+6. `sec -> SEC -> ux`
+7. one UX batch pass over current `ux` queue (diff-based FE polish)
+8. `deploy -> DEPLOY(batch) -> released`
 
 Run start policy:
 - New delivery work should always be placed in `selected`.
@@ -151,39 +155,32 @@ Batch stage-by-stage processing:
 1. all `selected` with `PO`
 2. all `arch` with `ARCH`
 3. all `dev` with routed `DEV_*`
-4. all `qa`, then `sec`, then `ux`, then one batch `DEPLOY` pass for current deploy queue
+4. all `qa` with QA quick review per requirement (no tests)
+5. one QA batch FE/BE test run for current `sec` queue
+6. all `sec` with `SEC`
+7. one UX batch pass over current `ux` queue (diff-based FE polish)
+8. one batch `DEPLOY` pass for current deploy queue
 
 ### `fast`
 
-Skips architecture and deep review steps:
-- bypasses `ARCH`, `SEC`, `UX`
-- keeps `PO -> DEV_* -> QA -> DEPLOY(batch)`
+Lean pipeline:
+- bypasses `ARCH`, `SEC`, and `UX` agents
+- keeps QA split behavior: quick review per requirement + one QA FE/BE batch test pass
+- after QA batch tests, remaining `sec`/`ux` queue items are auto-bypassed to `deploy`
+- ends with `DEPLOY(batch)`
 
-## Review optimization (`standard`)
+## QA and UX optimization (`standard` / `bulk` / `detailed`, partial in `fast`)
 
-Configured via `[review]`:
-- `strategy = "bundle"` (default): risk-based review bundle with aggregator.
-- `strategy = "classic"`: sequential review path (`QA -> SEC -> UX`).
-- `parallel = true|false`: run bundle reviewers in parallel or sequentially.
-- `default_risk = "low|medium|high"`: fallback risk if requirement has no explicit risk tag (default is `low` for token efficiency).
-- `medium_scope_policy = "single_specialist|full"`: controls medium-risk routing.
-- `single_specialist` means medium frontend scope routes to `QA+UX` and backend scope routes to `QA+SEC`.
-- `full` means medium scope routes to `QA+SEC+UX`.
+QA behavior:
+- QA runs a short per-requirement code review in `qa` (no test commands in this step).
+- QA then runs FE/BE tests once for the accumulated `sec` queue (batch mode).
+- On batch-test failure, affected requirements are routed to `blocked`.
 
-Bundle front matter hints (optional):
-- `review_risk` (or `risk` / `risk_level`): `low|medium|high`
-- `review_scope`: `qa_only|qa_sec|qa_ux|full`
+UX behavior:
+- UX runs once in batch mode for the current `ux` queue.
+- UX prioritizes the frontend git diff as primary review/edit surface.
+- UX is expected to actively polish changed FE files based on docs/guidelines and then route requirements.
 
-Recommended token-saving policy:
-- PO/ARCH should default to `review_risk: low` + `review_scope: qa_only` for clear contained work.
-- Escalate risk/scope only when justified by real security/compliance/cross-cutting risk.
-
-Bundle aggregation rules:
-- any reviewer returns `block` => move to `blocked`
-- else any reviewer returns `clarify` => move to `to-clarify`
-- else => move to `deploy`
-
-Runner writes a human-readable `Review Bundle Results` section into the requirement and updates front matter status before routing.
 
 ## CLI switches and config defaults
 
