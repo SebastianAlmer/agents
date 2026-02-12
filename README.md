@@ -114,8 +114,8 @@ ReqEng triage rules (outside `run.js`):
 Two-phase cycle:
 1. Upstream phase (per requirement): `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa`
 2. Downstream phase (single global pass):
-- default (`[review].strategy = "bundle"`): `qa -> review bundle (QA always, SEC/UX risk-based, optional parallel) -> deploy -> DEPLOY -> released`
-- fallback (`[review].strategy = "classic"`): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY -> released`
+- default (`[review].strategy = "bundle"`): `qa -> review bundle (QA always, SEC/UX risk-based, optional parallel) -> deploy -> DEPLOY(batch) -> released`
+- fallback (`[review].strategy = "classic"`): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY(batch) -> released`
 
 Optional manual downstream gate (standard flow only):
 - enable via `--manual-downstream` or `[run_defaults].manual_downstream = true`
@@ -139,7 +139,7 @@ Per-requirement deep pipeline:
 4. `qa -> QA -> sec`
 5. `sec -> SEC -> ux`
 6. `ux -> UX -> deploy`
-7. `deploy -> DEPLOY -> released`
+7. `deploy -> DEPLOY(batch) -> released`
 
 Run start policy:
 - New delivery work should always be placed in `selected`.
@@ -151,13 +151,13 @@ Batch stage-by-stage processing:
 1. all `selected` with `PO`
 2. all `arch` with `ARCH`
 3. all `dev` with routed `DEV_*`
-4. all `qa`, then `sec`, then `ux`, then `deploy`
+4. all `qa`, then `sec`, then `ux`, then one batch `DEPLOY` pass for current deploy queue
 
 ### `fast`
 
 Skips architecture and deep review steps:
 - bypasses `ARCH`, `SEC`, `UX`
-- keeps `PO -> DEV_* -> QA -> DEPLOY`
+- keeps `PO -> DEV_* -> QA -> DEPLOY(batch)`
 
 ## Review optimization (`standard`)
 
@@ -213,12 +213,16 @@ Keyboard controls during `run.js`:
 
 ## Deploy behavior
 
-`[deploy].mode` controls per-requirement git actions after release:
+`[deploy].mode` controls git actions after batch deploy release:
 - `check`: no commit/push
-- `commit`: commit after each released requirement
-- `commit_push`: commit and push after each released requirement
+- `commit`: one commit per deploy batch
+- `commit_push`: one commit + push per deploy batch
 
 Default: `commit` (commit without immediate push).
+
+Deploy optimization:
+- In flow runs, deploy checks are executed once per deploy batch (scope-aware), not once per requirement.
+- The batch may include frontend/backend/fullstack requirements together.
 
 `[deploy].require_clean_start_for_commits = true` blocks deploy commits/push in `soft` preflight when run starts dirty.
 

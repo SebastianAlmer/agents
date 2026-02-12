@@ -166,6 +166,15 @@ function countFiles(dir) {
   }
   return count;
 }
+function listQueueFiles(dir) {
+  if (!dir || !fs.existsSync(dir)) {
+    return [];
+  }
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .map((entry) => path.join(dir, entry.name))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
 
 function createLineBuffer(onLine) {
   let buffer = "";
@@ -1298,6 +1307,69 @@ async function main() {
     }
   }
 
+  function gitCommitRequirementBatch(reqNames) {
+    const names = Array.isArray(reqNames)
+      ? reqNames.map((name) => String(name || "").trim()).filter(Boolean)
+      : [];
+
+    if (names.length === 0) {
+      return;
+    }
+
+    if (!preflightState.allowDeployCommits) {
+      writeLog(`FLOW: deploy commit skipped by preflight policy batch_count=${names.length}`);
+      return;
+    }
+
+    if (runtime.deploy.mode === "check") {
+      writeLog(`FLOW: deploy mode=check; skip batch commit count=${names.length}`);
+      return;
+    }
+
+    assertGitWriteTarget(`deploy batch commit count=${names.length}`);
+
+    if (!preflightState.gitRepo || !isGitRepo(runtime.repoRoot)) {
+      writeLog(`FLOW: deploy skip git action, not a git repo: ${runtime.repoRoot}`);
+      return;
+    }
+
+    if (!gitHasChanges(runtime.repoRoot)) {
+      writeLog(`FLOW: deploy no git changes for batch count=${names.length}`);
+      return;
+    }
+
+    const addRes = runGit(runtime.repoRoot, ["add", "-A"]);
+    if (addRes.status !== 0) {
+      throw new Error(`git add failed for deploy batch: ${(addRes.stderr || "").trim()}`);
+    }
+
+    const preview = names.slice(0, 3).join(",");
+    const suffix = names.length > 3 ? `,+${names.length - 3}` : "";
+    const msg = names.length === 1
+      ? `chore(deploy): ${names[0]}`
+      : `chore(deploy): batch ${names.length} requirements (${preview}${suffix})`;
+    const commitRes = runGit(runtime.repoRoot, ["commit", "-m", msg]);
+    if (commitRes.status !== 0) {
+      const output = `${commitRes.stdout || ""}\n${commitRes.stderr || ""}`;
+      if (/nothing to commit/i.test(output)) {
+        writeLog(`FLOW: deploy nothing to commit for batch count=${names.length}`);
+      } else {
+        throw new Error(`git commit failed for deploy batch: ${output.trim()}`);
+      }
+    } else {
+      writeLog(`FLOW: deploy committed batch count=${names.length}`);
+    }
+
+    if (runtime.deploy.mode === "commit_push") {
+      assertGitWriteTarget(`deploy batch push count=${names.length}`);
+      const pushRes = runGit(runtime.repoRoot, ["push"]);
+      if (pushRes.status !== 0) {
+        throw new Error(`git push failed for deploy batch: ${(pushRes.stderr || "").trim()}`);
+      }
+      writeLog(`FLOW: deploy pushed batch count=${names.length}`);
+    }
+  }
+
   function gitFinalPush() {
     if (!preflightState.allowDeployCommits) {
       writeLog("FLOW: final push skipped by preflight policy");
@@ -1530,22 +1602,6 @@ async function main() {
       return terminal;
     }
 
-    if (fs.existsSync(paths.deploy)) {
-      await runPhase({
-        phase: "DEPLOY",
-        scriptPath: scripts.DEPLOY,
-        args: ["--auto", "--requirement", paths.deploy],
-        reqName: name,
-        successPaths: [paths.released],
-      });
-    }
-
-    if (fs.existsSync(paths.released)) {
-      gitCommitRequirement(name);
-      releasedSinceFinal.add(name);
-      return "released";
-    }
-
     terminal = hasTerminalState(paths);
     if (terminal) {
       return terminal;
@@ -1633,7 +1689,7 @@ async function main() {
   }
 
   async function runDetailedOrFast() {
-    const stageOrder = ["selected", "arch", "dev", "qa", "sec", "ux", "deploy"];
+    const stageOrder = ["selected", "arch", "dev", "qa", "sec", "ux"];
     const fastBypass = flow === "fast";
 
     while (true) {
@@ -1644,6 +1700,17 @@ async function main() {
 
       const target = getNextTarget(stageOrder);
       if (!target) {
+        if (countFiles(queue.deploy) > 0) {
+          const deployOutcomes = await runDeployBatchStage();
+          for (const outcome of deployOutcomes) {
+            if (outcome.status === "released") {
+              releasedSinceFinal.add(outcome.name);
+            }
+            recordTerminal(outcome.name, outcome.status);
+          }
+          continue;
+        }
+
         const active = countActivePipeline();
         if (active > 0) {
           writeLog("FLOW: runnable queue detection mismatch; waiting for manual intervention.");
@@ -1931,26 +1998,13 @@ async function main() {
         break;
       }
 
-      await processQueueStage({
-        inputDir: queue.deploy,
-        runOne: async ({ file, name }) => {
-          await runPhase({
-            phase: "DEPLOY",
-            scriptPath: scripts.DEPLOY,
-            args: ["--auto", "--requirement", file],
-            reqName: name,
-            successPaths: [path.join(queue.released, name)],
-          });
-          const p = getRequirementPaths(name);
-          if (fs.existsSync(p.released)) {
-            gitCommitRequirement(name);
-          }
-        },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.released) ? "released" : "";
-        },
-      });
+      const standardDeployOutcomes = await runDeployBatchStage();
+      for (const outcome of standardDeployOutcomes) {
+        if (outcome.status === "released") {
+          releasedSinceFinal.add(outcome.name);
+        }
+        recordTerminal(outcome.name, outcome.status);
+      }
 
       const after = countActivePipeline();
       if (after === 0) {
@@ -1996,6 +2050,58 @@ async function main() {
         break;
       }
     }
+  }
+
+  async function runDeployBatchStage() {
+    const deployFiles = listQueueFiles(queue.deploy);
+    if (deployFiles.length === 0) {
+      return [];
+    }
+
+    const names = deployFiles.map((file) => path.basename(file));
+    const anchorRequirement = deployFiles[0];
+    const batchReqName = names.length === 1 ? names[0] : ("BATCH:" + names.length);
+
+    await runPhase({
+      phase: "DEPLOY-BATCH",
+      scriptPath: scripts.DEPLOY,
+      args: ["--auto", "--batch", "--requirement", anchorRequirement],
+      reqName: batchReqName,
+      successPaths: names.map((name) => path.join(queue.released, name)),
+    });
+
+    const outcomes = [];
+    const releasedNames = [];
+
+    for (const name of names) {
+      const paths = getRequirementPaths(name);
+      let terminal = hasTerminalState(paths);
+
+      if (!terminal && fs.existsSync(paths.deploy)) {
+        setRequirementStatus(paths.deploy, "released");
+        if (fs.existsSync(paths.released)) {
+          fs.unlinkSync(paths.released);
+        }
+        moveRequirementFile(paths.deploy, paths.released);
+        terminal = "released";
+        writeLog("FLOW: deploy-batch auto-release req=" + name);
+      }
+
+      if (!terminal) {
+        throw new Error("deploy batch produced no terminal state for " + name);
+      }
+
+      if (terminal === "released") {
+        releasedNames.push(name);
+      }
+      outcomes.push({ name, status: terminal });
+    }
+
+    if (releasedNames.length > 0) {
+      gitCommitRequirementBatch(releasedNames);
+    }
+
+    return outcomes;
   }
 
   async function runBulk() {
@@ -2128,26 +2234,13 @@ async function main() {
         terminalCheck: (name) => terminalStateFor(name),
       });
 
-      await processQueueStage({
-        inputDir: queue.deploy,
-        runOne: async ({ file, name }) => {
-          await runPhase({
-            phase: "DEPLOY",
-            scriptPath: scripts.DEPLOY,
-            args: ["--auto", "--requirement", file],
-            reqName: name,
-            successPaths: [path.join(queue.released, name)],
-          });
-          const p = getRequirementPaths(name);
-          if (fs.existsSync(p.released)) {
-            gitCommitRequirement(name);
-          }
-        },
-        terminalCheck: (name) => {
-          const p = getRequirementPaths(name);
-          return fs.existsSync(p.released) ? "released" : "";
-        },
-      });
+      const bulkDeployOutcomes = await runDeployBatchStage();
+      for (const outcome of bulkDeployOutcomes) {
+        if (outcome.status === "released") {
+          releasedSinceFinal.add(outcome.name);
+        }
+        recordTerminal(outcome.name, outcome.status);
+      }
 
       const after = countActivePipeline();
       if (after >= before) {
