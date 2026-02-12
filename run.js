@@ -932,6 +932,54 @@ async function main() {
     return hasTerminalState(getRequirementPaths(name));
   }
 
+  function cleanupStaleRequirementCopies(name, terminal) {
+    const paths = getRequirementPaths(name);
+    const keep = new Set();
+
+    if (terminal === "to-clarify") {
+      keep.add(paths.clarify);
+    } else if (terminal === "blocked") {
+      keep.add(paths.blocked);
+    } else if (terminal === "released") {
+      keep.add(paths.released);
+    }
+
+    const candidates = [
+      paths.selected,
+      paths.arch,
+      paths.dev,
+      paths.qa,
+      paths.sec,
+      paths.ux,
+      paths.deploy,
+      paths.clarify,
+      paths.blocked,
+      paths.released,
+    ];
+
+    let removed = 0;
+    for (const target of candidates) {
+      if (!target || keep.has(target)) {
+        continue;
+      }
+      if (!fs.existsSync(target)) {
+        continue;
+      }
+      fs.unlinkSync(target);
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      writeLog(`FLOW: cleanup req=${name} terminal=${terminal} removed=${removed}`);
+    }
+  }
+
+  function recordTerminal(name, terminal) {
+    cleanupStaleRequirementCopies(name, terminal);
+    writeLog(`FLOW: terminal req=${name} status=${terminal}`);
+    state.processed += 1;
+  }
+
   async function processRequirement({ name, fastBypass }) {
     const paths = getRequirementPaths(name);
 
@@ -1199,8 +1247,12 @@ async function main() {
 
       const result = await processRequirement({ name, fastBypass });
       if (["released", "to-clarify", "blocked", "none"].includes(result)) {
-        writeLog(`FLOW: terminal req=${name} status=${result}`);
-        state.processed += 1;
+        if (result === "none") {
+          writeLog(`FLOW: terminal req=${name} status=${result}`);
+          state.processed += 1;
+        } else {
+          recordTerminal(name, result);
+        }
       } else if (result === "pending") {
         writeLog(`FLOW: req=${name} remains pending in active pipeline`);
       }
@@ -1272,8 +1324,7 @@ async function main() {
 
         let terminal = terminalStateFor(name);
         if (terminal) {
-          writeLog(`FLOW: terminal req=${name} status=${terminal}`);
-          state.processed += 1;
+          recordTerminal(name, terminal);
           continue;
         }
 
@@ -1290,8 +1341,7 @@ async function main() {
 
         terminal = terminalStateFor(name);
         if (terminal) {
-          writeLog(`FLOW: terminal req=${name} status=${terminal}`);
-          state.processed += 1;
+          recordTerminal(name, terminal);
           continue;
         }
 
@@ -1315,8 +1365,7 @@ async function main() {
 
         terminal = terminalStateFor(name);
         if (terminal) {
-          writeLog(`FLOW: terminal req=${name} status=${terminal}`);
-          state.processed += 1;
+          recordTerminal(name, terminal);
           continue;
         }
 
@@ -1481,8 +1530,7 @@ async function main() {
 
       const terminal = terminalCheck(name);
       if (terminal) {
-        writeLog(`FLOW: terminal req=${name} status=${terminal}`);
-        state.processed += 1;
+        recordTerminal(name, terminal);
       }
 
       if (maxReq > 0 && state.processed >= maxReq) {
