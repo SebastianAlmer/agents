@@ -16,6 +16,7 @@ function parseArgs(argv) {
     verbose: undefined,
     detail: undefined,
     preflight: "",
+    manualDownstream: undefined,
     deployMode: "",
     finalPushOnSuccess: undefined,
     requireCleanStartForCommits: undefined,
@@ -104,6 +105,15 @@ function parseArgs(argv) {
     }
     if (key.startsWith("--preflight=")) {
       args.preflight = (raw.split("=", 2)[1] || "").toLowerCase();
+      continue;
+    }
+
+    if (key === "--manual-downstream") {
+      args.manualDownstream = true;
+      continue;
+    }
+    if (key === "--no-manual-downstream") {
+      args.manualDownstream = false;
       continue;
     }
 
@@ -212,7 +222,7 @@ function deepMerge(base, override) {
 
 function usage() {
   console.log(
-    "Usage: node scripts/setup-project.js --repo-root /abs/path [--flow standard|detailed|bulk|fast] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--preflight hard|soft|none|snapshot] [--qa-check <cmd>]"
+    "Usage: node scripts/setup-project.js --repo-root /abs/path [--flow standard|detailed|bulk|fast] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--preflight hard|soft|none|snapshot] [--manual-downstream|--no-manual-downstream] [--qa-check <cmd>]"
   );
 }
 
@@ -304,6 +314,10 @@ function main() {
 
   const verbose = normalizeBool(args.verbose, normalizeBool(base.run_defaults && base.run_defaults.verbose, false));
   const detail = normalizeBool(args.detail, normalizeBool(base.run_defaults && base.run_defaults.detail, false));
+  const manualDownstream = normalizeBool(
+    args.manualDownstream,
+    normalizeBool(base.run_defaults && base.run_defaults.manual_downstream, false)
+  );
 
   const finalPushOnSuccess = normalizeBool(
     args.finalPushOnSuccess,
@@ -387,6 +401,7 @@ function main() {
     `verbose = ${toTomlBool(verbose)}`,
     `detail = ${toTomlBool(detail)}`,
     `preflight = ${toTomlString(preflight)}`,
+    `manual_downstream = ${toTomlBool(manualDownstream)}`,
     "",
     "[preflight]",
     `snapshot_commit_message_prefix = ${toTomlString(snapshotCommitMessagePrefix)}`,
@@ -428,6 +443,7 @@ function main() {
   console.log(`- repo_root: ${repoRoot}`);
   console.log(`- run_defaults.flow: ${flow}`);
   console.log(`- run_defaults.preflight: ${preflight}`);
+  console.log(`- run_defaults.manual_downstream: ${manualDownstream}`);
   console.log(`- deploy.mode: ${deployMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);

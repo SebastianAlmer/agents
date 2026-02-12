@@ -15,6 +15,7 @@ It is project-agnostic: project-specific paths and defaults are configured local
 2) Run the flow:
 - `npm run flow`
 - `npm run flow -- --flow standard`
+- `npm run flow -- --flow standard --manual-downstream`
 - `npm run flow -- --flow detailed`
 - `npm run flow -- --flow bulk`
 - `npm run flow -- --flow fast`
@@ -44,8 +45,9 @@ Important fields:
 - `[paths].requirements_root`: requirements queues path.
 - `[paths].docs_dir`: docs path (default `<repo_root>/docs` when empty).
 - `[run_defaults]`: default values for all CLI switches.
-- `[deploy].mode`: `check | commit | commit_push`.
 - `[run_defaults].preflight`: `hard | soft | none | snapshot`.
+- `[run_defaults].manual_downstream`: if `true`, standard flow waits for key `n` before downstream stage.
+- `[deploy].mode`: `check | commit | commit_push`.
 - `[dev_routing].mode`: `fullstack_only | split`.
 - `[dev_agents]`: enable/disable FE/BE/FS dev agents.
 - `[qa].mandatory_checks`: project-specific QA baseline checks.
@@ -88,6 +90,8 @@ Agent thread handling:
 - Drop unstructured incoming requirements (`Anforderungen`) into `requirements/refinement`.
 - Process refinement items with an AI chat (for example ReqEng) and convert them into backlog-ready requirements in `requirements/backlog`.
 - Before starting a flow run, move the relevant backlog package into `requirements/selected`.
+- PO normalizes selected requirements into lean implementation briefs: focus on Goal + Scope + Task Outline with concise outcome-based acceptance criteria (no long AC/DoD micro-spec lists).
+- ARCH keeps requirements technically lean: add only essential architecture guardrails and avoid step-by-step implementation plans.
 - Unclear items from all stages should be moved to `to-clarify`.
 - Regularly sweep `requirements/to-clarify` with an AI chat, then move clarified items to `selected` (delivery-ready), `backlog` (clear but later), or `refinement` (still unclear).
 - `QA`/`SEC`/`UX` use `blocked` only for hard blockers. Non-blocking findings/questions go to `to-clarify`.
@@ -111,6 +115,11 @@ Two-phase cycle:
 2. Downstream phase (single global pass):
 - default (`[review].strategy = "bundle"`): `qa -> review bundle (QA always, SEC/UX risk-based, optional parallel) -> deploy -> DEPLOY -> released`
 - fallback (`[review].strategy = "classic"`): `qa -> QA -> sec -> SEC -> ux -> UX -> deploy -> DEPLOY -> released`
+
+Optional manual downstream gate (standard flow only):
+- enable via `--manual-downstream` or `[run_defaults].manual_downstream = true`
+- while enabled, runner keeps PO/ARCH/DEV loop active and waits for key `n` before running downstream stage
+- if no TTY is available, manual gate auto-disables for safety and logs a warning
 
 After active queues are empty, final global pass runs:
 - `QA final` (must output gate `pass`)
@@ -176,12 +185,19 @@ Runner writes a human-readable `Review Bundle Results` section into the requirem
 CLI switches:
 - `--flow standard|detailed|bulk|fast`
 - `--preflight hard|soft|none|snapshot`
+- `--manual-downstream | --no-manual-downstream`
 - `--max-req N`
 - `--verbose | --no-verbose`
 - `--detail | --no-detail`
 
 Every switch has a configurable default in `[run_defaults]`.
 CLI always overrides config for the current run.
+
+Keyboard controls during `run.js`:
+- `v`: toggle verbose log output
+- `d`: toggle detail output
+- `s`: print queue summary snapshot
+- `n`: trigger downstream stage in standard mode when manual downstream gate is enabled
 
 ## Preflight modes
 

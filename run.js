@@ -16,6 +16,7 @@ function parseArgs(argv) {
     verbose: undefined,
     detail: undefined,
     preflight: undefined,
+    manualDownstream: undefined,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -95,6 +96,15 @@ function parseArgs(argv) {
     }
     if (arg === "--no-preflight") {
       args.preflight = "none";
+      continue;
+    }
+
+    if (arg === "--manual-downstream") {
+      args.manualDownstream = true;
+      continue;
+    }
+    if (arg === "--no-manual-downstream") {
+      args.manualDownstream = false;
       continue;
     }
 
@@ -196,7 +206,7 @@ function isRetryable(stderrText) {
 
 function printUsage() {
   console.log(
-    "Usage: node run.js [--flow standard|detailed|bulk|fast] [--preflight hard|soft|none|snapshot] [--max-req N] [--verbose|--no-verbose] [--detail|--no-detail]"
+    "Usage: node run.js [--flow standard|detailed|bulk|fast] [--preflight hard|soft|none|snapshot] [--manual-downstream|--no-manual-downstream] [--max-req N] [--verbose|--no-verbose] [--detail|--no-detail]"
   );
 }
 
@@ -430,6 +440,11 @@ async function main() {
   const flow = normalizeFlow(cli.flow, runtime.runDefaults.flow || runtime.flow.defaultMode);
   const maxReq = Number.isFinite(cli.maxReq) ? cli.maxReq : runtime.runDefaults.maxReq;
   const preflightMode = normalizePreflight(cli.preflight, runtime.runDefaults.preflight);
+  const manualDownstreamConfigured =
+    typeof cli.manualDownstream === "boolean"
+      ? cli.manualDownstream
+      : Boolean(runtime.runDefaults.manualDownstream);
+  const manualDownstreamActive = manualDownstreamConfigured && process.stdin.isTTY;
 
   const reviewStrategy = runtime.review && runtime.review.strategy === "classic" ? "classic" : "bundle";
   const reviewParallel =
@@ -487,6 +502,8 @@ async function main() {
     currentReqName: "",
     currentPhaseStart: 0,
     processed: 0,
+    manualDownstreamRequested: false,
+    manualDownstreamPromptShown: false,
   };
 
   const releasedSinceFinal = new Set();
@@ -626,6 +643,22 @@ async function main() {
       }
       if (name === "s") {
         emitSummaryStatus();
+        return;
+      }
+      if (name === "n") {
+        if (!manualDownstreamActive || flow !== "standard") {
+          return;
+        }
+        state.manualDownstreamRequested = true;
+        state.manualDownstreamPromptShown = false;
+        const planningLeft = countPlanningQueues();
+        if (planningLeft > 0) {
+          writeLog(
+            `FLOW: downstream requested; waiting for PO/ARCH/DEV queues to drain (selected+arch+dev=${planningLeft})`
+          );
+        } else {
+          writeLog("FLOW: downstream requested; starting QA/SEC/UX/DEPLOY in this cycle");
+        }
         return;
       }
       if (key.ctrl && name === "c") {
@@ -1782,6 +1815,7 @@ async function main() {
 
       const planningLeft = countPlanningQueues();
       if (planningLeft > 0) {
+        state.manualDownstreamPromptShown = false;
         if (!upstreamMadeProgress) {
           writeLog("FLOW: standard no progress in PO/ARCH/DEV phase, waiting for manual intervention");
         }
@@ -1790,6 +1824,22 @@ async function main() {
         }
         await sleep(idlePollMs);
         continue;
+      }
+
+      if (manualDownstreamActive) {
+        if (!state.manualDownstreamRequested) {
+          if (!state.manualDownstreamPromptShown) {
+            writeLog(
+              "FLOW: standard downstream paused; press 'n' to run QA/SEC/UX/DEPLOY once selected+arch+dev are empty"
+            );
+            state.manualDownstreamPromptShown = true;
+          }
+          await sleep(idlePollMs);
+          continue;
+        }
+        state.manualDownstreamRequested = false;
+        state.manualDownstreamPromptShown = false;
+        writeLog("FLOW: standard downstream trigger accepted; running QA/SEC/UX/DEPLOY");
       }
 
       // Phase 2: one global QA -> SEC -> UX -> DEPLOY pass over accumulated work.
@@ -2215,7 +2265,15 @@ async function main() {
   writeLog(`FLOW: repo=${runtime.repoRoot}`);
   writeLog(`FLOW: requirements=${runtime.requirementsRoot}`);
   writeLog(`FLOW: docs=${runtime.docsDir}`);
-  writeLog(`FLOW: run_defaults max_req=${maxReq} verbose=${state.verbose} detail=${state.detail}`);
+  writeLog(
+    `FLOW: run_defaults max_req=${maxReq} verbose=${state.verbose} detail=${state.detail} manual_downstream=${manualDownstreamConfigured}`
+  );
+  if (flow === "standard" && manualDownstreamConfigured && !process.stdin.isTTY) {
+    writeLog("WARN: manual_downstream=true but no TTY detected; continuing without manual downstream gate");
+  }
+  if (flow === "standard" && manualDownstreamActive) {
+    writeLog("FLOW: manual downstream gate enabled; press 'n' to run QA/SEC/UX/DEPLOY");
+  }
   writeLog(`FLOW: dev_routing mode=${runtime.devRouting.mode} default_scope=${runtime.devRouting.defaultScope}`);
   writeLog(
     `FLOW: dev_agents fe=${runtime.devAgents.useFe} be=${runtime.devAgents.useBe} fs=${runtime.devAgents.useFs}`

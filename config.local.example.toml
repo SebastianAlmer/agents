@@ -22,6 +22,8 @@ verbose = false
 detail = false
 # hard | soft | none | snapshot
 preflight = "soft"
+# if true, standard flow waits for manual key (n) before downstream QA/SEC/UX/DEPLOY
+manual_downstream = false
 
 [preflight]
 # Used in preflight mode "snapshot".

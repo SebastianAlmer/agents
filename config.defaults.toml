@@ -17,6 +17,8 @@ max_req = 0
 verbose = false
 detail = false
 preflight = "soft"
+# if true, standard flow waits for manual key (n) before downstream QA/SEC/UX/DEPLOY
+manual_downstream = false
 
 [preflight]
 snapshot_commit_message_prefix = "chore(flow): preflight snapshot"
