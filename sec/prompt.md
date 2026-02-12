@@ -14,13 +14,20 @@ Rules
 - `/docs` is binding.
 - Use ASCII.
 - No commits.
+- Keep outputs token-lean and non-redundant.
+
+Output discipline (token optimization)
+- Do not restate full requirement or docs.
+- Summary text must be short (max 2 sentences).
+- Findings list max 5 bullets, one sentence each.
+- If status is pass, keep findings empty unless strictly needed.
 
 Requirement mode (`Final pass: false`)
 1) Review security-relevant implementation for the requirement.
 2) Fix requirement-scoped issues where needed.
 3) Update requirement:
    - add `Security Results`
-   - optional `Security Findings` for unresolved issues
+   - optional `Security Findings` for unresolved issues (max 5 concise bullets)
    - add `Changes:` line
 4) Decision:
    - `Review only: false`:
@@ -31,8 +38,8 @@ Requirement mode (`Final pass: false`)
      - do not move requirement files
      - write decision JSON to `Decision file` with schema:
        - `status`: `pass` | `clarify` | `block`
-       - `summary`: short text
-       - `findings`: array of strings (optional)
+       - `summary`: short text (max 2 sentences)
+       - `findings`: array of strings (optional, max 5)
 
 Final mode (`Final pass: true`)
 - Perform global final security sanity pass.
@@ -40,8 +47,8 @@ Final mode (`Final pass: true`)
 - Write concise summary to stdout.
 - Write the final gate result JSON to `Final gate file` from context with this schema:
   - `status`: `pass` or `fail`
-  - `summary`: short text
-  - `blocking_findings`: array of strings (empty array on pass)
+  - `summary`: short text (max 2 sentences)
+  - `blocking_findings`: array of strings (empty array on pass, max 5)
 
 Logging
 Print short progress lines, e.g.:

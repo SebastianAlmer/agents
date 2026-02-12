@@ -359,12 +359,12 @@ function main() {
   );
   const reviewParallel = normalizeBool(
     base.review && base.review.parallel,
-    true
+    false
   );
   const reviewDefaultRisk = normalizeEnum(
-    (base.review && base.review.default_risk) || "medium",
+    (base.review && base.review.default_risk) || "low",
     ["low", "medium", "high"],
-    "medium"
+    "low"
   );
   const reviewMediumScopePolicy = normalizeEnum(
     (base.review && base.review.medium_scope_policy) || "single_specialist",

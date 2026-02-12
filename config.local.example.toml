@@ -55,9 +55,9 @@ mandatory_checks = []
 # bundle = risk-based review bundle with aggregator (optimized)
 # classic = sequential qa -> sec -> ux
 strategy = "bundle"
-parallel = true
+parallel = false
 # low | medium | high
-default_risk = "medium"
+default_risk = "low"
 # single_specialist | full
 medium_scope_policy = "single_specialist"
 

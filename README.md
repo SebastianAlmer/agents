@@ -165,7 +165,7 @@ Configured via `[review]`:
 - `strategy = "bundle"` (default): risk-based review bundle with aggregator.
 - `strategy = "classic"`: sequential review path (`QA -> SEC -> UX`).
 - `parallel = true|false`: run bundle reviewers in parallel or sequentially.
-- `default_risk = "low|medium|high"`: fallback risk if requirement has no explicit risk tag.
+- `default_risk = "low|medium|high"`: fallback risk if requirement has no explicit risk tag (default is `low` for token efficiency).
 - `medium_scope_policy = "single_specialist|full"`: controls medium-risk routing.
 - `single_specialist` means medium frontend scope routes to `QA+UX` and backend scope routes to `QA+SEC`.
 - `full` means medium scope routes to `QA+SEC+UX`.
@@ -173,6 +173,10 @@ Configured via `[review]`:
 Bundle front matter hints (optional):
 - `review_risk` (or `risk` / `risk_level`): `low|medium|high`
 - `review_scope`: `qa_only|qa_sec|qa_ux|full`
+
+Recommended token-saving policy:
+- PO/ARCH should default to `review_risk: low` + `review_scope: qa_only` for clear contained work.
+- Escalate risk/scope only when justified by real security/compliance/cross-cutting risk.
 
 Bundle aggregation rules:
 - any reviewer returns `block` => move to `blocked`

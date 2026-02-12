@@ -448,7 +448,7 @@ async function main() {
 
   const reviewStrategy = runtime.review && runtime.review.strategy === "classic" ? "classic" : "bundle";
   const reviewParallel =
-    runtime.review && typeof runtime.review.parallel === "boolean" ? runtime.review.parallel : true;
+    runtime.review && typeof runtime.review.parallel === "boolean" ? runtime.review.parallel : false;
   const reviewDefaultRisk =
     runtime.review && runtime.review.defaultRisk ? runtime.review.defaultRisk : "medium";
   const reviewMediumScopePolicy =

@@ -23,8 +23,12 @@ Decision
 
 Required updates
 - Add/update section `Architecture Notes` (1-5 concise bullets, or `None`).
-- Reassess front matter `review_risk` (`low|medium|high`) based on architecture complexity and impact.
-- Optional: set/adjust front matter `review_scope` (`qa_only|qa_sec|qa_ux|full`) when review routing should be explicit.
+- Reassess front matter review routing with token-aware defaults:
+  - keep `review_risk: low` unless there is a real risk reason to increase it
+  - keep/set `review_scope: qa_only` for clear low-risk requirements
+  - use `review_risk: medium` for moderate cross-cutting complexity or elevated uncertainty
+  - use `review_risk: high` only for strong risk drivers (security/privacy/compliance/auth/permissions/payments/data migration/destructive behavior)
+  - set broader `review_scope` (`qa_sec`, `qa_ux`, `full`) only when justified by risk
 - For complex requirements, optionally add `Implementation Guardrails` (2-5 bullets, principle-level; not step-by-step).
 - Optional for non-trivial tradeoffs: add `Risks & Tradeoffs` (1-3 concise bullets).
 - Update front matter `status` to `dev` or `to-clarify`.
