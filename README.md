@@ -80,8 +80,9 @@ Agent thread/session files are written to `.runtime/threads/` and are ignored by
 `refinement` and `backlog` are customer-managed intake/planning queues; delivery runs start from `selected`.
 
 Agent thread handling:
-- Each role keeps its own local thread file under `.runtime/threads/<role>/`.
-- On context overflow, the role thread is reset automatically and the turn is retried once.
+- `PO`/`ARCH`/`QA`/`SEC`/`UX`/`DEPLOY` keep one local thread file per role under `.runtime/threads/<role>/`.
+- `DEV_FE`/`DEV_BE`/`DEV_FS` auto runs use per-requirement thread files (`thread.auto.<scope>-<req>.txt`) to isolate context across requirements.
+- On context overflow, the active thread is reset automatically and the turn is retried once.
 - In auto mode, a compact turn is attempted every 20 successful agent turns (default) via `codex exec resume <thread_id> "/compact"`.
 - Override compact interval with env `CODEX_AUTO_COMPACT_EVERY` (`0` disables).
 
