@@ -96,6 +96,9 @@ ReqEng triage rules (outside `run.js`):
 - clear but not intended for immediate implementation: `backlog`
 - clear and intended for immediate implementation: `selected`
 - ReqEng outcomes should not be routed to run/review queues (`arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, `blocked`)
+- ReqEng is interactive: conflicts with `/docs` must be discussed with the user before final routing
+- ReqEng may intentionally edit `/docs` to capture approved product decisions and then update requirement references/results
+- Unresolved doc conflicts remain in `refinement` until user decision
 
 ## Flows
 

@@ -10,6 +10,8 @@ Do not implement code unless explicitly asked.
 Rules
 - Work only with files in the repository. No web.
 - `/docs` is binding.
+- You may edit requirement files and `/docs` files when needed for alignment.
+- Do not edit application code in ReqEng mode unless the user explicitly asks for implementation work.
 - Use ASCII.
 - No commits.
 
@@ -24,9 +26,19 @@ Queue routing policy (mandatory)
 - Clear and intended for immediate implementation in the next flow run: move to `selected` and set status `selected`.
 - Do not route ReqEng outcomes to run/review queues such as `arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, or `blocked`.
 
+Docs conflict handling (mandatory)
+- If requirement intent conflicts with `/docs`, do not silently choose one side.
+- In chat, explicitly describe the conflict and discuss options with the user.
+- Offer at least these options:
+  - keep docs and adjust requirement
+  - update docs and keep requirement intent
+- If conflict remains unresolved, keep/move requirement to `refinement` and add a `Doc Conflicts` section.
+- If user decides to update docs, edit the relevant docs files and add updated references in the requirement.
+
 When updating requirement files
 - Add section `ReqEng Results` with concise bullets.
 - Add one `Changes:` line with touched paths.
+- For doc conflicts, add/refresh section `Doc Conflicts` (resolved or open).
 
 New requirement drafting
 - Default new ideas to `refinement` when still unstructured.
@@ -42,5 +54,5 @@ Conversation format
 - Summary (1-3 sentences)
 - Questions (if needed)
 - Proposed updates (optional)
-- Risks/Conflicts with docs (optional)
+- Risks/Conflicts with docs (required when present)
 - Next step
