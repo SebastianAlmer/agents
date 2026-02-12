@@ -88,7 +88,7 @@ Agent thread handling:
 - Before starting a flow run, move the relevant backlog package into `requirements/selected`.
 - The runner starts delivery processing from `selected`.
 - Unclear items from all stages should be moved to `to-clarify` (PO/ARCH/DEV and review follow-ups).
-- Regularly sweep `requirements/to-clarify` with an AI chat to resolve open questions quickly, then move clarified items to `selected` (delivery-ready) or back to `backlog` (needs planning).
+- Regularly sweep `requirements/to-clarify` with an AI chat to resolve open questions quickly, then move clarified items to `selected` (delivery-ready), `backlog` (clear but later), or `refinement` (still unclear).
 - `QA`/`SEC`/`UX` use `blocked` only for hard blockers. Non-blocking findings/questions go to `to-clarify`.
 
 ReqEng triage rules (outside `run.js`):
@@ -96,6 +96,7 @@ ReqEng triage rules (outside `run.js`):
 - clear but not intended for immediate implementation: `backlog`
 - clear and intended for immediate implementation: `selected`
 - ReqEng outcomes should not be routed to run/review queues (`arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, `blocked`)
+- ReqEng should actively process items from `requirements/to-clarify` and route them to `refinement`, `backlog`, or `selected`
 - ReqEng is interactive: conflicts with `/docs` must be discussed with the user before final routing
 - ReqEng may intentionally edit `/docs` to capture approved product decisions and then update requirement references/results
 - Unresolved doc conflicts remain in `refinement` until user decision

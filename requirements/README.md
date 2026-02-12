@@ -23,4 +23,5 @@ Queue intent:
 - ReqEng intake triage: unclear -> `refinement`, clear-but-later -> `backlog`, clear-and-immediate -> `selected`.
 - Delivery runs start from `selected`.
 - Unclear items from any stage go to `to-clarify`.
+- ReqEng processes `to-clarify` items with the user and routes them to `refinement`, `backlog`, or `selected`.
 - Hard blockers from `qa`/`sec`/`ux` go to `blocked`.
