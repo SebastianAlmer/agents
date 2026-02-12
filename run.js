@@ -1162,7 +1162,7 @@ async function main() {
   }
 
   async function runDetailedOrFast() {
-    const stageOrder = ["selected"];
+    const stageOrder = ["selected", "arch", "dev", "qa", "sec", "ux", "deploy"];
     const fastBypass = flow === "fast";
 
     while (true) {
@@ -1175,9 +1175,7 @@ async function main() {
       if (!target) {
         const active = countActivePipeline();
         if (active > 0) {
-          writeLog(
-            "FLOW: active requirements exist outside selected; run starts from selected only. Move items back to selected or finish manually."
-          );
+          writeLog("FLOW: runnable queue detection mismatch; waiting for manual intervention.");
           if (maxReq > 0) {
             break;
           }
@@ -1232,19 +1230,8 @@ async function main() {
         continue;
       }
 
-      const planningAtStart = countPlanningQueues();
-      if (planningAtStart > 0 && countFiles(queue.selected) === 0) {
-        writeLog(
-          "FLOW: planning requirements exist outside selected; move items to selected or finish PO/ARCH/DEV queues manually."
-        );
-        if (maxReq > 0) {
-          break;
-        }
-        await sleep(idlePollMs);
-        continue;
-      }
-
-      // Phase 1: process each selected requirement through PO -> ARCH -> DEV.
+      // Phase 1: continue PO -> ARCH -> DEV work until planning queues are empty.
+      // This also resumes partially processed requirements left in arch/dev.
       let upstreamMadeProgress = false;
       while (true) {
         if (maxReq > 0 && state.processed >= maxReq) {
@@ -1252,20 +1239,36 @@ async function main() {
         }
 
         const selectedFile = getFirstFile(queue.selected);
-        if (!selectedFile) {
+        const archFile = getFirstFile(queue.arch);
+        const devFile = getFirstFile(queue.dev);
+
+        if (!selectedFile && !archFile && !devFile) {
           break;
         }
 
         upstreamMadeProgress = true;
-        const name = path.basename(selectedFile);
+        let name = "";
 
-        await runPhase({
-          phase: "PO",
-          scriptPath: scripts.PO,
-          args: ["--auto", "--requirement", selectedFile],
-          reqName: name,
-          successPaths: [path.join(queue.arch, name), path.join(queue.toClarify, name)],
-        });
+        if (selectedFile) {
+          name = path.basename(selectedFile);
+          await runPhase({
+            phase: "PO",
+            scriptPath: scripts.PO,
+            args: ["--auto", "--requirement", selectedFile],
+            reqName: name,
+            successPaths: [path.join(queue.arch, name), path.join(queue.toClarify, name)],
+          });
+        } else if (archFile) {
+          name = path.basename(archFile);
+          if (state.detail || state.verbose) {
+            writeLog(`FLOW: standard resume req=${name} from ARCH queue`);
+          }
+        } else {
+          name = path.basename(devFile);
+          if (state.detail || state.verbose) {
+            writeLog(`FLOW: standard resume req=${name} from DEV queue`);
+          }
+        }
 
         let terminal = terminalStateFor(name);
         if (terminal) {
@@ -1502,17 +1505,6 @@ async function main() {
           break;
         }
         writeLog(`FLOW: waiting ${idlePollSeconds}s before next selected check`);
-        await sleep(idlePollMs);
-        continue;
-      }
-
-      if (countFiles(queue.selected) === 0) {
-        writeLog(
-          "FLOW: active requirements exist outside selected; run starts from selected only. Move items back to selected or finish manually."
-        );
-        if (maxReq > 0) {
-          break;
-        }
         await sleep(idlePollMs);
         continue;
       }

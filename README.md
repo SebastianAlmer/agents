@@ -129,7 +129,8 @@ Per-requirement deep pipeline:
 7. `deploy -> DEPLOY -> released`
 
 Run start policy:
-- all flow variants start from requirements in `selected`.
+- New delivery work should always be placed in `selected`.
+- If earlier runs left items in `arch`, `dev`, `qa`, `sec`, `ux`, or `deploy`, flow runs resume and continue those queues automatically.
 
 ### `bulk`
 
