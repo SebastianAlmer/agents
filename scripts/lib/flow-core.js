@@ -534,6 +534,7 @@ function parseDecisionFile(filePath, fallbackLabel = "agent") {
 
     return {
       status: normalizeStatus(raw.status),
+      statusRaw: rawStatus,
       summary: String(raw.summary || "").trim() || `Decision from ${fallbackLabel}`,
       findings,
       new_requirements: Array.isArray(raw.new_requirements) ? raw.new_requirements : [],
@@ -574,6 +575,7 @@ function parseDecisionFile(filePath, fallbackLabel = "agent") {
   } catch (error) {
     return {
       status: "",
+      statusRaw: "",
       summary: `Invalid decision file for ${fallbackLabel}: ${error.message}`,
       findings: [],
       new_requirements: [],

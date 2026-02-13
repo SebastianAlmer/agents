@@ -507,6 +507,23 @@ function selectIntakeSource(runtime) {
   return { path: "", queue: "" };
 }
 
+function listIntakeCandidates(runtime) {
+  const out = [];
+  const order = [
+    ["toClarify", runtime.queues.toClarify],
+    ["humanInput", runtime.queues.humanInput],
+    ["backlog", runtime.queues.backlog],
+    ["refinement", runtime.queues.refinement],
+  ];
+  for (const [queueName, queueDir] of order) {
+    const files = listQueueFiles(queueDir);
+    for (const filePath of files) {
+      out.push({ path: filePath, queue: queueName });
+    }
+  }
+  return out;
+}
+
 function normalizePoTarget(queueName) {
   const normalized = String(queueName || "").trim().toLowerCase();
   if (
@@ -538,6 +555,73 @@ function normalizePoTarget(queueName) {
     return "wontDo";
   }
   return "";
+}
+
+function inferPoTargetFromText(text) {
+  const raw = String(text || "").toLowerCase();
+  if (!raw.trim()) {
+    return "";
+  }
+
+  if (
+    /\bhuman[- ]decision[- ]needed\b/.test(raw) ||
+    /\btarget\s*:\s*human[- ]decision[- ]needed\b/.test(raw)
+  ) {
+    return "humanDecisionNeeded";
+  }
+  if (
+    /\bto[- ]clarify\b/.test(raw) ||
+    /\btarget\s*:\s*to[- ]clarify\b/.test(raw)
+  ) {
+    return "toClarify";
+  }
+  if (
+    /\bwont[- ]do\b/.test(raw) ||
+    /\btarget\s*:\s*wont[- ]do\b/.test(raw)
+  ) {
+    return "wontDo";
+  }
+  if (/\bselected\b/.test(raw) || /\btarget\s*:\s*selected\b/.test(raw)) {
+    return "selected";
+  }
+  if (/\bbacklog\b/.test(raw) || /\btarget\s*:\s*backlog\b/.test(raw)) {
+    return "backlog";
+  }
+  if (/\brefinement\b/.test(raw) || /\btarget\s*:\s*refinement\b/.test(raw)) {
+    return "refinement";
+  }
+  return "";
+}
+
+function inferPoTargetFromDecision(decision) {
+  if (!decision || typeof decision !== "object") {
+    return "";
+  }
+  const fromStatusRaw = normalizePoTarget(decision.statusRaw);
+  if (fromStatusRaw) {
+    return fromStatusRaw;
+  }
+
+  const text = [
+    String(decision.summary || ""),
+    ...(Array.isArray(decision.findings) ? decision.findings : []).map((item) => String(item || "")),
+  ].join("\n");
+  return inferPoTargetFromText(text);
+}
+
+function inferPoTargetFromRequirementFile(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return "";
+  }
+  const raw = fs.readFileSync(filePath, "utf8");
+  const poResultsMatch = raw.match(/\n##\s+PO Results\b([\s\S]*?)(?=\n##\s+|$)/i);
+  if (poResultsMatch) {
+    const fromPoResults = inferPoTargetFromText(poResultsMatch[1]);
+    if (fromPoResults) {
+      return fromPoResults;
+    }
+  }
+  return inferPoTargetFromText(raw);
 }
 
 function routeFromPo(runtime, filePath, status) {
@@ -791,12 +875,30 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
   const explicitTarget = normalizePoTarget(decision.targetQueue);
   let targetQueue = explicitTarget || routeFromPo(runtime, currentPath, status);
   const hardVisionConflict = isHardVisionConflict(decision);
+  const inferredTarget = inferPoTargetFromDecision(decision) || inferPoTargetFromRequirementFile(currentPath);
 
   if (!explicitTarget && wantsWontDo(decision)) {
     targetQueue = "wontDo";
     appendQueueSection(currentPath, [
       "PO runner wont-do guard",
       "- detected duplicate/already-implemented/invalid requirement signal; routed to wont-do",
+    ]);
+  }
+
+  if (
+    !explicitTarget &&
+    inferredTarget &&
+    inferredTarget !== targetQueue &&
+    (
+      targetQueue === "refinement" ||
+      targetQueue === "toClarify" ||
+      targetQueue === "humanDecisionNeeded"
+    )
+  ) {
+    targetQueue = inferredTarget;
+    appendQueueSection(currentPath, [
+      "PO runner decision-inference guard",
+      `- inferred target '${inferredTarget}' from PO output and requirement content`,
     ]);
   }
 
@@ -958,16 +1060,29 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
   let processed = 0;
   const perCycleCap = Math.max(1, runtime.po.intakeMaxPerCycle || 3);
   while (!controls.stopRequested && countFiles(runtime.queues.selected) < highWatermark && processed < perCycleCap) {
-    const source = selectIntakeSource(runtime);
-    if (!source.path) {
+    const candidates = listIntakeCandidates(runtime);
+    if (candidates.length === 0) {
       break;
     }
-    const handled = await runPoIntakeOnFile(runtime, source.path, controls, source.queue, state, cycle);
-    if (!handled) {
+
+    let handledAny = false;
+    for (const source of candidates) {
+      if (controls.stopRequested || countFiles(runtime.queues.selected) >= highWatermark || processed >= perCycleCap) {
+        break;
+      }
+      const handled = await runPoIntakeOnFile(runtime, source.path, controls, source.queue, state, cycle);
+      if (!handled) {
+        continue;
+      }
+      handledAny = true;
+      processed += 1;
+      progressed = true;
+    }
+
+    if (!handledAny) {
+      log(controls, "fillSelected: no actionable intake candidates this cycle");
       break;
     }
-    processed += 1;
-    progressed = true;
   }
   return progressed;
 }
