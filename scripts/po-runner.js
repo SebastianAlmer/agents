@@ -150,6 +150,14 @@ function normalizePositiveInt(value, fallback, min = 1) {
   return parsed;
 }
 
+function normalizeNonNegativeInt(value, fallback) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
 function queueSummary(runtime) {
   return {
     refinement: countFiles(runtime.queues.refinement),
@@ -265,6 +273,57 @@ async function waitIfGloballyPaused(runtime, controls) {
     : fallbackMs;
   await sleep(waitMs);
   return true;
+}
+
+function planningQueuesBusy(runtime) {
+  return countFiles(runtime.queues.arch) > 0 || countFiles(runtime.queues.dev) > 0;
+}
+
+function shouldFillSelected(runtime, lowWatermark) {
+  if (countFiles(runtime.queues.selected) > lowWatermark) {
+    return false;
+  }
+  if (planningQueuesBusy(runtime)) {
+    return false;
+  }
+  return true;
+}
+
+function buildBundleId() {
+  const now = new Date();
+  const pad = (v) => String(v).padStart(2, "0");
+  return `BUNDLE-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+function setFrontMatterField(filePath, key, value) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+  const raw = fs.readFileSync(filePath, "utf8");
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) {
+    return false;
+  }
+  const keyPattern = new RegExp(`^${String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:.*$`, "m");
+  const frontMatter = keyPattern.test(match[1])
+    ? match[1].replace(keyPattern, `${key}: ${value}`)
+    : `${match[1]}\n${key}: ${value}`;
+  const next = raw.replace(/^---\r?\n[\s\S]*?\r?\n---/, `---\n${frontMatter}\n---`);
+  fs.writeFileSync(filePath, next, "utf8");
+  return true;
+}
+
+function assignBundleIdToSelected(runtime, bundleId) {
+  if (!bundleId) {
+    return 0;
+  }
+  let updated = 0;
+  for (const filePath of listQueueFiles(runtime.queues.selected)) {
+    if (setFrontMatterField(filePath, "bundle_id", bundleId)) {
+      updated += 1;
+    }
+  }
+  return updated;
 }
 
 function validateProductVision(runtime) {
@@ -1197,9 +1256,13 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
 
-    const selectedCount = countFiles(runtime.queues.selected);
-    if (selectedCount < lowWatermark || selectedCount < highWatermark) {
-      await fillSelected(runtime, highWatermark, controls, state, cycle);
+    if (shouldFillSelected(runtime, lowWatermark)) {
+      const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
+      if (filled && countFiles(runtime.queues.selected) > 0) {
+        const bundleId = buildBundleId();
+        const tagged = assignBundleIdToSelected(runtime, bundleId);
+        log(controls, `bundle prepared id=${bundleId} selected_tagged=${tagged}`);
+      }
     }
 
     if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
@@ -1247,7 +1310,6 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
 
-    const selectedCount = countFiles(runtime.queues.selected);
     const currentReleased = releasedSignature(runtime);
     const releasedChanged = currentReleased !== lastReleased;
     if (releasedChanged) {
@@ -1255,7 +1317,7 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
       log(controls, "released changed: triggering PO vision reconciliation pass");
     }
 
-    const planningFillNeeded = selectedCount < highWatermark && !visionComplete;
+    const planningFillNeeded = shouldFillSelected(runtime, lowWatermark) && !visionComplete;
     if (planningFillNeeded || releasedChanged) {
       const cycle = await runVisionCycle(runtime, controls);
       if (cycle.paused) {
@@ -1317,8 +1379,13 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
       );
     }
 
-    if (countFiles(runtime.queues.selected) < lowWatermark) {
-      await fillSelected(runtime, highWatermark, controls, state, cycle);
+    if (shouldFillSelected(runtime, lowWatermark)) {
+      const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
+      if (filled && countFiles(runtime.queues.selected) > 0) {
+        const bundleId = buildBundleId();
+        const tagged = assignBundleIdToSelected(runtime, bundleId);
+        log(controls, `bundle prepared id=${bundleId} selected_tagged=${tagged}`);
+      }
     }
 
     if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
@@ -1352,7 +1419,7 @@ async function main() {
     validateProductVision(runtime);
   }
 
-  const lowWatermark = normalizePositiveInt(args.lowWatermark, runtime.po.selectedLowWatermark);
+  const lowWatermark = normalizeNonNegativeInt(args.lowWatermark, runtime.po.selectedLowWatermark);
   const highWatermark = Math.max(
     lowWatermark,
     normalizePositiveInt(args.highWatermark, runtime.po.selectedHighWatermark)
