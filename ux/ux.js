@@ -9,9 +9,8 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  runCodexExecFiltered,
   runCodexExec,
-  readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -155,6 +154,7 @@ async function main() {
   const repoRoot = runtime.repoRoot;
   const docsDir = runtime.docsDir;
   const uxDir = runtime.queues.ux;
+  const secDir = runtime.queues.sec;
   const deployDir = runtime.queues.deploy;
   const clarifyDir = runtime.queues.toClarify;
   const blockedDir = runtime.queues.blocked;
@@ -205,6 +205,7 @@ async function main() {
   }
   console.log(`UX: review-only ${reviewOnly}`);
   console.log(`UX: batch ${batch}`);
+  console.log(`UX: sec dir ${secDir}`);
   console.log(`UX: deploy dir ${deployDir}`);
   console.log(`UX: to-clarify dir ${clarifyDir}`);
   console.log(`UX: blocked dir ${blockedDir}`);
@@ -221,7 +222,7 @@ async function main() {
   const uxListText = uxFiles.length > 0
     ? uxFiles.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nUX dir: ${uxDir}\nDeploy dir: ${deployDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nUX queue files:\n${uxListText}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nUX dir: ${uxDir}\nSec dir: ${secDir}\nDeploy dir: ${deployDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nUX queue files:\n${uxListText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("UX"));
@@ -234,41 +235,15 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   if (!auto) {
-    const verbose = { value: false };
-    const detail = { value: false };
-    console.log("UX: chat mode (Alt+V verbose, Alt+D detail, q to quit)");
-    while (true) {
-      const msg = await readInputWithHotkeys({
-        prompt: "UX> ",
-        verboseRef: verbose,
-        detailRef: detail,
-      });
-      if (!msg) {
-        continue;
-      }
-      const trimmed = msg.trim().toLowerCase();
-      if (["q", "quit", "exit"].includes(trimmed)) {
-        break;
-      }
-      const promptToSend = threadId
-        ? `${context}\n\nUser: ${msg}`
-        : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const result = await runCodexExecFiltered({
-        prompt: promptToSend,
-        repoRoot,
-        configArgs,
-        threadId,
-        verboseRef: verbose,
-        threadFile,
-        agentsRoot: runtime.agentsRoot,
-        agentLabel: "UX",
-        autoCompact: auto,
-      });
-      if (result.threadId) {
-        writeThreadId(threadFile, result.threadId);
-        threadId = result.threadId;
-      }
-    }
+    await startInteractiveCodexAgent({
+      agentLabel: "UX",
+      repoRoot,
+      configArgs,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      bootstrapPrompt: fullPrompt,
+      threadId,
+    });
     process.exit(0);
   }
 

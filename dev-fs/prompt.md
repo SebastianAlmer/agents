@@ -11,6 +11,7 @@ Rules
 - `/docs` is binding.
 - Implement only requirement + docs scope.
 - Use conservative assumptions for missing details.
+- You may change frontend, backend, and database/schema/migrations as needed for a complete implementation.
 - Use ASCII in new/changed files unless file already uses Unicode.
 - No commits.
 

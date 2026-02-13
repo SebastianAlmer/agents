@@ -6,6 +6,10 @@
   "scripts": {
     "start": "node run.js",
     "flow": "node run.js",
+    "po-runner": "node scripts/po-runner.js",
+    "delivery-runner": "node scripts/delivery-runner.js",
+    "run-po": "node scripts/run-po.js",
+    "run-ops": "node scripts/run-ops.js",
     "setup": "node scripts/setup-project.js",
     "reqeng": "node reqeng/reqeng.js"
   }

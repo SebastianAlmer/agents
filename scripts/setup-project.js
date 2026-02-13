@@ -11,6 +11,7 @@ function parseArgs(argv) {
     repoRoot: "",
     requirementsRoot: "",
     docsDir: "",
+    productVisionDir: "",
     flow: "",
     maxReq: undefined,
     verbose: undefined,
@@ -24,6 +25,9 @@ function parseArgs(argv) {
     useFe: undefined,
     useBe: undefined,
     useFs: undefined,
+    bundleMinSize: undefined,
+    bundleMaxSize: undefined,
+    poMode: "",
     qaChecks: [],
   };
 
@@ -60,6 +64,15 @@ function parseArgs(argv) {
     }
     if (key.startsWith("--docs-dir=")) {
       args.docsDir = raw.split("=", 2)[1] || "";
+      continue;
+    }
+
+    if (key === "--product-vision-dir") {
+      args.productVisionDir = argv[++i] || "";
+      continue;
+    }
+    if (key.startsWith("--product-vision-dir=")) {
+      args.productVisionDir = raw.split("=", 2)[1] || "";
       continue;
     }
 
@@ -153,6 +166,31 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (key === "--bundle-min-size") {
+      args.bundleMinSize = parseInt(argv[++i] || "0", 10);
+      continue;
+    }
+    if (key.startsWith("--bundle-min-size=")) {
+      args.bundleMinSize = parseInt(raw.split("=", 2)[1] || "0", 10);
+      continue;
+    }
+    if (key === "--bundle-max-size") {
+      args.bundleMaxSize = parseInt(argv[++i] || "0", 10);
+      continue;
+    }
+    if (key.startsWith("--bundle-max-size=")) {
+      args.bundleMaxSize = parseInt(raw.split("=", 2)[1] || "0", 10);
+      continue;
+    }
+    if (key === "--po-mode") {
+      args.poMode = (argv[++i] || "").toLowerCase();
+      continue;
+    }
+    if (key.startsWith("--po-mode=")) {
+      args.poMode = (raw.split("=", 2)[1] || "").toLowerCase();
+      continue;
+    }
+
     if (key === "--enable-dev-fe") {
       args.useFe = true;
       continue;
@@ -222,7 +260,7 @@ function deepMerge(base, override) {
 
 function usage() {
   console.log(
-    "Usage: node scripts/setup-project.js --repo-root /abs/path [--flow standard|detailed|bulk|fast] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--preflight hard|soft|none|snapshot] [--manual-downstream|--no-manual-downstream] [--qa-check <cmd>]"
+    "Usage: node scripts/setup-project.js --repo-root /abs/path [--flow standard|dev-only] [--product-vision-dir /abs/path] [--po-mode vision|intake] [--bundle-min-size N --bundle-max-size N] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--preflight hard|soft|none|snapshot] [--manual-downstream|--no-manual-downstream] [--qa-check <cmd>]"
   );
 }
 
@@ -281,10 +319,18 @@ function main() {
 
   const requirementsRoot = args.requirementsRoot || (base.paths && base.paths.requirements_root) || "./requirements";
   const docsDir = args.docsDir !== "" ? args.docsDir : ((base.paths && base.paths.docs_dir) || "");
+  const productVisionDir = args.productVisionDir !== ""
+    ? args.productVisionDir
+    : ((base.paths && base.paths.product_vision_dir) || "");
 
   const flow = normalizeEnum(
     args.flow || (base.run_defaults && base.run_defaults.flow) || "standard",
-    ["standard", "detailed", "bulk", "fast"],
+    ["standard", "dev-only"],
+    "standard"
+  );
+  const flowDefaultMode = normalizeEnum(
+    (base.flow && base.flow.default_mode) || "standard",
+    ["standard", "dev-only", "auto"],
     "standard"
   );
 
@@ -295,9 +341,9 @@ function main() {
   );
 
   const deployMode = normalizeEnum(
-    args.deployMode || (base.deploy && base.deploy.mode) || "commit",
+    args.deployMode || (base.deploy && base.deploy.mode) || "commit_push",
     ["check", "commit", "commit_push"],
-    "commit"
+    "commit_push"
   );
 
   const routingMode = normalizeEnum(
@@ -345,6 +391,24 @@ function main() {
   if (!useFe && !useBe && !useFs) {
     throw new Error("Invalid dev agent selection: at least one of FE/BE/FS must be enabled.");
   }
+
+  const baseLoops = base.loops && typeof base.loops === "object" ? base.loops : {};
+  const bundleMinSize = Number.isFinite(args.bundleMinSize)
+    ? Math.max(1, args.bundleMinSize)
+    : Number.isFinite(baseLoops.bundle_min_size)
+      ? Math.max(1, baseLoops.bundle_min_size)
+      : 5;
+  const bundleMaxSizeRaw = Number.isFinite(args.bundleMaxSize)
+    ? Math.max(1, args.bundleMaxSize)
+    : Number.isFinite(baseLoops.bundle_max_size)
+      ? Math.max(1, baseLoops.bundle_max_size)
+      : 20;
+  const bundleMaxSize = Math.max(bundleMinSize, bundleMaxSizeRaw);
+  const poMode = normalizeEnum(
+    args.poMode || (base.po && base.po.default_mode) || "vision",
+    ["vision", "intake"],
+    "vision"
+  );
 
   const qaChecks = args.qaChecks.length > 0
     ? args.qaChecks
@@ -409,11 +473,21 @@ function main() {
     `repo_root = ${toTomlString(repoRoot)}`,
     `requirements_root = ${toTomlString(requirementsRoot)}`,
     `docs_dir = ${toTomlString(docsDir)}`,
+    `product_vision_dir = ${toTomlString(productVisionDir)}`,
+    "",
+    "[loops]",
+    `bundle_min_size = ${toTomlInt(bundleMinSize)}`,
+    `bundle_max_size = ${toTomlInt(bundleMaxSize)}`,
+    `po_poll_seconds = ${toTomlInt(Number.isFinite(baseLoops.po_poll_seconds) ? baseLoops.po_poll_seconds : 20)}`,
+    `delivery_poll_seconds = ${toTomlInt(Number.isFinite(baseLoops.delivery_poll_seconds) ? baseLoops.delivery_poll_seconds : 20)}`,
+    `max_retries = ${toTomlInt(Number.isFinite(baseLoops.max_retries) ? baseLoops.max_retries : 3)}`,
+    `retry_delay_seconds = ${toTomlInt(Number.isFinite(baseLoops.retry_delay_seconds) ? baseLoops.retry_delay_seconds : 2)}`,
+    `force_underfilled_after_cycles = ${toTomlInt(Number.isFinite(baseLoops.force_underfilled_after_cycles) ? baseLoops.force_underfilled_after_cycles : 3)}`,
     "",
     "[flow]",
-    `default_mode = ${toTomlString((base.flow && base.flow.default_mode) || "standard")}`,
+    `default_mode = ${toTomlString(flowDefaultMode)}`,
     `idle_poll_seconds = ${toTomlInt(Number.isFinite(base.flow && base.flow.idle_poll_seconds) ? base.flow.idle_poll_seconds : 300)}`,
-    `max_retries = ${toTomlInt(Number.isFinite(base.flow && base.flow.max_retries) ? base.flow.max_retries : 2)}`,
+    `max_retries = ${toTomlInt(Number.isFinite(base.flow && base.flow.max_retries) ? base.flow.max_retries : 3)}`,
     `retry_delay_seconds = ${toTomlInt(Number.isFinite(base.flow && base.flow.retry_delay_seconds) ? base.flow.retry_delay_seconds : 2)}`,
     "",
     "[run_defaults]",
@@ -431,6 +505,12 @@ function main() {
     `mode = ${toTomlString(deployMode)}`,
     `final_push_on_success = ${toTomlBool(finalPushOnSuccess)}`,
     `require_clean_start_for_commits = ${toTomlBool(requireCleanStartForCommits)}`,
+    "",
+    "[po]",
+    `default_mode = ${toTomlString(poMode)}`,
+    `vision_max_cycles = ${toTomlInt(Number.isFinite(base.po && base.po.vision_max_cycles) ? base.po.vision_max_cycles : 100)}`,
+    `vision_max_requirements = ${toTomlInt(Number.isFinite(base.po && base.po.vision_max_requirements) ? base.po.vision_max_requirements : 1000)}`,
+    `vision_stable_cycles = ${toTomlInt(Number.isFinite(base.po && base.po.vision_stable_cycles) ? base.po.vision_stable_cycles : 2)}`,
     "",
     "[dev_routing]",
     `mode = ${toTomlString(routingMode)}`,
@@ -475,10 +555,14 @@ function main() {
 
   console.log(`Wrote ${localPath}`);
   console.log(`- repo_root: ${repoRoot}`);
+  console.log(`- product_vision_dir: ${productVisionDir || "<default>"}`);
+  console.log(`- loops.bundle_min_size: ${bundleMinSize}`);
+  console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
   console.log(`- run_defaults.flow: ${flow}`);
   console.log(`- run_defaults.preflight: ${preflight}`);
   console.log(`- run_defaults.manual_downstream: ${manualDownstream}`);
   console.log(`- deploy.mode: ${deployMode}`);
+  console.log(`- po.default_mode: ${poMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
   console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, ux=${models.ux}, deploy=${models.deploy}`);

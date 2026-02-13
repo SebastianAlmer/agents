@@ -9,9 +9,8 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  runCodexExecFiltered,
   runCodexExec,
-  readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -99,41 +98,15 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   if (!auto) {
-    const verbose = { value: false };
-    const detail = { value: false };
-    console.log("ARCH: chat mode (Alt+V verbose, Alt+D detail, q to quit)");
-    while (true) {
-      const msg = await readInputWithHotkeys({
-        prompt: "ARCH> ",
-        verboseRef: verbose,
-        detailRef: detail,
-      });
-      if (!msg) {
-        continue;
-      }
-      const trimmed = msg.trim().toLowerCase();
-      if (["q", "quit", "exit"].includes(trimmed)) {
-        break;
-      }
-      const promptToSend = threadId
-        ? `${context}\n\nUser: ${msg}`
-        : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const result = await runCodexExecFiltered({
-        prompt: promptToSend,
-        repoRoot,
-        configArgs,
-        threadId,
-        verboseRef: verbose,
-        threadFile,
-        agentsRoot: runtime.agentsRoot,
-        agentLabel: "ARCH",
-        autoCompact: auto,
-      });
-      if (result.threadId) {
-        writeThreadId(threadFile, result.threadId);
-        threadId = result.threadId;
-      }
-    }
+    await startInteractiveCodexAgent({
+      agentLabel: "ARCH",
+      repoRoot,
+      configArgs,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      bootstrapPrompt: fullPrompt,
+      threadId,
+    });
     process.exit(0);
   }
 

@@ -6,6 +6,8 @@ Work autonomously and do not ask the user follow-up questions.
 Goal
 Refine one requirement from `arch` with lean architecture guidance so DEV can implement cleanly.
 Do not implement app code.
+Act as chief engineer for technical routing: ensure `implementation_scope` is valid (`frontend|backend|fullstack`) and fix only if clearly wrong.
+Route to DEV queue with minimal required technical constraints.
 
 Rules
 - Work only with files in the repository. No web.
@@ -22,6 +24,7 @@ Decision
 - If requirement has unresolved architecture contradictions/questions: move to `to-clarify`.
 
 Required updates
+- Validate `implementation_scope` and correct only when obviously wrong.
 - Add/update section `Architecture Notes` (1-5 concise bullets, or `None`).
 - Reassess front matter review routing with token-aware defaults:
   - keep `review_risk: low` unless there is a real risk reason to increase it

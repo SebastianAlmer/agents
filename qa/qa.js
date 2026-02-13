@@ -9,9 +9,8 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  runCodexExecFiltered,
   runCodexExec,
-  readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -25,9 +24,11 @@ function parseArgs(argv) {
     decisionFile: "",
     quickReview: false,
     batchTests: false,
+    batchQueue: "sec",
   };
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
+    const raw = String(argv[i] || "");
+    const arg = raw;
     const normalized = arg.toLowerCase();
     if (normalized === "-auto" || normalized === "--auto") {
       args.auto = true;
@@ -57,6 +58,15 @@ function parseArgs(argv) {
     }
     if (normalized === "--batch-tests" || normalized === "-batch-tests") {
       args.batchTests = true;
+      continue;
+    }
+    if (normalized === "--batch-queue" || normalized === "-batch-queue") {
+      args.batchQueue = String(argv[i + 1] || "sec").toLowerCase();
+      i++;
+      continue;
+    }
+    if (normalized.startsWith("--batch-queue=")) {
+      args.batchQueue = String(raw.split("=", 2)[1] || "sec").toLowerCase();
       continue;
     }
     if (normalized === "-requirement" || normalized === "--requirement") {
@@ -150,6 +160,7 @@ async function main() {
     decisionFile,
     quickReview,
     batchTests,
+    batchQueue,
   } = parsed;
 
   if (reviewOnly && finalPass) {
@@ -170,6 +181,8 @@ async function main() {
   const docsDir = runtime.docsDir;
   const qaDir = runtime.queues.qa;
   const secDir = runtime.queues.sec;
+  const batchQueueName = batchQueue === "qa" ? "qa" : "sec";
+  const batchQueueDir = batchQueueName === "qa" ? qaDir : secDir;
   const clarifyDir = runtime.queues.toClarify;
   const blockedDir = runtime.queues.blocked;
   const releasedDir = runtime.queues.released;
@@ -182,10 +195,10 @@ async function main() {
     }
 
     if (batchTests) {
-      console.log(`QA: scan sec ${secDir}`);
-      batchTargets = listRequirementFiles(secDir);
+      console.log(`QA: scan ${batchQueueName} ${batchQueueDir}`);
+      batchTargets = listRequirementFiles(batchQueueDir);
       if (requirement) {
-        const reqPath = resolveRequirementPath(requirement, [secDir, qaDir]);
+        const reqPath = resolveRequirementPath(requirement, [batchQueueDir, qaDir, secDir]);
         if (!fs.existsSync(reqPath)) {
           throw new Error(`Requirement not found: ${reqPath}`);
         }
@@ -249,7 +262,7 @@ async function main() {
   const batchListText = batchTargets.length > 0
     ? batchTargets.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nBatch queue: ${batchQueueName}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("QA"));
@@ -262,41 +275,15 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   if (!auto) {
-    const verbose = { value: false };
-    const detail = { value: false };
-    console.log("QA: chat mode (Alt+V verbose, Alt+D detail, q to quit)");
-    while (true) {
-      const msg = await readInputWithHotkeys({
-        prompt: "QA> ",
-        verboseRef: verbose,
-        detailRef: detail,
-      });
-      if (!msg) {
-        continue;
-      }
-      const trimmed = msg.trim().toLowerCase();
-      if (["q", "quit", "exit"].includes(trimmed)) {
-        break;
-      }
-      const promptToSend = threadId
-        ? `${context}\n\nUser: ${msg}`
-        : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const result = await runCodexExecFiltered({
-        prompt: promptToSend,
-        repoRoot,
-        configArgs,
-        threadId,
-        verboseRef: verbose,
-        threadFile,
-        agentsRoot: runtime.agentsRoot,
-        agentLabel: "QA",
-        autoCompact: auto,
-      });
-      if (result.threadId) {
-        writeThreadId(threadFile, result.threadId);
-        threadId = result.threadId;
-      }
-    }
+    await startInteractiveCodexAgent({
+      agentLabel: "QA",
+      repoRoot,
+      configArgs,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      bootstrapPrompt: fullPrompt,
+      threadId,
+    });
     process.exit(0);
   }
 

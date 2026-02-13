@@ -9,9 +9,8 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  runCodexExecFiltered,
   runCodexExec,
-  readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -23,6 +22,7 @@ function parseArgs(argv) {
     gateFile: "",
     reviewOnly: false,
     decisionFile: "",
+    batch: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -42,6 +42,10 @@ function parseArgs(argv) {
     }
     if (normalized === "--review-only" || normalized === "-review-only") {
       args.reviewOnly = true;
+      continue;
+    }
+    if (normalized === "--batch" || normalized === "-batch") {
+      args.batch = true;
       continue;
     }
     if (normalized === "--decision-file" || normalized === "-decision-file") {
@@ -105,10 +109,16 @@ async function main() {
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
-  const { requirement, auto, finalPass, gateFile, reviewOnly, decisionFile } = parsed;
+  const { requirement, auto, finalPass, gateFile, reviewOnly, decisionFile, batch } = parsed;
 
   if (reviewOnly && finalPass) {
     throw new Error("SEC --review-only cannot be combined with --final-pass");
+  }
+  if (batch && finalPass) {
+    throw new Error("SEC --batch cannot be combined with --final-pass");
+  }
+  if (batch && reviewOnly) {
+    throw new Error("SEC --batch cannot be combined with --review-only");
   }
 
   const agentRoot = __dirname;
@@ -118,6 +128,7 @@ async function main() {
   const repoRoot = runtime.repoRoot;
   const docsDir = runtime.docsDir;
   const secDir = runtime.queues.sec;
+  const qaDir = runtime.queues.qa;
   const uxDir = runtime.queues.ux;
   const clarifyDir = runtime.queues.toClarify;
   const blockedDir = runtime.queues.blocked;
@@ -139,6 +150,20 @@ async function main() {
       }
       reqFile = reqPath;
     } else {
+      if (batch) {
+        const secFiles = fs.readdirSync(secDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+          .map((entry) => path.join(secDir, entry.name))
+          .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+        if (secFiles.length > 0) {
+          reqFile = secFiles[0];
+        } else {
+          console.log("SEC: sec queue empty");
+          if (auto) {
+            process.exit(0);
+          }
+        }
+      } else {
       const firstFile = getFirstFile(secDir);
       if (!firstFile) {
         console.log("SEC: sec queue empty");
@@ -147,6 +172,7 @@ async function main() {
         }
       } else {
         reqFile = firstFile;
+      }
       }
     }
   } else {
@@ -157,6 +183,8 @@ async function main() {
     console.log(`SEC: using ${reqFile}`);
   }
   console.log(`SEC: review-only ${reviewOnly}`);
+  console.log(`SEC: batch ${batch}`);
+  console.log(`SEC: qa dir ${qaDir}`);
   console.log(`SEC: ux dir ${uxDir}`);
   console.log(`SEC: to-clarify dir ${clarifyDir}`);
   console.log(`SEC: blocked dir ${blockedDir}`);
@@ -170,7 +198,14 @@ async function main() {
   const reqLine = reqFile || "None";
   const gateLine = gateFile ? gateFile : "None";
   const decisionLine = decisionFile ? decisionFile : "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nSec dir: ${secDir}\nUX dir: ${uxDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\n`;
+  const secFiles = fs.existsSync(secDir)
+    ? fs.readdirSync(secDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b))
+    : [];
+  const secListText = secFiles.length > 0 ? secFiles.map((name) => `- ${name}`).join("\n") : "- None";
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nSec dir: ${secDir}\nQA dir: ${qaDir}\nUX dir: ${uxDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nSEC queue files:\n${secListText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("SEC"));
@@ -183,41 +218,15 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   if (!auto) {
-    const verbose = { value: false };
-    const detail = { value: false };
-    console.log("SEC: chat mode (Alt+V verbose, Alt+D detail, q to quit)");
-    while (true) {
-      const msg = await readInputWithHotkeys({
-        prompt: "SEC> ",
-        verboseRef: verbose,
-        detailRef: detail,
-      });
-      if (!msg) {
-        continue;
-      }
-      const trimmed = msg.trim().toLowerCase();
-      if (["q", "quit", "exit"].includes(trimmed)) {
-        break;
-      }
-      const promptToSend = threadId
-        ? `${context}\n\nUser: ${msg}`
-        : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const result = await runCodexExecFiltered({
-        prompt: promptToSend,
-        repoRoot,
-        configArgs,
-        threadId,
-        verboseRef: verbose,
-        threadFile,
-        agentsRoot: runtime.agentsRoot,
-        agentLabel: "SEC",
-        autoCompact: auto,
-      });
-      if (result.threadId) {
-        writeThreadId(threadFile, result.threadId);
-        threadId = result.threadId;
-      }
-    }
+    await startInteractiveCodexAgent({
+      agentLabel: "SEC",
+      repoRoot,
+      configArgs,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      bootstrapPrompt: fullPrompt,
+      threadId,
+    });
     process.exit(0);
   }
 

@@ -5,7 +5,11 @@ logs/
 **/thread.txt
 **/thread.auto.txt
 
-# requirements: ignore markdown payloads only
-requirements/**/*.md
+# requirements: keep only folder structure and docs in git
+requirements/**
+!requirements/
+!requirements/**/
 !requirements/README.md
-requirement_old/
+!requirements/**/.gitkeep
+
+requirements_old/

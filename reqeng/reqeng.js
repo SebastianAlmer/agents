@@ -11,6 +11,7 @@ const {
   getThreadFilePath,
   runCodexExecFiltered,
   readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -113,6 +114,8 @@ async function main() {
   });
   let threadId = readThreadId(threadFile);
 
+  const bootstrapPrompt = `${prompt}\n\n${context}`;
+
   async function runReqEng(message) {
     const fullPrompt = threadId
       ? `${context}\n\nUser: ${message}`
@@ -165,21 +168,15 @@ async function main() {
     process.exit(0);
   }
 
-  while (true) {
-    const msg = await readInputWithHotkeys({
-      prompt: "REQENG> ",
-      verboseRef: verbose,
-      detailRef: detail,
-    });
-    if (!msg) {
-      break;
-    }
-    const trimmed = msg.trim().toLowerCase();
-    if (["exit", "quit", "q"].includes(trimmed)) {
-      break;
-    }
-    await runReqEng(msg);
-  }
+  await startInteractiveCodexAgent({
+    agentLabel: "REQENG",
+    repoRoot,
+    configArgs,
+    threadFile,
+    agentsRoot: runtime.agentsRoot,
+    bootstrapPrompt,
+    threadId,
+  });
 }
 
 main().catch((err) => {

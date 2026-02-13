@@ -1,284 +1,154 @@
 # agents
 
-Reusable Codex multi-agent flow runner for project requirements.
+Reusable Codex multi-agent orchestration for long-running product delivery.
 
-## What this repo does
+## Core model
 
-This repo orchestrates role agents (`PO`, `ARCH`, `DEV_FE`, `DEV_BE`, `DEV_FS`, `QA`, `SEC`, `UX`, `DEPLOY`) against a target project repository.
-It is project-agnostic: project-specific paths and defaults are configured locally.
+All runners use the same role agents:
+- `PO`
+- `ARCH`
+- `DEV_FE` / `DEV_BE` / `DEV_FS`
+- `UX`
+- `SEC`
+- `QA`
+- `DEPLOY`
+
+Role intent:
+- `ARCH` is always before DEV, keeps requirements short, adds minimal stack/tech routing guardrails.
+- DEV agents may change all required code (including DB) within requirement scope.
+- `UX` actively improves frontend/pages in code (not only requirement text), guided by docs and git diff.
+- `SEC` actively hardens security in code/config.
+- `QA` validates bundle behavior and fixes defects until checks pass or a hard blocker remains.
+- `DEPLOY` runs once per bundle and delivery runner performs commit+push in target repo (config-driven).
+
+## Runners
+
+### 1) PO runner
+- `node scripts/po-runner.js --mode vision`
+- `node scripts/po-runner.js --mode intake`
+- `node po/po.js --runner --mode vision`
+- `node po/po.js --runner --mode intake`
+
+Modes:
+- `intake`: classic PO intake (refine + backlog -> selected, selected -> arch when needed).
+- `vision`: autonomous Product Vision breakdown until vision is implemented.
+
+PO vision rules:
+- Product Vision files have priority over generic docs.
+- PO may update docs and requirements autonomously.
+- PO escalates to `to-clarify` only for hard vision conflicts/violations.
+
+### 2) Delivery runner
+- `node scripts/delivery-runner.js --mode full`
+- `node scripts/delivery-runner.js --mode dev-only`
+
+Modes:
+- `full`: ARCH -> DEV, then downstream once-per-bundle gates (UX -> SEC -> QA -> DEPLOY).
+- `dev-only`: ARCH -> DEV only.
+
+Bundle behavior:
+- Bundles start from `selected`.
+- Priority uses `business_score` in requirement front matter.
+- Default bundle range: 5-20 (configurable).
+- Agents run once per bundle in downstream phase.
+
+### 3) Legacy supervisor (`run.js`)
+- `node run.js --mode standard`
+- `node run.js --mode dev-only`
+
+Only two modes are supported:
+- `standard`: upstream loop (PO + ARCH/DEV) until backlog/planning is empty, then downstream bundle gates.
+- `dev-only`: upstream only, no downstream.
+
+Removed legacy modes: `detailed`, `bulk`, `fast`.
+
+## Direct agent start
+
+- Every agent can still be started directly:
+- `node po/po.js`
+- `node arch/arch.js`
+- `node dev-fe/dev-fe.js`
+- `node dev-be/dev-be.js`
+- `node dev-fs/dev-fs.js`
+- `node qa/qa.js`
+- `node sec/sec.js`
+- `node ux/ux.js`
+- `node deploy/deploy.js`
+- `node reqeng/reqeng.js`
+
+Direct start behavior:
+- Without runner/auto switch, the agent starts the normal Codex interactive CLI and resumes its local thread.
+- In runner mode, agents are started with explicit CLI switches (for PO: `--runner`).
+
+## Hotkeys and status
+
+All long-running runners support:
+- `v` toggle verbose output
+- `s` print queue status snapshot
+- `q` stop loop gracefully
 
 ## Quick start
 
-1) Run setup once per project (and again when changing dev routing mode):
-- `npm run setup -- --repo-root /absolute/path/to/project`
+1) Setup local config:
+- `node scripts/setup-project.js --repo-root /absolute/path/to/project`
 
-2) Run the flow:
-- `npm run flow`
-- `npm run flow -- --flow standard`
-- `npm run flow -- --flow standard --manual-downstream`
-- `npm run flow -- --flow detailed`
-- `npm run flow -- --flow bulk`
-- `npm run flow -- --flow fast`
+2) Start PO and delivery in separate terminals:
+- `node scripts/po-runner.js --mode vision`
+- `node scripts/delivery-runner.js --mode full`
 
-3) Optional: requirements discussion/triage with ReqEng:
-- `npm run reqeng`
-- `npm run reqeng -- --requirement requirements/refinement/REQ-NEW-example.md`
+Optional legacy supervisor:
+- `node run.js --mode standard`
 
-### Windows
+## Config
 
-Use the same Node commands from PowerShell, CMD, or Git Bash.
+`config.local.toml` is gitignored and project-specific.
 
-- Setup:
-  - `npm run setup -- --repo-root "C:\\git\\my-project"`
-- Run:
-  - `npm run flow -- --flow standard`
-- ReqEng:
-  - `npm run reqeng -- --requirement requirements\\refinement\\REQ-NEW-example.md`
+Important sections:
+- `[paths]`: `repo_root`, `requirements_root`, `docs_dir`, `product_vision_dir`
+- `[loops]`: bundle sizes, polling, retry policy
+- `[po]`: vision defaults and limits
+- `[deploy]`: `check | commit | commit_push` (default `commit_push`)
+- `[dev_routing]`, `[dev_agents]`
+- `[models]`
 
-## Local config
+## Queues
 
-`config.local.toml` is gitignored and contains project-specific settings.
-Generate/update it via setup script.
-
-Important fields:
-- `[paths].repo_root`: target repository path.
-- `[paths].requirements_root`: requirements queues path.
-- `[paths].docs_dir`: docs path (default `<repo_root>/docs` when empty).
-- `[run_defaults]`: default values for all CLI switches.
-- `[run_defaults].preflight`: `hard | soft | none | snapshot`.
-- `[run_defaults].manual_downstream`: if `true`, standard flow waits for key `n` before downstream stage.
-- `[deploy].mode`: `check | commit | commit_push`.
-- `[dev_routing].mode`: `fullstack_only | split`.
-- `[dev_agents]`: enable/disable FE/BE/FS dev agents.
-- `[qa].mandatory_checks`: project-specific QA baseline checks.
-- `[review]`: legacy bundle settings (kept for compatibility; standard/bulk use QA/UX batch pipeline).
-- `[models]`: per-agent model mapping (`po`, `arch`, `dev_fe`, `dev_be`, `dev_fs`, `qa`, `sec`, `ux`, `deploy`, `reqeng`).
-- `[codex]`: global Codex runtime fallback settings rendered to `.runtime/codex.generated.toml`.
-
-By default, setup writes `mandatory_checks = []` for project-agnostic behavior.
-Set QA checks per project with `--qa-check ...` or by editing `config.local.toml`.
-
-You can override config file path with `AGENTS_CONFIG=/path/to/config.local.toml`.
-
-### Per-agent models
-
-Default mapping in this repo:
-- Strong (`gpt-5.3-codex`): `po`, `arch`, `reqeng`, `sec`
-- Lean (`gpt-5.3-codex-spark`): `dev_fe`, `dev_be`, `dev_fs`, `qa`, `ux`, `deploy`
-- Fallback: `[codex].model` is used when a role has no explicit `[models]` entry.
-
-## Requirement queues
-
-Default queues under `requirements/`:
+Default queue structure under `requirements/`:
 - `refinement`
 - `backlog`
 - `selected`
 - `arch`
 - `dev`
 - `qa`
-- `sec`
 - `ux`
+- `sec`
 - `deploy`
 - `released`
 - `to-clarify`
 - `blocked`
+- `wont-do`
 
-Queue folder structure is tracked; queue file content is ignored by git.
-Agent thread/session files are written to `.runtime/threads/` and are ignored by git.
-`refinement` and `backlog` are customer-managed intake/planning queues; delivery runs start from `selected`.
-
-Agent thread handling:
-- `PO`/`ARCH`/`QA`/`SEC`/`UX`/`DEPLOY` keep one local thread file per role under `.runtime/threads/<role>/`.
-- `DEV_FE`/`DEV_BE`/`DEV_FS` auto runs use per-requirement thread files (`thread.auto.<scope>-<req>.txt`) to isolate context across requirements.
-- On context overflow, the active thread is reset automatically and the turn is retried once.
-- In auto mode, a compact turn is attempted every 20 successful agent turns (default) via `codex exec resume <thread_id> "/compact"`.
-- Override compact interval with env `CODEX_AUTO_COMPACT_EVERY` (`0` disables).
-
-## Requirement intake workflow
-
-- Drop unstructured incoming requirements (`Anforderungen`) into `requirements/refinement`.
-- Process refinement items with an AI chat (for example ReqEng) and convert them into backlog-ready requirements in `requirements/backlog`.
-- Before starting a flow run, move the relevant backlog package into `requirements/selected`.
-- PO normalizes selected requirements into lean implementation briefs: focus on Goal + Scope + Task Outline with concise outcome-based acceptance criteria (no long AC/DoD micro-spec lists).
-- ARCH keeps requirements technically lean: add only essential architecture guardrails and avoid step-by-step implementation plans.
-- Unclear items from all stages should be moved to `to-clarify`.
-- Regularly sweep `requirements/to-clarify` with an AI chat, then move clarified items to `selected` (delivery-ready), `backlog` (clear but later), or `refinement` (still unclear).
-- `QA`/`SEC`/`UX` use `blocked` only for hard blockers. Non-blocking findings/questions go to `to-clarify`.
-
-ReqEng triage rules (outside `run.js`):
-- unclear/incomplete/conflicting requirement state: `refinement`
-- clear but not intended for immediate implementation: `backlog`
-- clear and intended for immediate implementation: `selected`
-- ReqEng outcomes should not be routed to run/review queues (`arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, `blocked`)
-- ReqEng should actively process items from `requirements/to-clarify` and route them to `refinement`, `backlog`, or `selected`
-- ReqEng is interactive: conflicts with `/docs` must be discussed with the user before final routing
-- ReqEng may intentionally edit `/docs` to capture approved product decisions and then update requirement references/results
-- Unresolved doc conflicts remain in `refinement` until user decision
-
-## Flows
-
-### `standard` (default)
-
-Two-phase cycle:
-1. Upstream phase (per requirement): `selected -> PO -> arch -> ARCH -> dev -> DEV_* -> qa`
-2. Downstream phase (single global pass):
-- `qa -> QA quick review per requirement (no tests) -> sec`
-- `sec -> QA batch FE/BE tests once for all sec items`
-- `sec -> SEC -> ux`
-- `ux -> UX(batch, diff-based FE polish) -> deploy`
-- `deploy -> DEPLOY(batch) -> released`
-
-Optional manual downstream gate (standard flow only):
-- enable via `--manual-downstream` or `[run_defaults].manual_downstream = true`
-- while enabled, runner keeps PO/ARCH/DEV loop active and waits for key `n` before running downstream stage
-- if no TTY is available, manual gate auto-disables for safety and logs a warning
-
-After active queues are empty, final global pass runs:
-- `QA final` (must output gate `pass`)
-- `SEC final` (must output gate `pass`)
-- `UX final` (must output gate `pass`)
-- `DEPLOY final`
-
-Only if all QA/SEC/UX gates pass, final push may run (config-dependent).
-
-### `detailed`
-
-Detailed staged pipeline:
-1. `selected -> PO -> arch`
-2. `arch -> ARCH -> dev`
-3. `dev -> DEV_* -> qa`
-4. QA quick review per requirement (no tests)
-5. one QA FE/BE batch test pass over current `sec` queue
-6. `sec -> SEC -> ux`
-7. one UX batch pass over current `ux` queue (diff-based FE polish)
-8. `deploy -> DEPLOY(batch) -> released`
-
-Run start policy:
-- New delivery work should always be placed in `selected`.
-- If earlier runs left items in `arch`, `dev`, `qa`, `sec`, `ux`, or `deploy`, flow runs resume and continue those queues automatically.
-
-### `bulk`
-
-Batch stage-by-stage processing:
-1. all `selected` with `PO`
-2. all `arch` with `ARCH`
-3. all `dev` with routed `DEV_*`
-4. all `qa` with QA quick review per requirement (no tests)
-5. one QA batch FE/BE test run for current `sec` queue
-6. all `sec` with `SEC`
-7. one UX batch pass over current `ux` queue (diff-based FE polish)
-8. one batch `DEPLOY` pass for current deploy queue
-
-### `fast`
-
-Lean pipeline:
-- bypasses `ARCH`, `SEC`, and `UX` agents
-- keeps QA split behavior: quick review per requirement + one QA FE/BE batch test pass
-- after QA batch tests, remaining `sec`/`ux` queue items are auto-bypassed to `deploy`
-- ends with `DEPLOY(batch)`
-
-## QA and UX optimization (`standard` / `bulk` / `detailed`, partial in `fast`)
-
-QA behavior:
-- QA runs a short per-requirement code review in `qa` (no test commands in this step).
-- QA then runs FE/BE tests once for the accumulated `sec` queue (batch mode).
-- On batch-test failure, affected requirements are routed to `blocked`.
-
-UX behavior:
-- UX runs once in batch mode for the current `ux` queue.
-- UX prioritizes the frontend git diff as primary review/edit surface.
-- UX is expected to actively polish changed FE files based on docs/guidelines and then route requirements.
-
-
-## CLI switches and config defaults
-
-CLI switches:
-- `--flow standard|detailed|bulk|fast`
-- `--preflight hard|soft|none|snapshot`
-- `--manual-downstream | --no-manual-downstream`
-- `--max-req N`
-- `--verbose | --no-verbose`
-- `--detail | --no-detail`
-
-Every switch has a configurable default in `[run_defaults]`.
-CLI always overrides config for the current run.
-
-Keyboard controls during `run.js`:
-- `v`: toggle verbose log output
-- `d`: toggle detail output
-- `s`: print queue summary snapshot
-- `n`: trigger downstream stage in standard mode when manual downstream gate is enabled
-
-## Preflight modes
-
-- `hard`: strict; fails on dirty git or missing required paths.
-- `soft` (default): fails on missing required paths; allows dirty git but can disable deploy commits/push for safety.
-- `none`: skips preflight checks.
-- `snapshot`: if git is dirty, creates a snapshot commit before flow starts, then runs from a clean state.
-
-## Deploy behavior
-
-`[deploy].mode` controls git actions after batch deploy release:
-- `check`: no commit/push
-- `commit`: one commit per deploy batch
-- `commit_push`: one commit + push per deploy batch
-
-Default: `commit` (commit without immediate push).
-
-Deploy optimization:
-- In flow runs, deploy checks are executed once per deploy batch (scope-aware), not once per requirement.
-- The batch may include frontend/backend/fullstack requirements together.
-
-`[deploy].require_clean_start_for_commits = true` blocks deploy commits/push in `soft` preflight when run starts dirty.
-
-## Dev routing (FE/BE/FS)
-
-Configured via `[dev_routing]` and `[dev_agents]`.
-
-- `fullstack_only`: PO should set `implementation_scope: fullstack`; runner routes all dev work to `DEV_FS`.
-- `split`: PO sets `implementation_scope: frontend|backend|fullstack`; runner routes to `DEV_FE`, `DEV_BE`, or `DEV_FS`. PO may split a broad requirement into FE/BE requirements when useful.
-
-If you change routing strategy, run setup script again.
-
-## Final gates
-
-In final pass, `QA`, `SEC`, and `UX` must each write a JSON gate file:
-- `status`: `pass` or `fail`
-- `summary`: short text
-- `blocking_findings`: array of strings
-
-Runner parses these files and blocks final push on any `fail`.
-
-Requirement-level human-readable sections remain required (`QA Results`, `Security Results`, `UX Results`, findings sections where needed).
+Intake recommendation:
+- Put unstructured requirements into `refinement`.
+- Use an AI chat (e.g. ReqEng) to route into `backlog` or `selected`.
 
 ## Git safety
 
-- The runner refuses git write operations if `paths.repo_root` resolves to the same git repository as this `agents` repo.
-- This prevents accidental commits/pushes to the orchestration repo itself.
+- Thread/runtime files are under `.runtime/` and ignored by git.
+- Requirement payload markdown is ignored by git; queue folder structure is tracked via `.gitkeep`.
+- Delivery git actions are executed only in `paths.repo_root`.
+- Safety check prevents commits to the `agents` repo.
 
-## Setup script examples
+## Codex usage
 
-- Minimal:
-  - `npm run setup -- --repo-root /home/user/git/my-project`
+Works with ChatGPT Codex variants.
+For sustained autonomous runs, PRO limits are usually the most practical.
+Cloud-agent copies are possible, but limits are often consumed quickly.
 
-- Split FE/BE/FS routing:
-  - `npm run setup -- --repo-root /home/user/git/my-project --dev-routing split`
+## Windows
 
-- Strict run defaults:
-  - `npm run setup -- --repo-root /home/user/git/my-project --preflight hard --flow standard`
-
-- Project-specific QA checks:
-  - `npm run setup -- --repo-root /home/user/git/my-project --qa-check "pnpm lint" --qa-check "pnpm test"`
-
-## Model/provider usage
-
-- This setup works with ChatGPT Codex across variants/models.
-- In practice, ChatGPT Codex Pro usually offers the most reasonable rate-limit headroom for longer unattended flows.
-- The same flow concept can be copied to Claude agents, but limits are typically exhausted much faster in continuous multi-agent runs.
-
-## Notes
-
-- `to-clarify` is for PO/ARCH clarification blockers.
-- `to-clarify` is also used for unclear DEV/QA/SEC/UX outcomes and follow-up questions.
-- `DEV_*` routes only to `qa` or `to-clarify`; it should not use `blocked`.
-- `blocked` is reserved for hard blockers (for example security/compliance violations).
+Use same Node commands in PowerShell/CMD/Git Bash:
+- `node scripts/setup-project.js --repo-root "C:\\git\\my-project"`
+- `node scripts/po-runner.js --mode vision`
+- `node scripts/delivery-runner.js --mode full`
+- `node run.js --mode standard`

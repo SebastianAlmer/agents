@@ -3,15 +3,30 @@
 repo_root = ""
 requirements_root = "./requirements"
 docs_dir = ""
+# Optional. If empty, defaults to <docs_dir>/product-operating-system.
+product_vision_dir = ""
+
+[loops]
+# Bundle watermarks for autonomous runners.
+bundle_min_size = 5
+bundle_max_size = 20
+po_poll_seconds = 20
+delivery_poll_seconds = 20
+max_retries = 3
+retry_delay_seconds = 2
+# If selected stays below min this many cycles, delivery starts an underfilled bundle.
+force_underfilled_after_cycles = 3
 
 [flow]
+# run.js modes: standard | dev-only
+# additional alias used internally: auto -> standard
 default_mode = "standard"
 idle_poll_seconds = 300
-max_retries = 2
+max_retries = 3
 retry_delay_seconds = 2
 
 [run_defaults]
-# standard | detailed | bulk | fast
+# standard | dev-only
 flow = "standard"
 max_req = 0
 verbose = false
@@ -25,9 +40,16 @@ snapshot_commit_message_prefix = "chore(flow): preflight snapshot"
 
 [deploy]
 # check | commit | commit_push
-mode = "commit"
+mode = "commit_push"
 final_push_on_success = true
 require_clean_start_for_commits = true
+
+[po]
+# intake | vision
+default_mode = "vision"
+vision_max_cycles = 100
+vision_max_requirements = 1000
+vision_stable_cycles = 2
 
 [dev_routing]
 # fullstack_only | split
@@ -45,8 +67,7 @@ use_fs = true
 mandatory_checks = []
 
 [review]
-# Legacy review-bundle settings (kept for compatibility).
-# Standard and bulk flows use QA/UX batch pipeline.
+# Legacy review-bundle settings (kept for compatibility with run.js).
 strategy = "bundle"
 parallel = false
 # low | medium | high

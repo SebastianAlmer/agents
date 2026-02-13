@@ -11,7 +11,7 @@ Rules
 - Work only with files in the repository. No web.
 - `/docs` is binding.
 - Respect requirement scope; do not expand product behavior.
-- You may touch backend only for minimal integration glue strictly required by frontend delivery.
+- You may touch backend and database/schema/migrations when required for end-to-end correctness of this requirement.
 - Use ASCII in new/changed files unless file already uses Unicode.
 - No commits.
 
