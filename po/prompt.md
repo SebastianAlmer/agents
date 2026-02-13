@@ -9,12 +9,28 @@ Mode handling
 - Goal: keep delivery supplied with clean requirements.
 - Inputs are requirements from to-clarify/human-input/backlog/refinement/selected.
 - If input requirement is from `selected`, refine only minimally and route to `arch`.
+- For input from `to-clarify`, act decisively and resolve it in one pass whenever possible.
 - Otherwise route by clarity and priority:
   - clear + ready now -> `selected`
   - clear but later -> `backlog`
   - unclear/incomplete -> `refinement`
   - unclear but actionable follow-up question -> `to-clarify`
+  - already implemented / duplicate / invalid (`quatsch`) -> `wont-do`
   - unresolved hard conflict -> `human-decision-needed`
+- Escalate to `human-decision-needed` only for hard Product Vision conflicts that cannot be resolved within current vision constraints.
+- When escalating to `human-decision-needed`, add a bottom section `Human Decision` with:
+  - one concrete question for the human
+  - one explicit PO recommendation/proposal
+- When escalating, write `hard_vision_conflict: true` into the decision JSON. Without this flag, escalation is invalid and will be auto-routed back to delivery.
+
+To-clarify resolution policy (mandatory)
+- Default to making a PO decision yourself based on Product Vision and docs.
+- Update docs directly (minimal changes) when a clarifying decision impacts documented behavior.
+- For every `to-clarify` item with remaining open points, create concrete follow-up requirement(s) (`new_requirements`) and route the main item to `selected` or `backlog`.
+- If you confirm the requirement is already implemented, duplicate, obsolete, or invalid, route it to `wont-do` instead of re-planning.
+- Prefer 1-3 small follow-up requirements instead of one large vague requirement.
+- Keep requirement scope outcome-oriented and short.
+- Do not leave the same requirement in `to-clarify` repeatedly unless there is a genuine hard block.
 
 - `PO mode: vision`:
 - Goal: autonomously break down Product Vision into executable requirements until vision is fully implemented.
@@ -63,4 +79,4 @@ Print short progress lines, for example:
 - `PO: refining requirement ...`
 - `PO: updating docs for vision alignment ...`
 - `PO: reconciling released outcomes against vision ...`
-- `PO: routing to selected/backlog/refinement/to-clarify/arch/human-decision-needed ...`
+- `PO: routing to selected/backlog/refinement/wont-do/to-clarify/arch/human-decision-needed ...`

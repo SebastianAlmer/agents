@@ -15,7 +15,9 @@ const {
   routeByStatus,
   setFrontMatterStatus,
   appendQueueSection,
+  upsertMarkdownSection,
   writeRefinementItems,
+  detectCurrentQueue,
   resolveSourcePath,
   runNodeScript,
   normalizeStatus,
@@ -446,6 +448,69 @@ function queueStatusByTarget(targetQueue) {
   return "human-decision-needed";
 }
 
+function isHardVisionConflict(decision) {
+  return Boolean(decision && decision.hardVisionConflict === true);
+}
+
+function wantsWontDo(decision) {
+  if (decision && decision.wontDo === true) {
+    return true;
+  }
+  const summary = String((decision && decision.summary) || "").toLowerCase();
+  const findings = Array.isArray(decision && decision.findings)
+    ? decision.findings.map((item) => String(item || "").toLowerCase()).join(" ")
+    : "";
+  const text = `${summary} ${findings}`;
+  return /(already implemented|already done|duplicate|redundant|obsolete|invalid requirement|not needed|wont[ -]?do|won't do|bereits umgesetzt|bereits vorhanden|duplikat|obsolet|nicht notwendig|quatsch)/i
+    .test(text);
+}
+
+function ensureHumanDecisionRequest(filePath, decision) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const findings = Array.isArray(decision && decision.findings)
+    ? decision.findings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const summary = String((decision && decision.summary) || "").trim();
+  const proposal = summary || findings[0] || "Approve PO's minimal Product Vision-aligned assumption for this requirement.";
+  const lines = [
+    "- Question: Do you approve this PO proposal so delivery can continue without blocking?",
+    `- PO proposal: ${proposal}`,
+    "- If approved: move this file from `human-decision-needed` to `human-input` with your decision note.",
+  ];
+  upsertMarkdownSection(filePath, "Human Decision", lines);
+}
+
+function hasEscalationConfirmed(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+  const raw = fs.readFileSync(filePath, "utf8");
+  return /\n##\s+Flow Routing Notes\b[\s\S]*PO runner escalation confirmed/i.test(raw);
+}
+
+function buildFallbackFollowUpItem(decision, frontMatter, currentPath) {
+  const sourceId = String(frontMatter.id || path.basename(currentPath, path.extname(currentPath)) || "REQ").trim();
+  const sourceTitle = String(frontMatter.title || sourceId).trim();
+  const summary = String((decision && decision.summary) || "").trim();
+  const findings = Array.isArray(decision && decision.findings)
+    ? decision.findings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const finding = findings[0] || "";
+  const goal = summary || finding || `Clarify unresolved open point for ${sourceTitle}.`;
+  const followupId = `${sourceId}-FOLLOWUP`
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+  return {
+    id: followupId,
+    title: `${sourceTitle} follow-up`,
+    goal,
+    summary: goal,
+  };
+}
+
 function moveWithFallback(runtime, sourcePath, targetQueue, status, notes) {
   const fileName = path.basename(sourcePath);
   const queueName = runtime.queues[targetQueue] ? targetQueue : "toClarify";
@@ -488,6 +553,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
   const decision = parseDecisionFile(`${currentPath}.decision.json`, "PO");
   const frontMatter = parseFrontMatter(currentPath);
   const status = normalizeStatus(decision.status || frontMatter.status || (result.ok ? "pass" : "clarify"));
+  const sourceQueue = detectCurrentQueue(path.basename(currentPath), runtime.queues).name || "";
 
   if (!result.ok) {
     appendQueueSection(currentPath, [
@@ -498,7 +564,39 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
   }
 
   const explicitTarget = normalizePoTarget(decision.targetQueue);
-  const targetQueue = explicitTarget || routeFromPo(runtime, currentPath, status);
+  let targetQueue = explicitTarget || routeFromPo(runtime, currentPath, status);
+  const hardVisionConflict = isHardVisionConflict(decision);
+  if (!explicitTarget && wantsWontDo(decision)) {
+    targetQueue = "wontDo";
+    appendQueueSection(currentPath, [
+      "PO runner wont-do guard",
+      "- detected duplicate/already-implemented/invalid requirement signal; routed to wont-do",
+    ]);
+  }
+
+  // Resolve to-clarify decisively: do not keep the same requirement in to-clarify forever.
+  if (sourceQueue === "toClarify" && targetQueue === "toClarify") {
+    targetQueue = "backlog";
+    appendQueueSection(currentPath, [
+      "PO runner decisiveness guard",
+      "- source queue was to-clarify and target stayed to-clarify; routed to backlog with PO decision",
+    ]);
+  }
+
+  // Escalate to human only for hard vision conflicts.
+  if (targetQueue === "humanDecisionNeeded" && !hardVisionConflict) {
+    targetQueue = "selected";
+    appendQueueSection(currentPath, [
+      "PO runner escalation guard",
+      "- escalation requested without hard vision conflict; PO resolved autonomously and routed to selected",
+    ]);
+  }
+  if (targetQueue === "humanDecisionNeeded" && hardVisionConflict) {
+    appendQueueSection(currentPath, [
+      "PO runner escalation confirmed",
+      "- hard vision conflict confirmed; awaiting explicit human decision",
+    ]);
+  }
   const targetStatus = queueStatusByTarget(targetQueue);
 
   moveWithFallback(runtime, currentPath, targetQueue, targetStatus, [
@@ -507,8 +605,22 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
     `- target: ${targetQueue}`,
   ]);
 
-  if (Array.isArray(decision.new_requirements) && decision.new_requirements.length > 0) {
-    const created = writeRefinementItems(runtime, `PO ${path.basename(currentPath)}`, decision.new_requirements);
+  if (targetQueue === "humanDecisionNeeded") {
+    const movedPath = path.join(runtime.queues.humanDecisionNeeded, path.basename(currentPath));
+    ensureHumanDecisionRequest(movedPath, decision);
+  }
+
+  let followUpRequirements = Array.isArray(decision.new_requirements) ? decision.new_requirements : [];
+  if (sourceQueue === "toClarify" && targetQueue === "backlog" && followUpRequirements.length === 0) {
+    followUpRequirements = [buildFallbackFollowUpItem(decision, frontMatter, currentPath)];
+    appendQueueSection(currentPath, [
+      "PO runner follow-up guard",
+      "- source queue was to-clarify and no follow-up requirements were emitted; auto-created one refinement follow-up item",
+    ]);
+  }
+
+  if (followUpRequirements.length > 0) {
+    const created = writeRefinementItems(runtime, `PO ${path.basename(currentPath)}`, followUpRequirements);
     if (created.length > 0) {
       log(controls, `created ${created.length} refinement item(s) from ${path.basename(currentPath)}`);
     }
@@ -551,6 +663,28 @@ async function processHumanInput(runtime, controls) {
   const progressed = await runPoIntakeOnFile(runtime, filePath, controls);
   if (progressed) {
     log(controls, `processed human-input ${path.basename(filePath)}`);
+  }
+  return progressed;
+}
+
+function pickHumanDecisionCandidate(runtime) {
+  const files = listQueueFiles(runtime.queues.humanDecisionNeeded);
+  for (const filePath of files) {
+    if (!hasEscalationConfirmed(filePath)) {
+      return filePath;
+    }
+  }
+  return "";
+}
+
+async function processHumanDecisionNeeded(runtime, controls) {
+  const filePath = pickHumanDecisionCandidate(runtime);
+  if (!filePath) {
+    return false;
+  }
+  const progressed = await runPoIntakeOnFile(runtime, filePath, controls);
+  if (progressed) {
+    log(controls, `re-checked human-decision-needed ${path.basename(filePath)}`);
   }
   return progressed;
 }
@@ -609,6 +743,7 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
   while (!controls.stopRequested) {
     const before = snapshotHash(runtime);
 
+    await processHumanDecisionNeeded(runtime, controls);
     await processToClarify(runtime, controls);
     await processHumanInput(runtime, controls);
 
@@ -643,6 +778,7 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
   while (!controls.stopRequested) {
     const before = snapshotHash(runtime);
 
+    await processHumanDecisionNeeded(runtime, controls);
     await processToClarify(runtime, controls);
     await processHumanInput(runtime, controls);
 

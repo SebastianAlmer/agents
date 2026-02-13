@@ -13,6 +13,8 @@ const {
   appendQueueSection,
   runNodeScript,
   chooseBundleByBusinessScore,
+  parseFrontMatter,
+  normalizeStatus,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -139,13 +141,47 @@ function formatSummary(summary) {
 }
 
 function createControls(initialVerbose, runtime) {
+  const stopHooks = new Set();
   const controls = {
     verbose: Boolean(initialVerbose),
     stopRequested: false,
+    onStop(callback) {
+      if (typeof callback !== "function") {
+        return () => {};
+      }
+      stopHooks.add(callback);
+      return () => stopHooks.delete(callback);
+    },
+    requestStop(reason = "") {
+      if (controls.stopRequested) {
+        process.stdout.write("\nDELIVERY: force stop\n");
+        process.exit(130);
+        return;
+      }
+      controls.stopRequested = true;
+      if (reason) {
+        process.stdout.write(`\nDELIVERY: stop requested (${reason})\n`);
+      }
+      for (const hook of stopHooks) {
+        try {
+          hook();
+        } catch {
+          // ignore hook errors during shutdown
+        }
+      }
+    },
     cleanup() {},
   };
 
+  const onSignal = (signalName) => controls.requestStop(signalName);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+
   if (!process.stdin.isTTY) {
+    controls.cleanup = () => {
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+    };
     return controls;
   }
 
@@ -157,7 +193,7 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if (key.ctrl && key.name === "c") {
-      controls.stopRequested = true;
+      controls.requestStop("Ctrl+C");
       return;
     }
     if ((key.name || "").toLowerCase() === "v") {
@@ -170,19 +206,28 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if ((key.name || "").toLowerCase() === "q") {
-      controls.stopRequested = true;
+      controls.requestStop("q");
       return;
     }
   };
 
   process.stdin.on("keypress", onKeypress);
   controls.cleanup = () => {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
     process.stdin.removeListener("keypress", onKeypress);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
   };
   return controls;
+}
+
+function getStopSignal(controls) {
+  return {
+    isStopped: () => Boolean(controls && controls.stopRequested),
+    onStop: (cb) => (controls && typeof controls.onStop === "function" ? controls.onStop(cb) : () => {}),
+  };
 }
 
 function log(controls, message) {
@@ -290,28 +335,134 @@ function moveAll(runtime, fromQueue, toQueue, status, note) {
   return moved;
 }
 
-function normalizeUnauthorizedHumanDecisionRoutes(runtime, fileNames, agentLabel) {
-  if (!runtime.queues.humanDecisionNeeded || !runtime.queues.toClarify) {
-    return 0;
+function removeDuplicateSourceIfTargetExists(sourcePath, targetPath, controls, stageLabel) {
+  const source = String(sourcePath || "");
+  const target = String(targetPath || "");
+  if (!source || !target) {
+    return false;
   }
-  const names = Array.isArray(fileNames)
-    ? fileNames.map((item) => path.basename(String(item || ""))).filter(Boolean)
-    : [];
-  let moved = 0;
-  for (const name of names) {
-    const candidate = path.join(runtime.queues.humanDecisionNeeded, name);
-    if (!fs.existsSync(candidate)) {
+  if (!fs.existsSync(source) || !fs.existsSync(target)) {
+    return false;
+  }
+  const sourceResolved = path.resolve(source);
+  const targetResolved = path.resolve(target);
+  if (sourceResolved === targetResolved) {
+    return false;
+  }
+  try {
+    fs.unlinkSync(sourceResolved);
+    log(controls, `${stageLabel}: removed stale source duplicate ${path.basename(sourceResolved)}`);
+    return true;
+  } catch (err) {
+    process.stderr.write(
+      `DELIVERY: failed to remove stale duplicate ${path.basename(sourceResolved)}: ${err.message || err}\n`
+    );
+    return false;
+  }
+}
+
+function frontMatterTruthy(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["1", "true", "yes", "y"].includes(normalized);
+}
+
+function hasArchHardBlockEvidence(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+  const fm = parseFrontMatter(filePath);
+  const hardFlag = frontMatterTruthy(fm.arch_hard_block)
+    || frontMatterTruthy(fm.hard_arch_block)
+    || frontMatterTruthy(fm.hard_block);
+  if (!hardFlag) {
+    return false;
+  }
+  const raw = fs.readFileSync(filePath, "utf8");
+  const hasBlockerType = /blocker[_ -]?type\s*:\s*(missing-input|hard-contradiction)/i.test(raw);
+  const hasRequiredInput = /required[_ -]?input\s*:/i.test(raw) || /missing[_ -]?input\s*:/i.test(raw);
+  return hasBlockerType && hasRequiredInput;
+}
+
+function findRequirementInUnexpectedQueues(runtime, fileName, excludedQueues = []) {
+  const excluded = new Set(Array.isArray(excludedQueues) ? excludedQueues : []);
+  const queueOrder = [
+    "selected",
+    "backlog",
+    "refinement",
+    "humanInput",
+    "wontDo",
+    "qa",
+    "ux",
+    "sec",
+    "deploy",
+    "released",
+    "blocked",
+  ];
+
+  for (const queueName of queueOrder) {
+    if (excluded.has(queueName)) {
       continue;
     }
-    const ok = moveToQueue(runtime, candidate, "toClarify", "to-clarify", [
-      `Delivery runner: normalized ${agentLabel} route`,
-      `- ${agentLabel} may only route to to-clarify for clarification`,
-    ]);
-    if (ok) {
-      moved += 1;
+    const dir = runtime.queues[queueName];
+    if (!dir) {
+      continue;
+    }
+    const candidate = path.join(dir, fileName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
     }
   }
-  return moved;
+  return "";
+}
+
+function recoverArchMisroute(runtime, fileName) {
+  const misplaced = findRequirementInUnexpectedQueues(runtime, fileName, [
+    "arch",
+    "dev",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
+  if (!misplaced) {
+    return false;
+  }
+
+  const fm = parseFrontMatter(misplaced);
+  const normalized = normalizeStatus(fm.status || "");
+  const wantsClarify = normalized === "clarify";
+  const clarifyAllowed = wantsClarify && hasArchHardBlockEvidence(misplaced);
+  const targetQueue = clarifyAllowed ? "toClarify" : "dev";
+  const targetStatus = targetQueue === "dev" ? "dev" : "to-clarify";
+  const recoveryReason = wantsClarify
+    ? (clarifyAllowed
+      ? "- clarify guard passed: hard blocker evidence present"
+      : "- clarify request ignored: missing hard blocker evidence")
+    : "- status is not clarify; routed to dev";
+  return moveToQueue(runtime, misplaced, targetQueue, targetStatus, [
+    "Delivery runner: ARCH misroute recovery",
+    `- moved from unexpected queue to ${targetQueue}`,
+    recoveryReason,
+  ]);
+}
+
+function recoverDevMisroute(runtime, fileName) {
+  const misplaced = findRequirementInUnexpectedQueues(runtime, fileName, [
+    "dev",
+    "qa",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
+  if (!misplaced) {
+    return false;
+  }
+
+  const fm = parseFrontMatter(misplaced);
+  const normalized = normalizeStatus(fm.status || "");
+  const targetQueue = normalized === "clarify" ? "toClarify" : "qa";
+  const targetStatus = targetQueue === "qa" ? "qa" : "to-clarify";
+  return moveToQueue(runtime, misplaced, targetQueue, targetStatus, [
+    "Delivery runner: DEV misroute recovery",
+    `- moved from unexpected queue to ${targetQueue}`,
+  ]);
 }
 
 function pickDevScript(runtime, requirementPath) {
@@ -418,34 +569,56 @@ async function runArch(runtime, controls) {
       cwd: runtime.agentsRoot,
       maxRetries: runtime.loops.maxRetries,
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
+      stopSignal: getStopSignal(controls),
     });
     if (!result.ok) {
-      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
+      if (result.aborted && controls.stopRequested) {
+        break;
+      }
+      moveToQueue(runtime, sourceFile, "dev", "dev", [
         "Delivery runner: ARCH failed",
         `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
+        "- fallback: continue with DEV to avoid ARCH bottleneck",
       ]);
       progressed = true;
       continue;
     }
 
-    if (fs.existsSync(path.join(runtime.queues.dev, name))) {
+    const devPath = path.join(runtime.queues.dev, name);
+    if (fs.existsSync(devPath)) {
+      removeDuplicateSourceIfTargetExists(sourceFile, devPath, controls, "ARCH handoff");
       progressed = true;
       continue;
     }
-    if (fs.existsSync(path.join(runtime.queues.toClarify, name))) {
+    const clarifyPath = path.join(runtime.queues.toClarify, name);
+    if (fs.existsSync(clarifyPath)) {
+      removeDuplicateSourceIfTargetExists(sourceFile, clarifyPath, controls, "ARCH handoff");
+      if (!hasArchHardBlockEvidence(clarifyPath)) {
+        moveToQueue(runtime, clarifyPath, "dev", "dev", [
+          "Delivery runner: ARCH clarify guard",
+          "- clarify rejected: no hard blocker evidence; routed to dev",
+        ]);
+      }
       progressed = true;
       continue;
     }
-    if (runtime.queues.humanDecisionNeeded && fs.existsSync(path.join(runtime.queues.humanDecisionNeeded, name))) {
-      normalizeUnauthorizedHumanDecisionRoutes(runtime, [name], "ARCH");
+    const humanDecisionPath = runtime.queues.humanDecisionNeeded
+      ? path.join(runtime.queues.humanDecisionNeeded, name)
+      : "";
+    if (humanDecisionPath && fs.existsSync(humanDecisionPath)) {
+      removeDuplicateSourceIfTargetExists(sourceFile, humanDecisionPath, controls, "ARCH handoff");
+      progressed = true;
+      continue;
+    }
+    if (recoverArchMisroute(runtime, name)) {
       progressed = true;
       continue;
     }
 
     if (fs.existsSync(sourceFile)) {
-      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
+      moveToQueue(runtime, sourceFile, "dev", "dev", [
         "Delivery runner: ARCH output fallback",
-        "- requirement not routed by agent; moved to to-clarify",
+        "- requirement not routed by agent; moved to dev for execution",
       ]);
     }
     progressed = true;
@@ -472,9 +645,13 @@ async function runDev(runtime, controls) {
       cwd: runtime.agentsRoot,
       maxRetries: runtime.loops.maxRetries,
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
+      stopSignal: getStopSignal(controls),
     });
 
     if (!result.ok) {
+      if (result.aborted && controls.stopRequested) {
+        break;
+      }
       moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
         "Delivery runner: DEV failed",
         `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
@@ -483,16 +660,27 @@ async function runDev(runtime, controls) {
       continue;
     }
 
-    if (fs.existsSync(path.join(runtime.queues.qa, name))) {
+    const qaPath = path.join(runtime.queues.qa, name);
+    if (fs.existsSync(qaPath)) {
+      removeDuplicateSourceIfTargetExists(sourceFile, qaPath, controls, "DEV handoff");
       progressed = true;
       continue;
     }
-    if (fs.existsSync(path.join(runtime.queues.toClarify, name))) {
+    const clarifyPath = path.join(runtime.queues.toClarify, name);
+    if (fs.existsSync(clarifyPath)) {
+      removeDuplicateSourceIfTargetExists(sourceFile, clarifyPath, controls, "DEV handoff");
       progressed = true;
       continue;
     }
-    if (runtime.queues.humanDecisionNeeded && fs.existsSync(path.join(runtime.queues.humanDecisionNeeded, name))) {
-      normalizeUnauthorizedHumanDecisionRoutes(runtime, [name], "DEV");
+    const humanDecisionPath = runtime.queues.humanDecisionNeeded
+      ? path.join(runtime.queues.humanDecisionNeeded, name)
+      : "";
+    if (humanDecisionPath && fs.existsSync(humanDecisionPath)) {
+      removeDuplicateSourceIfTargetExists(sourceFile, humanDecisionPath, controls, "DEV handoff");
+      progressed = true;
+      continue;
+    }
+    if (recoverDevMisroute(runtime, name)) {
       progressed = true;
       continue;
     }
@@ -527,8 +715,6 @@ async function runUxBatch(runtime, controls) {
   if (countFiles(runtime.queues.ux) === 0) {
     return movedQa > 0;
   }
-  const uxNames = listQueueFiles(runtime.queues.ux).map((file) => path.basename(file));
-
   log(controls, "UX batch start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
@@ -536,14 +722,16 @@ async function runUxBatch(runtime, controls) {
     cwd: runtime.agentsRoot,
     maxRetries: runtime.loops.maxRetries,
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
   });
 
   if (!result.ok) {
-    normalizeUnauthorizedHumanDecisionRoutes(runtime, uxNames, "UX");
+    if (result.aborted && controls.stopRequested) {
+      return false;
+    }
     moveAll(runtime, "ux", "toClarify", "to-clarify", "Delivery runner: UX batch failed");
     return true;
   }
-  normalizeUnauthorizedHumanDecisionRoutes(runtime, uxNames, "UX");
 
   const normalized = moveAll(
     runtime,
@@ -563,8 +751,6 @@ async function runSecBatch(runtime, controls) {
   if (countFiles(runtime.queues.sec) === 0) {
     return false;
   }
-  const secNames = listQueueFiles(runtime.queues.sec).map((file) => path.basename(file));
-
   log(controls, "SEC batch start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
@@ -572,14 +758,16 @@ async function runSecBatch(runtime, controls) {
     cwd: runtime.agentsRoot,
     maxRetries: runtime.loops.maxRetries,
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
   });
 
   if (!result.ok) {
-    normalizeUnauthorizedHumanDecisionRoutes(runtime, secNames, "SEC");
+    if (result.aborted && controls.stopRequested) {
+      return false;
+    }
     moveAll(runtime, "sec", "toClarify", "to-clarify", "Delivery runner: SEC batch failed");
     return true;
   }
-  normalizeUnauthorizedHumanDecisionRoutes(runtime, secNames, "SEC");
 
   const normalized = moveAll(
     runtime,
@@ -679,7 +867,11 @@ async function runQaBundle(runtime, controls) {
     cwd: runtime.agentsRoot,
     maxRetries: runtime.loops.maxRetries,
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
   });
+  if (result.aborted && controls.stopRequested) {
+    return false;
+  }
 
   const gate = parseGate(gatePath);
   const pass = result.ok && String(gate.status || "").toLowerCase() === "pass";
@@ -772,8 +964,6 @@ async function runDeployBundle(runtime, controls) {
   if (countFiles(runtime.queues.deploy) === 0) {
     return false;
   }
-  const deployNames = listQueueFiles(runtime.queues.deploy).map((file) => path.basename(file));
-
   log(controls, "DEPLOY bundle start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "deploy", "deploy.js"),
@@ -781,14 +971,16 @@ async function runDeployBundle(runtime, controls) {
     cwd: runtime.agentsRoot,
     maxRetries: runtime.loops.maxRetries,
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
   });
 
   if (!result.ok) {
-    normalizeUnauthorizedHumanDecisionRoutes(runtime, deployNames, "DEPLOY");
+    if (result.aborted && controls.stopRequested) {
+      return false;
+    }
     moveAll(runtime, "deploy", "toClarify", "to-clarify", "Delivery runner: deploy bundle failed");
     return true;
   }
-  normalizeUnauthorizedHumanDecisionRoutes(runtime, deployNames, "DEPLOY");
 
   moveAll(runtime, "deploy", "released", "released", "Delivery runner: deploy bundle released");
   deployCommitPush(runtime, controls);
@@ -831,7 +1023,15 @@ async function runQaPostBundle(runtime, controls, lastSignature) {
     cwd: runtime.agentsRoot,
     maxRetries: runtime.loops.maxRetries,
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
   });
+
+  if (result.aborted && controls.stopRequested) {
+    return {
+      progressed: false,
+      signature: lastSignature,
+    };
+  }
 
   if (!result.ok) {
     const filePath = createQaFollowUp(runtime, {
@@ -931,6 +1131,10 @@ async function main() {
     }
 
     if (args.once) {
+      break;
+    }
+
+    if (controls.stopRequested) {
       break;
     }
 

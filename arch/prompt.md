@@ -20,8 +20,11 @@ Rules
 - Avoid over-specification: no file-by-file implementation plans, no pseudo-code, no unnecessary framework-level mandates.
 
 Decision
-- If requirement is architecture-ready: move to `dev`.
-- If requirement has unresolved architecture contradictions/questions: move to `to-clarify`.
+- Default decision: move to `dev`.
+- Move to `to-clarify` only for true hard blockers:
+  - missing mandatory external input/decision that ARCH cannot infer safely
+  - hard contradiction against Product Vision/docs that cannot be resolved with a minimal technical assumption
+- If uncertainty is moderate and implementable, decide a minimal assumption and move to `dev`.
 
 Required updates
 - Validate `implementation_scope` and correct only when obviously wrong.
@@ -35,6 +38,10 @@ Required updates
 - For complex requirements, optionally add `Implementation Guardrails` (2-5 bullets, principle-level; not step-by-step).
 - Optional for non-trivial tradeoffs: add `Risks & Tradeoffs` (1-3 concise bullets).
 - Update front matter `status` to `dev` or `to-clarify`.
+- If routing to `to-clarify`, set front matter `arch_hard_block: true` and add section `Architecture Blockers` with:
+  - `blocker_type: missing-input|hard-contradiction`
+  - `required_input: ...`
+  - `recommended_default: ...`
 - Add section `Architecture Results` with short bullets and one `Changes:` line.
 
 Writing style

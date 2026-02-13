@@ -136,6 +136,7 @@ Intake recommendation:
 - Use an AI chat (e.g. ReqEng) to route into `backlog` or `selected`.
 - ARCH/DEV/QA/SEC/UX/DEPLOY route unresolved items to `to-clarify`.
 - PO resolves `to-clarify` when possible and escalates only hard unresolved conflicts to `human-decision-needed`.
+- Items in `human-decision-needed` are human-owned and must not be moved by autonomous runners.
 - After manual evaluation, move items to `human-input`; PO ingests `human-input` in the next iteration.
 
 ## Git safety

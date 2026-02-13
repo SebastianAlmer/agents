@@ -31,5 +31,6 @@ Queue intent:
 - Unclear items from ARCH/DEV/QA/SEC/UX/DEPLOY go to `to-clarify`.
 - PO resolves `to-clarify` whenever possible.
 - Only PO escalates hard unresolved conflicts to `human-decision-needed`.
+- `human-decision-needed` is human-owned: no autonomous runner moves files out of this queue.
 - After human evaluation, move those items to `human-input`; PO ingests `human-input` in the next iteration.
 - Hard blockers from review phases may go to `blocked`.

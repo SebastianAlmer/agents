@@ -192,16 +192,41 @@ function isRetryable(stderrText) {
   );
 }
 
-async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDelaySeconds }) {
+async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDelaySeconds, stopSignal }) {
   const retries = Math.max(0, Number.parseInt(String(maxRetries || 0), 10));
   const attempts = retries + 1;
   let lastError = "";
+  const isStopped = () => Boolean(
+    stopSignal && typeof stopSignal.isStopped === "function" && stopSignal.isStopped()
+  );
+
+  async function waitWithStopCheck(seconds) {
+    const ms = Math.max(0, Number.parseInt(String(seconds || 0), 10)) * 1000;
+    if (ms <= 0) {
+      return;
+    }
+    const step = 200;
+    let remaining = ms;
+    while (remaining > 0) {
+      if (isStopped()) {
+        break;
+      }
+      const chunk = Math.min(step, remaining);
+      await sleep(chunk);
+      remaining -= chunk;
+    }
+  }
 
   for (let attempt = 0; attempt < attempts; attempt++) {
+    if (isStopped()) {
+      return { ok: false, aborted: true, stderr: "stopped", exitCode: 130 };
+    }
+
     if (attempt > 0) {
       const delay = Math.max(0, Number.parseInt(String(retryDelaySeconds || 0), 10)) * Math.pow(2, attempt - 1);
-      if (delay > 0) {
-        await sleep(delay * 1000);
+      await waitWithStopCheck(delay);
+      if (isStopped()) {
+        return { ok: false, aborted: true, stderr: "stopped", exitCode: 130 };
       }
     }
 
@@ -210,6 +235,47 @@ async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDela
       env: { ...process.env, ...env },
       stdio: ["ignore", "inherit", "pipe"],
     });
+    let stopCleanup = null;
+    const requestStop = () => {
+      if (proc.exitCode !== null || proc.killed) {
+        return;
+      }
+      try {
+        proc.kill("SIGINT");
+      } catch {
+        // ignore
+      }
+      const termTimer = setTimeout(() => {
+        if (proc.exitCode === null && !proc.killed) {
+          try {
+            proc.kill("SIGTERM");
+          } catch {
+            // ignore
+          }
+        }
+      }, 1500);
+      if (typeof termTimer.unref === "function") {
+        termTimer.unref();
+      }
+      const killTimer = setTimeout(() => {
+        if (proc.exitCode === null && !proc.killed) {
+          try {
+            proc.kill("SIGKILL");
+          } catch {
+            // ignore
+          }
+        }
+      }, 3500);
+      if (typeof killTimer.unref === "function") {
+        killTimer.unref();
+      }
+    };
+    if (stopSignal && typeof stopSignal.onStop === "function") {
+      stopCleanup = stopSignal.onStop(requestStop);
+    }
+    if (isStopped()) {
+      requestStop();
+    }
 
     let stderrText = "";
     proc.stderr.on("data", (chunk) => {
@@ -220,6 +286,14 @@ async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDela
     });
 
     const exitCode = await new Promise((resolve) => proc.once("close", resolve));
+    if (typeof stopCleanup === "function") {
+      stopCleanup();
+    }
+
+    if (isStopped()) {
+      return { ok: false, aborted: true, stderr: stderrText || "stopped", exitCode: exitCode || 130 };
+    }
+
     if (exitCode === 0) {
       return { ok: true, stderr: stderrText, exitCode: 0 };
     }
@@ -275,12 +349,40 @@ function parseDecisionFile(filePath, fallbackLabel = "agent") {
     const findings = Array.isArray(raw.findings)
       ? raw.findings.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
+    const rawStatus = String(raw.status || "").trim().toLowerCase();
+    const wontDoFromStatus = [
+      "wont-do",
+      "won't-do",
+      "wont_do",
+      "wontdo",
+      "skip",
+      "noop",
+      "duplicate",
+      "already-implemented",
+      "already_implemented",
+      "invalid",
+      "reject",
+      "rejected",
+    ].includes(rawStatus);
 
     return {
       status: normalizeStatus(raw.status),
       summary: String(raw.summary || "").trim() || `Decision from ${fallbackLabel}`,
       findings,
       new_requirements: Array.isArray(raw.new_requirements) ? raw.new_requirements : [],
+      wontDo: Boolean(
+        raw.wont_do === true ||
+        raw.wontDo === true ||
+        raw.redundant === true ||
+        raw.already_implemented === true ||
+        raw.alreadyImplemented === true ||
+        wontDoFromStatus
+      ),
+      hardVisionConflict: Boolean(
+        raw.hard_vision_conflict === true ||
+        raw.hardVisionConflict === true ||
+        raw.vision_conflict_hard === true
+      ),
       targetQueue: String(
         raw.target_queue || raw.targetQueue || raw.target || raw.next_queue || raw.nextQueue || ""
       ).trim(),
@@ -291,6 +393,8 @@ function parseDecisionFile(filePath, fallbackLabel = "agent") {
       summary: `Invalid decision file for ${fallbackLabel}: ${error.message}`,
       findings: [],
       new_requirements: [],
+      wontDo: false,
+      hardVisionConflict: false,
       targetQueue: "",
     };
   }
