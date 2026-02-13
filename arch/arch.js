@@ -47,7 +47,7 @@ async function main() {
   const docsDir = runtime.docsDir;
   const archDir = runtime.queues.arch;
   const devDir = runtime.queues.dev;
-  const clarifyDir = runtime.queues.toClarify;
+  const clarifyDir = runtime.queues.humanDecisionNeeded || runtime.queues.toClarify;
 
   console.log(`ARCH: scan arch ${archDir}`);
 
@@ -76,7 +76,7 @@ async function main() {
     console.log(`ARCH: using ${reqFile}`);
   }
   console.log(`ARCH: dev dir ${devDir}`);
-  console.log(`ARCH: to-clarify dir ${clarifyDir}`);
+  console.log(`ARCH: human-decision-needed dir ${clarifyDir}`);
 
   const promptPath = path.join(agentRoot, "prompt.md");
   if (!fs.existsSync(promptPath)) {
@@ -85,7 +85,7 @@ async function main() {
   const prompt = fs.readFileSync(promptPath, "utf8");
 
   const reqLine = reqFile || "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nArch dir: ${archDir}\nDev dir: ${devDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nArch dir: ${archDir}\nDev dir: ${devDir}\nHuman-decision-needed dir: ${clarifyDir}\nDocs dir: ${docsDir}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("ARCH"));

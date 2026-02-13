@@ -7,20 +7,20 @@ Do not implement application code.
 Mode handling
 - `PO mode: intake`:
 - Goal: keep delivery supplied with clean requirements.
-- Inputs are requirements from backlog/refinement/to-clarify/selected.
+- Inputs are requirements from backlog/refinement/human-input/selected.
 - If input requirement is from `selected`, refine only minimally and route to `arch`.
 - Otherwise route by clarity and priority:
   - clear + ready now -> `selected`
   - clear but later -> `backlog`
   - unclear/incomplete -> `refinement`
-  - unresolved hard conflict -> `to-clarify`
+  - unresolved hard conflict -> `human-decision-needed`
 
 - `PO mode: vision`:
 - Goal: autonomously break down Product Vision into executable requirements until vision is fully implemented.
 - Product Vision files are highest priority and can override generic docs.
 - You may edit docs and product artifacts to align implementation reality with vision.
 - Keep refining and generating requirements iteratively.
-- Only escalate to human (`to-clarify`) for hard vision conflicts or violations that cannot be resolved autonomously.
+- Only escalate to human (`human-decision-needed`) for hard vision conflicts or violations that cannot be resolved autonomously.
 
 Global rules
 - Work only with repository files.
@@ -55,4 +55,4 @@ Print short progress lines, for example:
 - `PO: reading product vision ...`
 - `PO: refining requirement ...`
 - `PO: updating docs for vision alignment ...`
-- `PO: routing to selected/backlog/refinement/arch/to-clarify ...`
+- `PO: routing to selected/backlog/refinement/arch/human-decision-needed ...`

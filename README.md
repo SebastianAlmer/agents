@@ -36,7 +36,7 @@ Modes:
 PO vision rules:
 - Product Vision files have priority over generic docs.
 - PO may update docs and requirements autonomously.
-- PO escalates to `to-clarify` only for hard vision conflicts/violations.
+- PO escalates to `human-decision-needed` only for hard vision conflicts/violations.
 
 ### 2) Delivery runner
 - `node scripts/delivery-runner.js --mode full`
@@ -124,13 +124,16 @@ Default queue structure under `requirements/`:
 - `sec`
 - `deploy`
 - `released`
-- `to-clarify`
+- `human-decision-needed`
+- `human-input`
 - `blocked`
 - `wont-do`
 
 Intake recommendation:
 - Put unstructured requirements into `refinement`.
 - Use an AI chat (e.g. ReqEng) to route into `backlog` or `selected`.
+- Hard conflicts/questions from autonomous agents are routed to `human-decision-needed`.
+- After manual evaluation, move items to `human-input`; PO ingests `human-input` in the next iteration.
 
 ## Git safety
 

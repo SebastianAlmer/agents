@@ -46,7 +46,7 @@ Single requirement mode
 - Route:
 - pass -> next queue (as configured by runner)
 - block -> `blocked`
-- clarify -> `to-clarify`
+- clarify -> `human-decision-needed`
 
 Final mode (`Final pass: true`)
 - Perform global final QA sanity pass.

@@ -19,14 +19,15 @@ Queues
 - `refinement`: raw/unstructured ideas.
 - `backlog`: backlog-ready requirements (not selected yet).
 - `selected`: ready for PO processing.
-- `to-clarify`: clarification inbox from run/review stages; ReqEng should resolve and route out.
+- `human-decision-needed`: clarification inbox from run/review stages; ReqEng should resolve and route out.
+- `human-input`: operator-fed queue for PO re-steering on next iteration.
 
 Queue routing policy (mandatory)
 - Unclear, incomplete, conflicting, or still exploratory: keep/move to `refinement` and set status `refinement`.
 - Clear and backlog-ready, but not intended for immediate implementation: move to `backlog` and set status `backlog`.
 - Clear and intended for immediate implementation in the next flow run: move to `selected` and set status `selected`.
-- If input is in `to-clarify`, discuss it with the user and move it to `refinement`, `backlog`, or `selected`.
-- Do not route ReqEng outcomes to run/review queues such as `arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, or `blocked`.
+- If input is in `human-decision-needed`, discuss it with the user and move it to `refinement`, `backlog`, `selected`, or `human-input`.
+- Do not route ReqEng outcomes to run/review queues such as `arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `human-decision-needed`, or `blocked`.
 
 Docs conflict handling (mandatory)
 - If requirement intent conflicts with `/docs`, do not silently choose one side.

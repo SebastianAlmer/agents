@@ -134,7 +134,8 @@ function queueSummary(runtime) {
     sec: countFiles(runtime.queues.sec),
     deploy: countFiles(runtime.queues.deploy),
     released: countFiles(runtime.queues.released),
-    toClarify: countFiles(runtime.queues.toClarify),
+    humanDecisionNeeded: countFiles(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify),
+    humanInput: countFiles(runtime.queues.humanInput),
     blocked: countFiles(runtime.queues.blocked),
   };
 }
@@ -151,7 +152,8 @@ function formatSummary(summary) {
     `sec=${summary.sec}`,
     `deploy=${summary.deploy}`,
     `released=${summary.released}`,
-    `to-clarify=${summary.toClarify}`,
+    `human-decision-needed=${summary.humanDecisionNeeded}`,
+    `human-input=${summary.humanInput}`,
     `blocked=${summary.blocked}`,
   ].join(" ");
 }
@@ -212,7 +214,7 @@ function log(controls, message) {
 
 function hashQueues(runtime) {
   const rows = [];
-  for (const dir of Object.values(runtime.queues)) {
+  for (const dir of new Set(Object.values(runtime.queues))) {
     for (const file of listQueueFiles(dir)) {
       const stat = fs.statSync(file);
       rows.push(`${file}|${stat.size}|${Math.round(stat.mtimeMs)}`);
@@ -233,7 +235,7 @@ function runNodeScript(scriptPath, args, cwd) {
 function planningPending(runtime) {
   return countFiles(runtime.queues.backlog) > 0
     || countFiles(runtime.queues.selected) > 0
-    || countFiles(runtime.queues.toClarify) > 0
+    || countFiles(runtime.queues.humanInput) > 0
     || countFiles(runtime.queues.arch) > 0
     || countFiles(runtime.queues.dev) > 0;
 }

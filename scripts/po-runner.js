@@ -160,7 +160,8 @@ function queueSummary(runtime) {
     sec: countFiles(runtime.queues.sec),
     deploy: countFiles(runtime.queues.deploy),
     released: countFiles(runtime.queues.released),
-    toClarify: countFiles(runtime.queues.toClarify),
+    humanDecisionNeeded: countFiles(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify),
+    humanInput: countFiles(runtime.queues.humanInput),
     blocked: countFiles(runtime.queues.blocked),
   };
 }
@@ -177,7 +178,8 @@ function formatSummary(summary) {
     `sec=${summary.sec}`,
     `deploy=${summary.deploy}`,
     `released=${summary.released}`,
-    `to-clarify=${summary.toClarify}`,
+    `human-decision-needed=${summary.humanDecisionNeeded}`,
+    `human-input=${summary.humanInput}`,
     `blocked=${summary.blocked}`,
   ].join(" ");
 }
@@ -251,7 +253,8 @@ function planningQueueMap(runtime) {
     ["refinement", runtime.queues.refinement],
     ["backlog", runtime.queues.backlog],
     ["selected", runtime.queues.selected],
-    ["toClarify", runtime.queues.toClarify],
+    ["humanInput", runtime.queues.humanInput],
+    ["humanDecisionNeeded", runtime.queues.humanDecisionNeeded || runtime.queues.toClarify],
     ["wontDo", runtime.queues.wontDo],
   ];
 }
@@ -319,7 +322,7 @@ function readVisionDecision(filePath) {
 }
 
 function writeVisionClarification(runtime, reason) {
-  const targetDir = runtime.queues.toClarify;
+  const targetDir = runtime.queues.humanDecisionNeeded || runtime.queues.toClarify;
   if (!targetDir) {
     return "";
   }
@@ -331,7 +334,7 @@ function writeVisionClarification(runtime, reason) {
     "---",
     `id: REQ-PO-VISION-CLARIFY-${stamp}`,
     "title: PO vision clarification needed",
-    "status: to-clarify",
+    "status: human-decision-needed",
     "source: po-runner",
     "---",
     "",
@@ -342,7 +345,7 @@ function writeVisionClarification(runtime, reason) {
     `- ${String(reason || "PO vision requires clarification.")}`,
     "",
     "## PO Results",
-    "- Routed to to-clarify without stopping autonomous delivery.",
+    "- Routed to human-decision-needed without stopping autonomous delivery.",
     `- Changes: ${filePath}`,
     "",
   ].join("\n");
@@ -365,11 +368,23 @@ function selectIntakeSource(runtime) {
 
 function normalizePoTarget(queueName) {
   const normalized = String(queueName || "").trim().toLowerCase();
-  if (normalized === "to-clarify") {
-    return "toClarify";
+  if (
+    normalized === "to-clarify" ||
+    normalized === "to_clarify" ||
+    normalized === "toclarify" ||
+    normalized === "human-decision-needed" ||
+    normalized === "human decision needed" ||
+    normalized === "decision-needed" ||
+    normalized === "decision needed"
+  ) {
+    return "humanDecisionNeeded";
   }
-  if (normalized === "to_clarify" || normalized === "toclarify") {
-    return "toClarify";
+  if (
+    normalized === "human-input" ||
+    normalized === "human input" ||
+    normalized === "human_input"
+  ) {
+    return "humanInput";
   }
   if (["selected", "backlog", "refinement"].includes(normalized)) {
     return normalized;
@@ -383,15 +398,15 @@ function normalizePoTarget(queueName) {
 function routeFromPo(runtime, filePath, status) {
   const routeMap = {
     pass: "selected",
-    clarify: "toClarify",
-    block: "toClarify",
+    clarify: "humanDecisionNeeded",
+    block: "humanDecisionNeeded",
   };
   return routeByStatus({
     runtime,
     filePath,
     status,
     routeMap,
-    fallbackQueue: "toClarify",
+    fallbackQueue: "humanDecisionNeeded",
   });
 }
 
@@ -408,12 +423,15 @@ function queueStatusByTarget(targetQueue) {
   if (targetQueue === "wontDo") {
     return "wont-do";
   }
-  return "to-clarify";
+  if (targetQueue === "humanInput") {
+    return "human-input";
+  }
+  return "human-decision-needed";
 }
 
 function moveWithFallback(runtime, sourcePath, targetQueue, status, notes) {
   const fileName = path.basename(sourcePath);
-  const queueName = runtime.queues[targetQueue] ? targetQueue : "toClarify";
+  const queueName = runtime.queues[targetQueue] ? targetQueue : "humanDecisionNeeded";
   const targetPath = path.join(runtime.queues[queueName], fileName);
 
   if (Array.isArray(notes) && notes.length > 0) {
@@ -426,11 +444,11 @@ function moveWithFallback(runtime, sourcePath, targetQueue, status, notes) {
     return true;
   }
 
-  const fallbackPath = path.join(runtime.queues.toClarify, fileName);
-  setFrontMatterStatus(sourcePath, "to-clarify");
+  const fallbackPath = path.join(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify, fileName);
+  setFrontMatterStatus(sourcePath, "human-decision-needed");
   appendQueueSection(sourcePath, [
     "PO runner routing fallback",
-    `- failed to move to ${queueName}, forced to to-clarify`,
+    `- failed to move to ${queueName}, forced to human-decision-needed`,
   ]);
   return moveRequirementFile(sourcePath, fallbackPath);
 }
@@ -458,7 +476,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
     appendQueueSection(currentPath, [
       "PO runner: execution failure",
       `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
-      "- action: route to to-clarify",
+      "- action: route to human-decision-needed",
     ]);
   }
 
@@ -508,14 +526,14 @@ async function runVisionCycle(runtime, controls) {
   };
 }
 
-async function processToClarify(runtime, controls) {
-  const filePath = getFirstFile(runtime.queues.toClarify);
+async function processHumanInput(runtime, controls) {
+  const filePath = getFirstFile(runtime.queues.humanInput);
   if (!filePath) {
     return false;
   }
   const progressed = await runPoIntakeOnFile(runtime, filePath, controls);
   if (progressed) {
-    log(controls, `processed to-clarify ${path.basename(filePath)}`);
+    log(controls, `processed human-input ${path.basename(filePath)}`);
   }
   return progressed;
 }
@@ -535,7 +553,7 @@ async function fillSelected(runtime, highWatermark, controls) {
 
 function snapshotHash(runtime) {
   const parts = [];
-  for (const dir of Object.values(runtime.queues)) {
+  for (const dir of new Set(Object.values(runtime.queues))) {
     const files = listQueueFiles(dir);
     for (const file of files) {
       const stat = fs.statSync(file);
@@ -549,7 +567,7 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
   while (!controls.stopRequested) {
     const before = snapshotHash(runtime);
 
-    await processToClarify(runtime, controls);
+    await processHumanInput(runtime, controls);
 
     const selectedCount = countFiles(runtime.queues.selected);
     if (selectedCount < lowWatermark || selectedCount < highWatermark) {
@@ -581,7 +599,7 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
   while (!controls.stopRequested) {
     const before = snapshotHash(runtime);
 
-    await processToClarify(runtime, controls);
+    await processHumanInput(runtime, controls);
 
     const selectedCount = countFiles(runtime.queues.selected);
     if (selectedCount < highWatermark && !visionComplete) {

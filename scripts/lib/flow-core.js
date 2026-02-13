@@ -224,7 +224,18 @@ function normalizeStatus(value) {
   if (["block", "blocked", "fail", "failed", "security-block"].includes(status)) {
     return "block";
   }
-  if (["clarify", "to-clarify", "question", "rework", "todo", "to-do", "to_do", "improve"].includes(status)) {
+  if ([
+    "clarify",
+    "to-clarify",
+    "human-decision-needed",
+    "human decision needed",
+    "question",
+    "rework",
+    "todo",
+    "to-do",
+    "to_do",
+    "improve",
+  ].includes(status)) {
     return "clarify";
   }
   return "unknown";
@@ -272,8 +283,28 @@ function normalizeQueueName(value) {
     return "";
   }
   const normalized = String(value || "").trim().toLowerCase();
-  if (normalized === "to-clarify" || normalized === "to clarify") {
-    return "toClarify";
+  if (
+    normalized === "human-decision-needed" ||
+    normalized === "human decision needed" ||
+    normalized === "decision-needed" ||
+    normalized === "decision needed"
+  ) {
+    return "humanDecisionNeeded";
+  }
+  if (
+    normalized === "to-clarify" ||
+    normalized === "to clarify" ||
+    normalized === "to_clarify" ||
+    normalized === "toclarify"
+  ) {
+    return "humanDecisionNeeded";
+  }
+  if (
+    normalized === "human-input" ||
+    normalized === "human input" ||
+    normalized === "human_input"
+  ) {
+    return "humanInput";
   }
   if (normalized === "wont-do" || normalized === "wont do") {
     return "wontDo";
@@ -384,11 +415,11 @@ function routeByStatus({ runtime, filePath, status, routeMap, fallbackQueue }) {
     }
   }
 
-  const fallback = normalizeQueueName(fallbackQueue || "toClarify");
+  const fallback = normalizeQueueName(fallbackQueue || "humanDecisionNeeded");
   if (runtime && runtime.queues && runtime.queues[fallback]) {
     return fallback;
   }
-  return "toClarify";
+  return "humanDecisionNeeded";
 }
 
 function resolveSourcePath(runtime, candidate) {

@@ -156,7 +156,7 @@ async function main() {
   const uxDir = runtime.queues.ux;
   const secDir = runtime.queues.sec;
   const deployDir = runtime.queues.deploy;
-  const clarifyDir = runtime.queues.toClarify;
+  const clarifyDir = runtime.queues.humanDecisionNeeded || runtime.queues.toClarify;
   const blockedDir = runtime.queues.blocked;
   const releasedDir = runtime.queues.released;
 
@@ -207,7 +207,7 @@ async function main() {
   console.log(`UX: batch ${batch}`);
   console.log(`UX: sec dir ${secDir}`);
   console.log(`UX: deploy dir ${deployDir}`);
-  console.log(`UX: to-clarify dir ${clarifyDir}`);
+  console.log(`UX: human-decision-needed dir ${clarifyDir}`);
   console.log(`UX: blocked dir ${blockedDir}`);
 
   const promptPath = path.join(agentRoot, "prompt.md");
@@ -222,7 +222,7 @@ async function main() {
   const uxListText = uxFiles.length > 0
     ? uxFiles.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nUX dir: ${uxDir}\nSec dir: ${secDir}\nDeploy dir: ${deployDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nUX queue files:\n${uxListText}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nUX dir: ${uxDir}\nSec dir: ${secDir}\nDeploy dir: ${deployDir}\nHuman-decision-needed dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nUX queue files:\n${uxListText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("UX"));

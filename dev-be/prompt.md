@@ -17,7 +17,7 @@ Rules
 
 Result
 - If implementation is complete: move requirement to `qa` and set status `qa`.
-- If implementation cannot proceed due unclear scope, missing info, or unresolved decisions: move requirement to `to-clarify` and set status `to-clarify`.
+- If implementation cannot proceed due unclear scope, missing info, or unresolved decisions: move requirement to `human-decision-needed` and set status `human-decision-needed`.
 
 Requirement updates
 - Always add section `Dev Results` with concise bullets.
@@ -30,4 +30,4 @@ Print short progress lines, e.g.:
 - `DEV_BE: checking docs ...`
 - `DEV_BE: editing <file>`
 - `DEV_BE: running <command>`
-- `DEV_BE: moving to qa/to-clarify ...`
+- `DEV_BE: moving to qa/human-decision-needed ...`

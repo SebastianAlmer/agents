@@ -112,7 +112,8 @@ function queueSummary(runtime) {
     sec: countFiles(runtime.queues.sec),
     deploy: countFiles(runtime.queues.deploy),
     released: countFiles(runtime.queues.released),
-    toClarify: countFiles(runtime.queues.toClarify),
+    humanDecisionNeeded: countFiles(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify),
+    humanInput: countFiles(runtime.queues.humanInput),
     blocked: countFiles(runtime.queues.blocked),
   };
 }
@@ -129,7 +130,8 @@ function formatSummary(summary) {
     `sec=${summary.sec}`,
     `deploy=${summary.deploy}`,
     `released=${summary.released}`,
-    `to-clarify=${summary.toClarify}`,
+    `human-decision-needed=${summary.humanDecisionNeeded}`,
+    `human-input=${summary.humanInput}`,
     `blocked=${summary.blocked}`,
   ].join(" ");
 }
@@ -322,7 +324,7 @@ async function runArch(runtime, controls) {
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
     });
     if (!result.ok) {
-      moveToQueue(runtime, file, "toClarify", "to-clarify", [
+      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
         "Delivery runner: ARCH failed",
         `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
       ]);
@@ -334,15 +336,15 @@ async function runArch(runtime, controls) {
       progressed = true;
       continue;
     }
-    if (fs.existsSync(path.join(runtime.queues.toClarify, name))) {
+    if (fs.existsSync(path.join(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify, name))) {
       progressed = true;
       continue;
     }
 
     if (fs.existsSync(file)) {
-      moveToQueue(runtime, file, "toClarify", "to-clarify", [
+      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
         "Delivery runner: ARCH output fallback",
-        "- requirement not routed by agent; moved to to-clarify",
+        "- requirement not routed by agent; moved to human-decision-needed",
       ]);
     }
     progressed = true;
@@ -371,7 +373,7 @@ async function runDev(runtime, controls) {
     });
 
     if (!result.ok) {
-      moveToQueue(runtime, file, "toClarify", "to-clarify", [
+      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
         "Delivery runner: DEV failed",
         `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
       ]);
@@ -383,15 +385,15 @@ async function runDev(runtime, controls) {
       progressed = true;
       continue;
     }
-    if (fs.existsSync(path.join(runtime.queues.toClarify, name))) {
+    if (fs.existsSync(path.join(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify, name))) {
       progressed = true;
       continue;
     }
 
     if (fs.existsSync(file)) {
-      moveToQueue(runtime, file, "toClarify", "to-clarify", [
+      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
         "Delivery runner: DEV output fallback",
-        "- requirement not routed by agent; moved to to-clarify",
+        "- requirement not routed by agent; moved to human-decision-needed",
       ]);
     }
     progressed = true;
@@ -429,7 +431,7 @@ async function runUxBatch(runtime, controls) {
   });
 
   if (!result.ok) {
-    moveAll(runtime, "ux", "toClarify", "to-clarify", "Delivery runner: UX batch failed");
+    moveAll(runtime, "ux", "humanDecisionNeeded", "human-decision-needed", "Delivery runner: UX batch failed");
     return true;
   }
 
@@ -462,7 +464,7 @@ async function runSecBatch(runtime, controls) {
   });
 
   if (!result.ok) {
-    moveAll(runtime, "sec", "toClarify", "to-clarify", "Delivery runner: SEC batch failed");
+    moveAll(runtime, "sec", "humanDecisionNeeded", "human-decision-needed", "Delivery runner: SEC batch failed");
     return true;
   }
 
@@ -668,7 +670,7 @@ async function runDeployBundle(runtime, controls) {
   });
 
   if (!result.ok) {
-    moveAll(runtime, "deploy", "toClarify", "to-clarify", "Delivery runner: deploy bundle failed");
+    moveAll(runtime, "deploy", "humanDecisionNeeded", "human-decision-needed", "Delivery runner: deploy bundle failed");
     return true;
   }
 
@@ -739,7 +741,7 @@ async function runQaPostBundle(runtime, controls, lastSignature) {
 
 function snapshotHash(runtime) {
   const parts = [];
-  for (const dir of Object.values(runtime.queues)) {
+  for (const dir of new Set(Object.values(runtime.queues))) {
     const files = listQueueFiles(dir);
     for (const file of files) {
       const stat = fs.statSync(file);
