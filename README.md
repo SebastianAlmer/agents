@@ -53,7 +53,7 @@ npm run ops
 Equivalent node commands:
 
 ```bash
-node scripts/run-po.js --mode vision
+node po/po.js --runner --mode vision
 node run.js --mode auto
 ```
 
@@ -63,8 +63,8 @@ node run.js --mode auto
 - OPS is long-running; `PO --mode intake` is long-running; `PO --mode vision` is finite and exits on convergence or human-handoff.
 
 PO mode behavior:
-- `--mode intake`: works queue-driven (`to-clarify`, `backlog`, `refinement` -> `selected`).
-- `--mode vision`: iterates Product Vision into requirements with convergence guardrails.
+- `node po/po.js --runner --mode intake`: queue-driven (`to-clarify`, `backlog`, `refinement` -> `selected`).
+- `node po/po.js --runner --mode vision`: iterates Product Vision into requirements with convergence guardrails.
   - defaults: `vision_max_cycles=100`, `vision_max_requirements=1000`, `vision_stable_cycles=2`
   - if human steering is required (for example vision overflow), `run-po` exits with code `2` and routes to `to-clarify`.
 

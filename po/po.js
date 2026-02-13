@@ -3,6 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { spawn } = require("child_process");
 const {
   getFirstFile,
   readConfigArgs,
@@ -28,10 +29,15 @@ function parseArgs(argv) {
     auto: false,
     mode: "intake",
     visionDecisionFile: "",
+    runner: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const raw = String(argv[i] || "");
     const normalized = raw.toLowerCase();
+    if (normalized === "--runner" || normalized === "--run" || normalized === "--queue-runner") {
+      args.runner = true;
+      continue;
+    }
     if (normalized === "-auto" || normalized === "--auto") {
       args.auto = true;
       continue;
@@ -64,6 +70,28 @@ function parseArgs(argv) {
   return args;
 }
 
+function isRunnerFlag(arg) {
+  const normalized = String(arg || "").toLowerCase();
+  return normalized === "--runner" || normalized === "--run" || normalized === "--queue-runner";
+}
+
+function forwardRunnerArgs(argv) {
+  return argv.filter((arg) => !isRunnerFlag(arg));
+}
+
+function runPoRunnerScript(args, agentsRoot) {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(agentsRoot, "scripts", "run-po.js");
+    const proc = spawn(process.execPath, [scriptPath, ...args], {
+      cwd: agentsRoot,
+      stdio: "inherit",
+    });
+    proc.on("close", (exitCode) => {
+      resolve(Number.isInteger(exitCode) ? exitCode : 1);
+    });
+  });
+}
+
 function resolveRequirementPath(requirement, candidateDirs) {
   if (!requirement) {
     return "";
@@ -81,14 +109,21 @@ function resolveRequirementPath(requirement, candidateDirs) {
 }
 
 async function main() {
-  const parsed = parseArgs(process.argv.slice(2));
+  const rawArgs = process.argv.slice(2);
+  const parsed = parseArgs(rawArgs);
+  const agentRoot = __dirname;
+  const agentsRoot = path.resolve(agentRoot, "..");
+  if (parsed.runner) {
+    const exitCode = await runPoRunnerScript(forwardRunnerArgs(rawArgs), agentsRoot);
+    process.exit(exitCode);
+  }
+
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
   const { requirement, auto, mode } = parsed;
 
-  const agentRoot = __dirname;
-  const runtime = loadRuntimeConfig(path.resolve(agentRoot, ".."));
+  const runtime = loadRuntimeConfig(agentsRoot);
   ensureQueueDirs(runtime.queues);
 
   const repoRoot = runtime.repoRoot;
