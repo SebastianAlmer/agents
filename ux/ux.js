@@ -224,7 +224,7 @@ async function main() {
   const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nUX dir: ${uxDir}\nDeploy dir: ${deployDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nUX queue files:\n${uxListText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
-  const configArgs = readConfigArgs(runtime.codexConfigPath);
+  const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("UX"));
 
   const threadFile = getThreadFilePath({
     agentsRoot: runtime.agentsRoot,

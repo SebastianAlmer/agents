@@ -173,7 +173,7 @@ async function main() {
   const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nSec dir: ${secDir}\nUX dir: ${uxDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
-  const configArgs = readConfigArgs(runtime.codexConfigPath);
+  const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("SEC"));
 
   const threadFile = getThreadFilePath({
     agentsRoot: runtime.agentsRoot,

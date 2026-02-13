@@ -52,12 +52,20 @@ Important fields:
 - `[dev_agents]`: enable/disable FE/BE/FS dev agents.
 - `[qa].mandatory_checks`: project-specific QA baseline checks.
 - `[review]`: legacy bundle settings (kept for compatibility; standard/bulk use QA/UX batch pipeline).
-- `[codex]`: Codex runtime settings rendered to `.runtime/codex.generated.toml`.
+- `[models]`: per-agent model mapping (`po`, `arch`, `dev_fe`, `dev_be`, `dev_fs`, `qa`, `sec`, `ux`, `deploy`, `reqeng`).
+- `[codex]`: global Codex runtime fallback settings rendered to `.runtime/codex.generated.toml`.
 
 By default, setup writes `mandatory_checks = []` for project-agnostic behavior.
 Set QA checks per project with `--qa-check ...` or by editing `config.local.toml`.
 
 You can override config file path with `AGENTS_CONFIG=/path/to/config.local.toml`.
+
+### Per-agent models
+
+Default mapping in this repo:
+- Strong (`gpt-5.3-codex`): `po`, `arch`, `reqeng`, `sec`
+- Lean (`gpt-5.3-codex-spark`): `dev_fe`, `dev_be`, `dev_fs`, `qa`, `ux`, `deploy`
+- Fallback: `[codex].model` is used when a role has no explicit `[models]` entry.
 
 ## Requirement queues
 

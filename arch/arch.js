@@ -89,7 +89,7 @@ async function main() {
   const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nArch dir: ${archDir}\nDev dir: ${devDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
-  const configArgs = readConfigArgs(runtime.codexConfigPath);
+  const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("ARCH"));
 
   const threadFile = getThreadFilePath({
     agentsRoot: runtime.agentsRoot,

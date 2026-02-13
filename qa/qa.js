@@ -252,7 +252,7 @@ async function main() {
   const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
-  const configArgs = readConfigArgs(runtime.codexConfigPath);
+  const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("QA"));
 
   const threadFile = getThreadFilePath({
     agentsRoot: runtime.agentsRoot,

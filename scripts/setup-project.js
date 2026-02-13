@@ -372,8 +372,29 @@ function main() {
     "single_specialist"
   );
 
+  const baseModels = base.models && typeof base.models === "object" ? base.models : {};
+  const modelDefaults = {
+    default: "gpt-5.3-codex-spark",
+    po: "gpt-5.3-codex",
+    arch: "gpt-5.3-codex",
+    reqeng: "gpt-5.3-codex",
+    sec: "gpt-5.3-codex",
+    dev_fe: "gpt-5.3-codex-spark",
+    dev_be: "gpt-5.3-codex-spark",
+    dev_fs: "gpt-5.3-codex-spark",
+    qa: "gpt-5.3-codex-spark",
+    ux: "gpt-5.3-codex-spark",
+    deploy: "gpt-5.3-codex-spark",
+  };
+
+  const models = {};
+  for (const [key, fallback] of Object.entries(modelDefaults)) {
+    const candidate = String(baseModels[key] || "").trim();
+    models[key] = candidate || fallback;
+  }
+
   const codex = {
-    model: (base.codex && base.codex.model) || "gpt-5.3-codex",
+    model: (base.codex && base.codex.model) || models.default || "gpt-5.3-codex-spark",
     approval_policy: (base.codex && base.codex.approval_policy) || "never",
     sandbox_mode: (base.codex && base.codex.sandbox_mode) || "danger-full-access",
     model_reasoning_effort: (base.codex && base.codex.model_reasoning_effort) || "xhigh",
@@ -429,6 +450,19 @@ function main() {
     `default_risk = ${toTomlString(reviewDefaultRisk)}`,
     `medium_scope_policy = ${toTomlString(reviewMediumScopePolicy)}`,
     "",
+    "[models]",
+    `default = ${toTomlString(models.default)}`,
+    `po = ${toTomlString(models.po)}`,
+    `arch = ${toTomlString(models.arch)}`,
+    `reqeng = ${toTomlString(models.reqeng)}`,
+    `sec = ${toTomlString(models.sec)}`,
+    `dev_fe = ${toTomlString(models.dev_fe)}`,
+    `dev_be = ${toTomlString(models.dev_be)}`,
+    `dev_fs = ${toTomlString(models.dev_fs)}`,
+    `qa = ${toTomlString(models.qa)}`,
+    `ux = ${toTomlString(models.ux)}`,
+    `deploy = ${toTomlString(models.deploy)}`,
+    "",
     "[codex]",
     `model = ${toTomlString(codex.model)}`,
     `approval_policy = ${toTomlString(codex.approval_policy)}`,
@@ -447,6 +481,7 @@ function main() {
   console.log(`- deploy.mode: ${deployMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
+  console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, ux=${models.ux}, deploy=${models.deploy}`);
   console.log(`- review: strategy=${reviewStrategy}, parallel=${reviewParallel}, default_risk=${reviewDefaultRisk}, medium_scope_policy=${reviewMediumScopePolicy}`);
   console.log("If you change dev_routing mode later, run setup-project again to realign defaults.");
 }

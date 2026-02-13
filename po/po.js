@@ -89,7 +89,7 @@ async function main() {
   const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nSelected dir: ${selectedDir}\nArch dir: ${archDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\nDev routing mode: ${runtime.devRouting.mode}\nDefault implementation scope: ${runtime.devRouting.defaultScope}\nAllowed implementation_scope values: frontend | backend | fullstack\nEnabled dev agents: fe=${runtime.devAgents.useFe}, be=${runtime.devAgents.useBe}, fs=${runtime.devAgents.useFs}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
-  const configArgs = readConfigArgs(runtime.codexConfigPath);
+  const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("PO"));
 
   const threadFile = getThreadFilePath({
     agentsRoot: runtime.agentsRoot,
