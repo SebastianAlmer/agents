@@ -31,13 +31,13 @@ Requirement mode (`Final pass: false`)
    - add `Changes:` line
 4) Decision:
    - `Review only: false`:
-     - pass: move to `ux`, status `ux`
-     - hard blocker (security/compliance/critical violation): move to `blocked`, status `blocked`
-     - unclear, follow-up questions, or non-blocking findings: move to `to-clarify`, status `to-clarify`
+     - pass: move to `ux`, status `pass`
+     - security/compliance/critical concern that blocks safe delivery: move to `to-clarify`, status `clarify`
+     - unclear, follow-up questions, or non-blocking findings: move to `to-clarify`, status `clarify`
    - `Review only: true`:
      - do not move requirement files
      - write decision JSON to `Decision file` with schema:
-       - `status`: `pass` | `clarify` | `block`
+       - `status`: `pass` | `clarify` | `improve`
        - `summary`: short text (max 2 sentences)
        - `findings`: array of strings (optional, max 5)
 
@@ -54,6 +54,6 @@ Logging
 Print short progress lines, e.g.:
 - `SEC: reading ...`
 - `SEC: checking security ...`
-- `SEC: moving to ux/to-clarify/blocked ...`
+- `SEC: moving to ux/to-clarify ...`
 - `SEC: writing review decision ...`
 - `SEC: final pass summary ...`

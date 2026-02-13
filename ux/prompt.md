@@ -29,14 +29,14 @@ Batch mode (`Batch mode: true`)
 5) For each file currently in `UX queue files`:
    - update requirement notes (`UX Results`, optional findings, `Changes:`)
    - set status by moving requirement file:
-     - pass -> `deploy` (status `deploy`)
-     - hard blocker -> `blocked` (status `blocked`)
-     - unclear/non-blocking follow-up -> `to-clarify` (status `to-clarify`)
+     - pass -> `deploy` (status `pass`)
+     - security/architecture blocking concern that cannot be resolved here: route to `to-clarify`, status `clarify`
+     - unclear/non-blocking follow-up -> `to-clarify` (status `clarify`)
 
 Review-only mode (`Review only: true`)
 - Do not move requirement files.
 - Write decision JSON to `Decision file`:
-  - `status`: `pass` | `clarify` | `block`
+  - `status`: `pass` | `clarify` | `improve`
   - `summary`: short text (max 2 sentences)
   - `findings`: array of strings (optional, max 5)
 
@@ -44,7 +44,7 @@ Legacy single-requirement mode
 1) Review one requirement with UX/copy/accessibility focus.
 2) Fix requirement-scoped UX issues where needed.
 3) Update requirement (`UX Results`, optional findings, `Changes:`).
-4) Route to `deploy`, `to-clarify`, or `blocked`.
+4) Route to `deploy` or `to-clarify`.
 
 Final mode (`Final pass: true`)
 - Perform global final UX sanity pass.

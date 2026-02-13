@@ -16,8 +16,8 @@ Rules
 - No commits.
 
 Result
-- If implementation is complete: move requirement to `qa` and set status `qa`.
-- If implementation cannot proceed due unclear scope, missing info, or unresolved decisions: move requirement to `to-clarify` and set status `to-clarify`.
+- If implementation is complete: move requirement to `qa` and set status `pass`.
+- If implementation cannot proceed due unclear scope, missing info, or unresolved decisions: move requirement to `to-clarify` and set status `clarify`.
 
 Requirement updates
 - Always add section `Dev Results` with concise bullets.

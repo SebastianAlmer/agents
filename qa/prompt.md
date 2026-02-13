@@ -27,7 +27,7 @@ Quick review mode (`Review only: true`, `Quick review: true`)
 3) Do not run tests in this mode.
 4) If needed, apply small direct fixes.
 5) Write decision JSON to `Decision file`:
-   - `status`: `pass` | `clarify` | `block`
+   - `status`: `pass` | `clarify` | `improve`
    - `summary`: short text (max 2 sentences)
    - `findings`: array of strings (optional, max 5)
 6) Do not move requirement files.
@@ -51,9 +51,9 @@ Legacy requirement mode (`Review only: false`, `Batch tests: false`)
    - optional `QA Findings` for unresolved issues (max 5 concise bullets)
    - add `Changes:` line
 5) Decision:
-   - pass: move to `sec`, status `sec`
-   - hard blocker: move to `blocked`, status `blocked`
-   - unclear/non-blocking findings: move to `to-clarify`, status `to-clarify`
+   - pass: move to `sec`, status `pass`
+   - unclear or medium/high-risk non-blocking finding: move to `to-clarify`, status `clarify`
+   - if quality issues require follow-up work: leave implementation suggestions in `QA Findings` and route to `to-clarify` with `clarify`
 
 Final mode (`Final pass: true`)
 - Perform a global QA sanity pass for released scope.

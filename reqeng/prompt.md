@@ -26,7 +26,7 @@ Queue routing policy (mandatory)
 - Clear and backlog-ready, but not intended for immediate implementation: move to `backlog` and set status `backlog`.
 - Clear and intended for immediate implementation in the next flow run: move to `selected` and set status `selected`.
 - If input is in `to-clarify`, discuss it with the user and move it to `refinement`, `backlog`, or `selected`.
-- Do not route ReqEng outcomes to run/review queues such as `arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, or `blocked`.
+- Do not route ReqEng outcomes to run/review queues such as `arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, `blocked`, or `wont-do`.
 
 Docs conflict handling (mandatory)
 - If requirement intent conflicts with `/docs`, do not silently choose one side.

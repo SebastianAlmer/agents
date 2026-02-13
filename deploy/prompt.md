@@ -22,7 +22,7 @@ Requirement mode (`Final pass: false`, `Batch mode: false`)
 3) Update requirement:
    - add `Deploy Results`
    - add `Changes:` line
-4) Move requirement to `released` and set status `released`.
+4) Move requirement to `released` and set status `pass`.
 
 Batch mode (`Final pass: false`, `Batch mode: true`)
 1) Evaluate deploy queue items as one batch.
@@ -30,8 +30,8 @@ Batch mode (`Final pass: false`, `Batch mode: true`)
 3) Apply shared minimal fixes once where possible.
 4) For each requirement in deploy queue:
    - add/update concise `Deploy Results` with a short batch summary
-   - set status to `released` and move to `released` when checks pass
-5) If a requirement is blocked by a hard deploy issue, move it to `blocked` with concise reason.
+   - set status to `pass` and move to `released` when checks pass
+5) If a requirement is blocked by a hard deploy issue, move it to `to-clarify` with concise reason.
 6) If requirement-specific clarification is needed, move to `to-clarify` with concise questions.
 
 Final mode (`Final pass: true`)
@@ -48,5 +48,5 @@ Logging
 Print short progress lines, e.g.:
 - `DEPLOY: reading ...`
 - `DEPLOY: running batch deploy checks ...`
-- `DEPLOY: moving to released/blocked/to-clarify ...`
+- `DEPLOY: moving to released/to-clarify ...`
 - `DEPLOY: final pass summary ...`

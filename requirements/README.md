@@ -1,9 +1,7 @@
 # Requirements Queues
 
-This folder stores queue folders only. Requirement files are intentionally ignored by git
-so each project can keep its own local queue content.
+Queue folders used by the autonomous loop:
 
-Default queues:
 - `refinement`
 - `backlog`
 - `selected`
@@ -15,13 +13,15 @@ Default queues:
 - `deploy`
 - `released`
 - `to-clarify`
-- `blocked`
 - `wont-do`
 
-Queue intent:
-- `refinement` and `backlog` are customer-managed intake/planning.
-- ReqEng intake triage: unclear -> `refinement`, clear-but-later -> `backlog`, clear-and-immediate -> `selected`.
-- Delivery runs start from `selected`.
-- Unclear items from any stage go to `to-clarify`.
-- ReqEng processes `to-clarify` items with the user and routes them to `refinement`, `backlog`, or `selected`.
-- Hard blockers from `qa`/`sec`/`ux` go to `blocked`.
+Flow intent:
+
+- `po` and `ops` run from this queue set.
+- `refinement` and `backlog` provide planning and intake sources.
+- `selected` is the pipeline handoff queue for ops.
+- `to-clarify` is the common rework and follow-up funnel for all stages.
+- `released` is the final done queue.
+- `wont-do` contains terminal non-work items.
+
+Note: legacy folders are intentionally removed from this flow.

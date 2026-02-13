@@ -5,8 +5,24 @@
   "description": "Codex agent flow runner",
   "scripts": {
     "start": "node run.js",
-    "flow": "node run.js",
+    "start:auto": "node run.js --mode auto",
+    "start:standard": "node run.js --mode standard",
+    "start:dev-only": "node run.js --mode dev-only",
     "setup": "node scripts/setup-project.js",
-    "reqeng": "node reqeng/reqeng.js"
+    "po": "node scripts/run-po.js",
+    "ops": "node scripts/run-ops.js",
+    "reqeng": "node reqeng/reqeng.js",
+    "agent:po": "node po/po.js",
+    "agent:arch": "node arch/arch.js",
+    "agent:dev": "node dev/dev.js",
+    "agent:dev-fe": "node dev-fe/dev-fe.js",
+    "agent:dev-be": "node dev-be/dev-be.js",
+    "agent:dev-fs": "node dev-fs/dev-fs.js",
+    "agent:qa": "node qa/qa.js",
+    "agent:sec": "node sec/sec.js",
+    "agent:ux": "node ux/ux.js",
+    "agent:deploy": "node deploy/deploy.js",
+    "po:once": "node scripts/run-po.js --once",
+    "ops:once": "node scripts/run-ops.js --once"
   }
 }

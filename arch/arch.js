@@ -9,9 +9,8 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  runCodexExecFiltered,
   runCodexExec,
-  readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -46,9 +45,12 @@ async function main() {
 
   const repoRoot = runtime.repoRoot;
   const docsDir = runtime.docsDir;
+  const productVisionDir = runtime.productVisionDir || "";
+  const productVisionFiles = Array.isArray(runtime.productVisionFiles) ? runtime.productVisionFiles : [];
   const archDir = runtime.queues.arch;
   const devDir = runtime.queues.dev;
   const clarifyDir = runtime.queues.toClarify;
+  const posDocs = runtime.posDocs || {};
 
   console.log(`ARCH: scan arch ${archDir}`);
 
@@ -86,7 +88,10 @@ async function main() {
   const prompt = fs.readFileSync(promptPath, "utf8");
 
   const reqLine = reqFile || "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nArch dir: ${archDir}\nDev dir: ${devDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\n`;
+  const productVisionList = productVisionFiles.length > 0
+    ? productVisionFiles.map((filePath) => `- ${path.basename(filePath)}`).join("\n")
+    : "- none";
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nArch dir: ${archDir}\nDev dir: ${devDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\nProduct vision dir: ${productVisionDir || "missing"}\nProduct vision files:\n${productVisionList}\nProduct vision priority: Product Vision files override other docs on conflict.\nVision file: ${posDocs.vision || "missing"}\nBlueprint file: ${posDocs.blueprint || "missing"}\nEpic matrix file: ${posDocs.epicMatrix || "missing"}\nNot-building file: ${posDocs.notBuilding || "missing"}\nVision achieved file: ${posDocs.visionAchieved || "missing"}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("ARCH"));
@@ -99,41 +104,15 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   if (!auto) {
-    const verbose = { value: false };
-    const detail = { value: false };
-    console.log("ARCH: chat mode (Alt+V verbose, Alt+D detail, q to quit)");
-    while (true) {
-      const msg = await readInputWithHotkeys({
-        prompt: "ARCH> ",
-        verboseRef: verbose,
-        detailRef: detail,
-      });
-      if (!msg) {
-        continue;
-      }
-      const trimmed = msg.trim().toLowerCase();
-      if (["q", "quit", "exit"].includes(trimmed)) {
-        break;
-      }
-      const promptToSend = threadId
-        ? `${context}\n\nUser: ${msg}`
-        : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const result = await runCodexExecFiltered({
-        prompt: promptToSend,
-        repoRoot,
-        configArgs,
-        threadId,
-        verboseRef: verbose,
-        threadFile,
-        agentsRoot: runtime.agentsRoot,
-        agentLabel: "ARCH",
-        autoCompact: auto,
-      });
-      if (result.threadId) {
-        writeThreadId(threadFile, result.threadId);
-        threadId = result.threadId;
-      }
-    }
+    await startInteractiveCodexAgent({
+      agentLabel: "ARCH",
+      repoRoot,
+      configArgs,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      bootstrapPrompt: fullPrompt,
+      threadId,
+    });
     process.exit(0);
   }
 

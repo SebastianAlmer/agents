@@ -2,9 +2,11 @@
 config.local.toml
 .runtime/
 logs/
-**/thread.txt
-**/thread.auto.txt
+**/thread*.txt
 
 # requirements: ignore markdown payloads only
 requirements/**/*.md
 !requirements/README.md
+
+# legacy payloads / old migration scratch
+requirements_old/

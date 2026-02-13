@@ -1,32 +1,38 @@
 [paths]
-# Absolute path to the project repository agents should work on.
+# Absolute path to your target project repository.
 repo_root = "/home/you/git/your-project"
 
-# Optional. If omitted, defaults to ./requirements in this agents repo.
+# Optional. If omitted, defaults to ./requirements in this repo.
 requirements_root = "./requirements"
 
-# Optional. If empty, defaults to <repo_root>/docs.
 docs_dir = ""
+# Optional. If empty, defaults to <docs_dir>/product-operating-system.
+product_vision_dir = ""
+
+[loops]
+# Recommended: 2-4
+window_size = 3
+po_poll_seconds = 20
+ops_poll_seconds = 20
+max_retries = 2
+retry_delay_seconds = 2
 
 [flow]
+# auto | standard | dev-only
 default_mode = "standard"
 idle_poll_seconds = 300
 max_retries = 2
 retry_delay_seconds = 2
 
 [run_defaults]
-# standard | detailed | bulk | fast
+# auto | standard | dev-only
 flow = "standard"
 max_req = 0
 verbose = false
 detail = false
-# hard | soft | none | snapshot
 preflight = "soft"
-# if true, standard flow waits for manual key (n) before downstream QA/SEC/UX/DEPLOY
-manual_downstream = false
 
 [preflight]
-# Used in preflight mode "snapshot".
 snapshot_commit_message_prefix = "chore(flow): preflight snapshot"
 
 [deploy]
@@ -46,28 +52,13 @@ use_be = false
 use_fs = true
 
 [qa]
-# Project-specific QA baseline checks. Add checks that exist in your target repository.
-# Example:
-# mandatory_checks = ["npm test", "npm run lint"]
 mandatory_checks = []
 
-[review]
-# Legacy review-bundle settings (kept for compatibility).
-# Standard and bulk flows use QA/UX batch pipeline.
-strategy = "bundle"
-parallel = false
-# low | medium | high
-default_risk = "low"
-# single_specialist | full
-medium_scope_policy = "single_specialist"
-
 [models]
-# Per-agent model routing.
-# strong: gpt-5.3-codex | lean: gpt-5.3-codex-spark
 default = "gpt-5.3-codex-spark"
+reqeng = "gpt-5.3-codex-spark"
 po = "gpt-5.3-codex"
 arch = "gpt-5.3-codex"
-reqeng = "gpt-5.3-codex"
 sec = "gpt-5.3-codex"
 dev_fe = "gpt-5.3-codex-spark"
 dev_be = "gpt-5.3-codex-spark"
@@ -77,7 +68,6 @@ ux = "gpt-5.3-codex-spark"
 deploy = "gpt-5.3-codex-spark"
 
 [codex]
-# Fallback model when a role has no explicit [models] entry.
 model = "gpt-5.3-codex-spark"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

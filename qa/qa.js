@@ -9,9 +9,8 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  runCodexExecFiltered,
   runCodexExec,
-  readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -127,7 +126,7 @@ function validateReviewDecisionFile(decisionFile) {
     throw new Error(`QA review decision file invalid JSON: ${err.message}`);
   }
   const status = String(parsed.status || "").toLowerCase();
-  if (!["pass", "clarify", "block"].includes(status)) {
+  if (!["pass", "clarify", "improve"].includes(status)) {
     throw new Error(`QA review decision has invalid status: ${status || "<empty>"}`);
   }
   const summary = String(parsed.summary || "").trim();
@@ -171,7 +170,6 @@ async function main() {
   const qaDir = runtime.queues.qa;
   const secDir = runtime.queues.sec;
   const clarifyDir = runtime.queues.toClarify;
-  const blockedDir = runtime.queues.blocked;
   const releasedDir = runtime.queues.released;
 
   let reqFile = "";
@@ -230,7 +228,6 @@ async function main() {
   console.log(`QA: batch-tests ${batchTests}`);
   console.log(`QA: sec dir ${secDir}`);
   console.log(`QA: to-clarify dir ${clarifyDir}`);
-  console.log(`QA: blocked dir ${blockedDir}`);
 
   const promptPath = path.join(agentRoot, "prompt.md");
   if (!fs.existsSync(promptPath)) {
@@ -249,7 +246,7 @@ async function main() {
   const batchListText = batchTargets.length > 0
     ? batchTargets.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("QA"));
@@ -262,41 +259,15 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   if (!auto) {
-    const verbose = { value: false };
-    const detail = { value: false };
-    console.log("QA: chat mode (Alt+V verbose, Alt+D detail, q to quit)");
-    while (true) {
-      const msg = await readInputWithHotkeys({
-        prompt: "QA> ",
-        verboseRef: verbose,
-        detailRef: detail,
-      });
-      if (!msg) {
-        continue;
-      }
-      const trimmed = msg.trim().toLowerCase();
-      if (["q", "quit", "exit"].includes(trimmed)) {
-        break;
-      }
-      const promptToSend = threadId
-        ? `${context}\n\nUser: ${msg}`
-        : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const result = await runCodexExecFiltered({
-        prompt: promptToSend,
-        repoRoot,
-        configArgs,
-        threadId,
-        verboseRef: verbose,
-        threadFile,
-        agentsRoot: runtime.agentsRoot,
-        agentLabel: "QA",
-        autoCompact: auto,
-      });
-      if (result.threadId) {
-        writeThreadId(threadFile, result.threadId);
-        threadId = result.threadId;
-      }
-    }
+    await startInteractiveCodexAgent({
+      agentLabel: "QA",
+      repoRoot,
+      configArgs,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      bootstrapPrompt: fullPrompt,
+      threadId,
+    });
     process.exit(0);
   }
 

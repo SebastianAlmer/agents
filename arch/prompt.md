@@ -10,7 +10,8 @@ Do not implement app code.
 Rules
 - Work only with files in the repository. No web.
 - Edit only requirement files.
-- Validate against `/docs`.
+- Validate against `/docs` and POS references in context.
+- Product Vision files have priority over other `/docs` files when conflicts exist.
 - Use ASCII only.
 - Keep architecture guidance minimal and high-impact.
 - Preserve PO intent; do not rewrite product scope.
@@ -31,7 +32,7 @@ Required updates
   - set broader `review_scope` (`qa_sec`, `qa_ux`, `full`) only when justified by risk
 - For complex requirements, optionally add `Implementation Guardrails` (2-5 bullets, principle-level; not step-by-step).
 - Optional for non-trivial tradeoffs: add `Risks & Tradeoffs` (1-3 concise bullets).
-- Update front matter `status` to `dev` or `to-clarify`.
+- Update front matter `status` to `pass` for architecture-ready and `clarify` for follow-up.
 - Add section `Architecture Results` with short bullets and one `Changes:` line.
 
 Writing style

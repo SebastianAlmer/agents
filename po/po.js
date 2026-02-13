@@ -9,9 +9,8 @@ const {
   readThreadId,
   writeThreadId,
   getThreadFilePath,
-  runCodexExecFiltered,
   runCodexExec,
-  readInputWithHotkeys,
+  startInteractiveCodexAgent,
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -46,9 +45,13 @@ async function main() {
 
   const repoRoot = runtime.repoRoot;
   const docsDir = runtime.docsDir;
+  const productVisionDir = runtime.productVisionDir || "";
+  const productVisionFiles = Array.isArray(runtime.productVisionFiles) ? runtime.productVisionFiles : [];
   const selectedDir = runtime.queues.selected;
-  const archDir = runtime.queues.arch;
+  const backlogDir = runtime.queues.backlog;
+  const refinementDir = runtime.queues.refinement;
   const clarifyDir = runtime.queues.toClarify;
+  const posDocs = runtime.posDocs || {};
 
   console.log(`PO: scan selected ${selectedDir}`);
 
@@ -76,7 +79,9 @@ async function main() {
   if (reqFile) {
     console.log(`PO: using ${reqFile}`);
   }
-  console.log(`PO: arch dir ${archDir}`);
+  console.log(`PO: backlog dir ${backlogDir}`);
+  console.log(`PO: refinement dir ${refinementDir}`);
+  console.log(`PO: selected dir ${selectedDir}`);
   console.log(`PO: clarify dir ${clarifyDir}`);
 
   const promptPath = path.join(agentRoot, "prompt.md");
@@ -86,7 +91,10 @@ async function main() {
   const prompt = fs.readFileSync(promptPath, "utf8");
 
   const reqLine = reqFile || "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nSelected dir: ${selectedDir}\nArch dir: ${archDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\nDev routing mode: ${runtime.devRouting.mode}\nDefault implementation scope: ${runtime.devRouting.defaultScope}\nAllowed implementation_scope values: frontend | backend | fullstack\nEnabled dev agents: fe=${runtime.devAgents.useFe}, be=${runtime.devAgents.useBe}, fs=${runtime.devAgents.useFs}\n`;
+  const productVisionList = productVisionFiles.length > 0
+    ? productVisionFiles.map((filePath) => `- ${path.basename(filePath)}`).join("\n")
+    : "- none";
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nBacklog dir: ${backlogDir}\nRefinement dir: ${refinementDir}\nSelected dir: ${selectedDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\nProduct vision dir: ${productVisionDir || "missing"}\nProduct vision files:\n${productVisionList}\nProduct vision priority: Product Vision files override other docs on conflict.\nVision file: ${posDocs.vision || "missing"}\nBlueprint file: ${posDocs.blueprint || "missing"}\nEpic matrix file: ${posDocs.epicMatrix || "missing"}\nNot-building file: ${posDocs.notBuilding || "missing"}\nVision achieved file: ${posDocs.visionAchieved || "missing"}\nDev routing mode: ${runtime.devRouting.mode}\nDefault implementation scope: ${runtime.devRouting.defaultScope}\nAllowed implementation_scope values: frontend | backend | fullstack\nEnabled dev agents: fe=${runtime.devAgents.useFe}, be=${runtime.devAgents.useBe}, fs=${runtime.devAgents.useFs}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("PO"));
@@ -99,41 +107,15 @@ async function main() {
   let threadId = readThreadId(threadFile);
 
   if (!auto) {
-    const verbose = { value: false };
-    const detail = { value: false };
-    console.log("PO: chat mode (Alt+V verbose, Alt+D detail, q to quit)");
-    while (true) {
-      const msg = await readInputWithHotkeys({
-        prompt: "PO> ",
-        verboseRef: verbose,
-        detailRef: detail,
-      });
-      if (!msg) {
-        continue;
-      }
-      const trimmed = msg.trim().toLowerCase();
-      if (["q", "quit", "exit"].includes(trimmed)) {
-        break;
-      }
-      const promptToSend = threadId
-        ? `${context}\n\nUser: ${msg}`
-        : `${prompt}\n\n${context}\n\nUser: ${msg}`;
-      const result = await runCodexExecFiltered({
-        prompt: promptToSend,
-        repoRoot,
-        configArgs,
-        threadId,
-        verboseRef: verbose,
-        threadFile,
-        agentsRoot: runtime.agentsRoot,
-        agentLabel: "PO",
-        autoCompact: auto,
-      });
-      if (result.threadId) {
-        writeThreadId(threadFile, result.threadId);
-        threadId = result.threadId;
-      }
-    }
+    await startInteractiveCodexAgent({
+      agentLabel: "PO",
+      repoRoot,
+      configArgs,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      bootstrapPrompt: fullPrompt,
+      threadId,
+    });
     process.exit(0);
   }
 
