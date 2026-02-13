@@ -339,6 +339,30 @@ function main() {
     ["check", "commit", "commit_push"],
     "commit"
   );
+
+  const poDefaultMode = parseEnum(
+    (merged.po && merged.po.default_mode) || "intake",
+    ["intake", "vision"],
+    "intake"
+  );
+  const poVisionMaxCycles = clampNumber(
+    Number.parseInt((merged.po && merged.po.vision_max_cycles), 10),
+    100,
+    1,
+    100000
+  );
+  const poVisionMaxRequirements = clampNumber(
+    Number.parseInt((merged.po && merged.po.vision_max_requirements), 10),
+    1000,
+    1,
+    100000
+  );
+  const poVisionStableCycles = clampNumber(
+    Number.parseInt((merged.po && merged.po.vision_stable_cycles), 10),
+    2,
+    1,
+    1000
+  );
   const routingMode = parseEnum(
     args.devRoutingMode || (merged.dev_routing && merged.dev_routing.mode) || "fullstack_only",
     ["fullstack_only", "split"],
@@ -469,6 +493,12 @@ function main() {
     `final_push_on_success = ${toTomlBool(!!(merged.deploy && merged.deploy.final_push_on_success !== false))}`,
     `require_clean_start_for_commits = ${toTomlBool(!!(merged.deploy && merged.deploy.require_clean_start_for_commits !== false))}`,
     "",
+    "[po]",
+    `default_mode = ${toTomlString(poDefaultMode)}`,
+    `vision_max_cycles = ${toTomlInt(poVisionMaxCycles)}`,
+    `vision_max_requirements = ${toTomlInt(poVisionMaxRequirements)}`,
+    `vision_stable_cycles = ${toTomlInt(poVisionStableCycles)}`,
+    "",
     "[dev_routing]",
     `mode = ${toTomlString(routingMode)}`,
     `default_scope = ${toTomlString((merged.dev_routing && merged.dev_routing.default_scope) || "fullstack")}`,
@@ -515,6 +545,10 @@ function main() {
   console.log(`- loops.max_retries: ${loopMaxRetries}`);
   console.log(`- loops.retry_delay_seconds: ${loopRetryDelay}`);
   console.log(`- deploy.mode: ${deployMode}`);
+  console.log(`- po.default_mode: ${poDefaultMode}`);
+  console.log(`- po.vision_max_cycles: ${poVisionMaxCycles}`);
+  console.log(`- po.vision_max_requirements: ${poVisionMaxRequirements}`);
+  console.log(`- po.vision_stable_cycles: ${poVisionStableCycles}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
   console.log(`- models: reqeng=${models.reqeng}, po=${models.po}, arch=${models.arch}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, ux=${models.ux}, deploy=${models.deploy}`);

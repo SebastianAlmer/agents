@@ -373,7 +373,7 @@ async function runDeployGitActions({ runtime, preflightState, verbose, finalPush
 
 async function runAuto(runtime, args, scriptsRoot, preflightState) {
   const pollSeconds = Math.max(1, runtime.loops.opsPollSeconds || 20);
-  console.log("FLOW: mode=auto (PO and OPS are separate; start PO via `npm run po` in another terminal)");
+  console.log("FLOW: mode=auto (PO and OPS are separate; start PO in another terminal, e.g. `node scripts/run-po.js --mode vision` or `--mode intake`)");
   if (args.verbose) {
     console.log(`FLOW: auto poll=${pollSeconds}s`);
   }
@@ -419,7 +419,7 @@ async function runStandard(runtime, args, scriptsRoot, preflightState) {
   }
 
   while (true) {
-    const poArgs = ["--once", "--skip-product-vision-check"];
+    const poArgs = ["--once", "--mode", "intake", "--skip-product-vision-check"];
     if (args.verbose) {
       poArgs.push("-v");
     }

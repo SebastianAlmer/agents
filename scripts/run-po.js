@@ -3,6 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const {
   sleep,
@@ -22,10 +23,31 @@ const {
 
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
+const DEFAULT_VISION_MAX_CYCLES = 100;
+const DEFAULT_VISION_MAX_REQUIREMENTS = 1000;
+const DEFAULT_VISION_STABLE_CYCLES = 2;
+
+function normalizePoMode(value, fallback = "intake") {
+  const normalized = String(value || fallback || "").trim().toLowerCase();
+  if (["vision", "product-vision", "pos"].includes(normalized)) {
+    return "vision";
+  }
+  return "intake";
+}
+
 function parseArgs(argv) {
-  const args = { once: false, verbose: false, skipProductVisionCheck: false };
+  const args = {
+    once: false,
+    verbose: false,
+    skipProductVisionCheck: false,
+    mode: "intake",
+    visionMaxCycles: NaN,
+    visionMaxRequirements: NaN,
+    visionStableCycles: NaN,
+  };
   for (let i = 0; i < argv.length; i++) {
-    const arg = String(argv[i] || "").toLowerCase();
+    const raw = String(argv[i] || "");
+    const arg = raw.toLowerCase();
     if (arg === "-once" || arg === "--once") {
       args.once = true;
       continue;
@@ -36,8 +58,46 @@ function parseArgs(argv) {
     }
     if (arg === "-v" || arg === "--verbose") {
       args.verbose = true;
+      continue;
+    }
+    if (arg === "--mode" || arg === "-mode") {
+      args.mode = String(argv[i + 1] || "");
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--mode=")) {
+      args.mode = String(raw.split("=", 2)[1] || "");
+      continue;
+    }
+    if (arg === "--vision-max-cycles") {
+      args.visionMaxCycles = Number.parseInt(String(argv[i + 1] || ""), 10);
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--vision-max-cycles=")) {
+      args.visionMaxCycles = Number.parseInt(String(raw.split("=", 2)[1] || ""), 10);
+      continue;
+    }
+    if (arg === "--vision-max-req") {
+      args.visionMaxRequirements = Number.parseInt(String(argv[i + 1] || ""), 10);
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--vision-max-req=")) {
+      args.visionMaxRequirements = Number.parseInt(String(raw.split("=", 2)[1] || ""), 10);
+      continue;
+    }
+    if (arg === "--vision-stable-cycles") {
+      args.visionStableCycles = Number.parseInt(String(argv[i + 1] || ""), 10);
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--vision-stable-cycles=")) {
+      args.visionStableCycles = Number.parseInt(String(raw.split("=", 2)[1] || ""), 10);
+      continue;
     }
   }
+  args.mode = normalizePoMode(args.mode, "intake");
   return args;
 }
 
@@ -149,6 +209,134 @@ function allowPoDecisionTarget(queueName) {
   );
 }
 
+function normalizePositiveInt(value, fallback, min = 1) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function listQueueFiles(dir) {
+  if (!dir || !fs.existsSync(dir)) {
+    return [];
+  }
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .map((entry) => path.join(dir, entry.name))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
+
+function planningQueueMap(runtime) {
+  return [
+    ["refinement", runtime.queues.refinement],
+    ["backlog", runtime.queues.backlog],
+    ["selected", runtime.queues.selected],
+    ["toClarify", runtime.queues.toClarify],
+    ["wontDo", runtime.queues.wontDo],
+  ];
+}
+
+function buildPlanningSnapshot(runtime) {
+  const items = [];
+  for (const [queueName, queueDir] of planningQueueMap(runtime)) {
+    const files = listQueueFiles(queueDir);
+    for (const filePath of files) {
+      const stat = fs.statSync(filePath);
+      items.push({
+        queue: queueName,
+        file: path.basename(filePath),
+        size: stat.size,
+        mtimeMs: Math.round(stat.mtimeMs),
+      });
+    }
+  }
+  const encoded = JSON.stringify(items);
+  const hash = crypto.createHash("sha1").update(encoded).digest("hex");
+  const keySet = new Set(items.map((entry) => `${entry.queue}/${entry.file}`));
+  return {
+    hash,
+    items,
+    keySet,
+    count: items.length,
+  };
+}
+
+function countNewRequirementsSince(baseSnapshot, currentSnapshot) {
+  let delta = 0;
+  for (const key of currentSnapshot.keySet) {
+    if (!baseSnapshot.keySet.has(key)) {
+      delta += 1;
+    }
+  }
+  return delta;
+}
+
+function readVisionDecision(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return {
+      status: "",
+      visionComplete: false,
+      reason: "",
+      newRequirements: 0,
+      updatedRequirements: 0,
+      raw: {},
+    };
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const status = normalizeStatus(raw.status || "");
+    return {
+      status,
+      visionComplete: Boolean(raw.vision_complete),
+      reason: String(raw.reason || raw.summary || "").trim(),
+      newRequirements: normalizePositiveInt(raw.new_requirements_count, 0, 0),
+      updatedRequirements: normalizePositiveInt(raw.updated_requirements_count, 0, 0),
+      raw,
+    };
+  } catch (err) {
+    return {
+      status: "",
+      visionComplete: false,
+      reason: `invalid decision file: ${err.message}`,
+      newRequirements: 0,
+      updatedRequirements: 0,
+      raw: {},
+    };
+  }
+}
+
+function writeVisionOverflowClarification(runtime, reason) {
+  const targetDir = runtime.queues.toClarify;
+  if (!targetDir) {
+    return "";
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const fileName = `REQ-PO-VISION-OVERFLOW-${timestamp}.md`;
+  const targetPath = path.join(targetDir, fileName);
+  const content = [
+    "---",
+    `id: REQ-PO-VISION-OVERFLOW-${timestamp}`,
+    "title: PO Vision overflow clarification",
+    "status: clarify",
+    "source: po-vision",
+    "---",
+    "",
+    "# Goal",
+    "Human decision required for Product Vision planning overflow.",
+    "",
+    "## Clarifications needed",
+    `- ${String(reason || "PO vision planning exceeded configured limits.")}`,
+    "",
+    "## PO Results",
+    "- Routed to to-clarify for manual steering.",
+    `- Changes: ${targetPath}`,
+    "",
+  ].join("\n");
+  fs.writeFileSync(targetPath, content, "utf8");
+  return targetPath;
+}
+
 async function runPoItem(runtime, filePath, logger) {
   const fileName = path.basename(filePath);
   const result = await runNodeScript({
@@ -224,6 +412,38 @@ async function runPoItem(runtime, filePath, logger) {
   return { progressed: true, target, status };
 }
 
+async function runPoVisionCycle(runtime, logger) {
+  const decisionPath = path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
+  fs.mkdirSync(path.dirname(decisionPath), { recursive: true });
+  if (fs.existsSync(decisionPath)) {
+    fs.unlinkSync(decisionPath);
+  }
+
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "po", "po.js"),
+    args: ["--auto", "--mode", "vision", "--vision-decision-file", decisionPath],
+    cwd: runtime.agentsRoot,
+    maxRetries: runtime.loops.maxRetries,
+    retryDelaySeconds: runtime.loops.retryDelaySeconds,
+  });
+
+  const decision = readVisionDecision(decisionPath);
+  if (!result.ok) {
+    logger(`vision cycle agent failure: ${(result.stderr || "").slice(0, 280)}`);
+    return {
+      ok: false,
+      decision,
+      reason: "po vision agent execution failed",
+    };
+  }
+
+  return {
+    ok: true,
+    decision,
+    reason: "",
+  };
+}
+
 async function processToClarify(runtime, logger) {
   const first = getFirstFile(runtime.queues.toClarify);
   if (!first) {
@@ -254,16 +474,105 @@ async function fillWindow(runtime, logger) {
   return progressed;
 }
 
+async function runVisionMode(runtime, args, logger) {
+  const poCfg = runtime.po || {};
+  const maxCycles = normalizePositiveInt(
+    args.visionMaxCycles,
+    normalizePositiveInt(poCfg.visionMaxCycles, DEFAULT_VISION_MAX_CYCLES)
+  );
+  const maxRequirements = normalizePositiveInt(
+    args.visionMaxRequirements,
+    normalizePositiveInt(poCfg.visionMaxRequirements, DEFAULT_VISION_MAX_REQUIREMENTS)
+  );
+  const stableCyclesTarget = normalizePositiveInt(
+    args.visionStableCycles,
+    normalizePositiveInt(poCfg.visionStableCycles, DEFAULT_VISION_STABLE_CYCLES)
+  );
+
+  logger(`vision mode max_cycles=${maxCycles}`);
+  logger(`vision mode max_requirements=${maxRequirements}`);
+  logger(`vision mode stable_cycles=${stableCyclesTarget}`);
+
+  const baselineSnapshot = buildPlanningSnapshot(runtime);
+  let previousSnapshot = baselineSnapshot;
+  let stableCycles = 0;
+
+  const maxLoop = args.once ? 1 : maxCycles;
+  for (let cycle = 1; cycle <= maxLoop; cycle++) {
+    logger(`vision cycle ${cycle}/${maxLoop} start`);
+
+    const cycleResult = await runPoVisionCycle(runtime, logger);
+    const currentSnapshot = buildPlanningSnapshot(runtime);
+    const changed = currentSnapshot.hash !== previousSnapshot.hash;
+    const newReqTotal = countNewRequirementsSince(baselineSnapshot, currentSnapshot);
+
+    logger(`vision cycle ${cycle}: changed=${changed} new_requirements_total=${newReqTotal}`);
+
+    if (newReqTotal > maxRequirements) {
+      const reason = `PO Vision exceeded max generated requirements (${newReqTotal} > ${maxRequirements}).`;
+      const clarificationPath = writeVisionOverflowClarification(runtime, reason);
+      if (clarificationPath) {
+        logger(`vision overflow routed to to-clarify: ${clarificationPath}`);
+      }
+      process.exitCode = 2;
+      return;
+    }
+
+    if (!cycleResult.ok) {
+      process.exitCode = 2;
+      return;
+    }
+
+    if (cycleResult.decision.status === "clarify") {
+      logger(`vision decision requires human steering: ${cycleResult.decision.reason || "clarify"}`);
+      process.exitCode = 2;
+      return;
+    }
+
+    if (changed) {
+      stableCycles = 0;
+    } else {
+      stableCycles += 1;
+    }
+
+    if (cycleResult.decision.visionComplete && stableCycles >= 1) {
+      logger("vision converged by agent decision");
+      return;
+    }
+
+    if (stableCycles >= stableCyclesTarget) {
+      logger(`vision converged after ${stableCycles} stable cycle(s)`);
+      return;
+    }
+
+    previousSnapshot = currentSnapshot;
+  }
+
+  const reason = `PO Vision did not converge within max cycles (${maxLoop}).`;
+  const clarificationPath = writeVisionOverflowClarification(runtime, reason);
+  if (clarificationPath) {
+    logger(`vision max-cycle guard routed to to-clarify: ${clarificationPath}`);
+  }
+  process.exitCode = 2;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const runtime = loadRuntimeConfig(path.resolve(__dirname, ".."));
-  if (!args.skipProductVisionCheck) {
+  args.mode = normalizePoMode(args.mode, (runtime.po && runtime.po.defaultMode) || "intake");
+  if (!args.skipProductVisionCheck && args.mode === "vision") {
     validatePosDocs(runtime);
   }
   ensureQueueDirs(runtime.queues);
 
   const out = (msg) => logger(args.verbose, msg);
+  out(`mode=${args.mode}`);
   out(`window=${runtime.loops.windowSize}`);
+
+  if (args.mode === "vision") {
+    await runVisionMode(runtime, args, out);
+    return;
+  }
 
   while (true) {
     let progressed = false;

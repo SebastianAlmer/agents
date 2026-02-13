@@ -50,10 +50,23 @@ npm run po
 npm run ops
 ```
 
+Equivalent node commands:
+
+```bash
+node scripts/run-po.js --mode vision
+node run.js --mode auto
+```
+
 - PO loop: `backlog/refinement/to-clarify -> selected`.
 - OPS loop: `selected/arch/dev -> qa -> sec -> ux -> deploy -> released`.
 - Product Vision files are required for PO in this mode.
-- Loops are long-running; when queues are empty they wait (idle), they do not exit.
+- OPS is long-running; `PO --mode intake` is long-running; `PO --mode vision` is finite and exits on convergence or human-handoff.
+
+PO mode behavior:
+- `--mode intake`: works queue-driven (`to-clarify`, `backlog`, `refinement` -> `selected`).
+- `--mode vision`: iterates Product Vision into requirements with convergence guardrails.
+  - defaults: `vision_max_cycles=100`, `vision_max_requirements=1000`, `vision_stable_cycles=2`
+  - if human steering is required (for example vision overflow), `run-po` exits with code `2` and routes to `to-clarify`.
 
 ### 2) `standard` (single orchestrated loop)
 
@@ -66,7 +79,7 @@ npm run start -- --mode standard --preflight soft
 ```
 
 - Combined cycle in one process:
-  - one PO planning pass (`backlog/refinement/to-clarify -> selected`)
+  - one PO planning pass in `intake` mode (`backlog/refinement/to-clarify -> selected`)
   - one OPS delivery pass (`selected/arch/dev/qa/sec/ux/deploy`)
 - This mode is intended for manual intake via ReqEng into `backlog`.
 - Product Vision is optional here (no hard precheck).

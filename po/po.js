@@ -14,11 +14,24 @@ const {
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
+function normalizePoMode(value, fallback = "intake") {
+  const normalized = String(value || fallback || "").trim().toLowerCase();
+  if (["vision", "product-vision", "pos"].includes(normalized)) {
+    return "vision";
+  }
+  return "intake";
+}
+
 function parseArgs(argv) {
-  const args = { requirement: "", auto: false };
+  const args = {
+    requirement: "",
+    auto: false,
+    mode: "intake",
+    visionDecisionFile: "",
+  };
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const normalized = arg.toLowerCase();
+    const raw = String(argv[i] || "");
+    const normalized = raw.toLowerCase();
     if (normalized === "-auto" || normalized === "--auto") {
       args.auto = true;
       continue;
@@ -28,8 +41,43 @@ function parseArgs(argv) {
       i++;
       continue;
     }
+    if (normalized === "--mode" || normalized === "-mode") {
+      args.mode = String(argv[i + 1] || "");
+      i++;
+      continue;
+    }
+    if (normalized.startsWith("--mode=")) {
+      args.mode = String(raw.split("=", 2)[1] || "");
+      continue;
+    }
+    if (normalized === "--vision-decision-file") {
+      args.visionDecisionFile = String(argv[i + 1] || "");
+      i++;
+      continue;
+    }
+    if (normalized.startsWith("--vision-decision-file=")) {
+      args.visionDecisionFile = String(raw.split("=", 2)[1] || "");
+      continue;
+    }
   }
+  args.mode = normalizePoMode(args.mode, "intake");
   return args;
+}
+
+function resolveRequirementPath(requirement, candidateDirs) {
+  if (!requirement) {
+    return "";
+  }
+  if (path.isAbsolute(requirement)) {
+    return requirement;
+  }
+  for (const dir of candidateDirs || []) {
+    const candidate = path.join(dir, requirement);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "";
 }
 
 async function main() {
@@ -37,7 +85,7 @@ async function main() {
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
-  const { requirement, auto } = parsed;
+  const { requirement, auto, mode } = parsed;
 
   const agentRoot = __dirname;
   const runtime = loadRuntimeConfig(path.resolve(agentRoot, ".."));
@@ -52,11 +100,30 @@ async function main() {
   const refinementDir = runtime.queues.refinement;
   const clarifyDir = runtime.queues.toClarify;
   const posDocs = runtime.posDocs || {};
+  const visionDecisionFile = parsed.visionDecisionFile
+    ? (path.isAbsolute(parsed.visionDecisionFile)
+      ? parsed.visionDecisionFile
+      : path.resolve(runtime.agentsRoot, parsed.visionDecisionFile))
+    : path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
 
+  console.log(`PO: mode ${mode}`);
   console.log(`PO: scan selected ${selectedDir}`);
 
   let reqFile = "";
-  if (requirement) {
+  if (mode === "vision") {
+    if (requirement) {
+      reqFile = resolveRequirementPath(requirement, [
+        selectedDir,
+        backlogDir,
+        refinementDir,
+        clarifyDir,
+        runtime.requirementsRoot,
+      ]);
+      if (!reqFile) {
+        throw new Error(`Requirement not found: ${requirement}`);
+      }
+    }
+  } else if (requirement) {
     const reqPath = path.isAbsolute(requirement)
       ? requirement
       : path.join(selectedDir, requirement);
@@ -83,6 +150,9 @@ async function main() {
   console.log(`PO: refinement dir ${refinementDir}`);
   console.log(`PO: selected dir ${selectedDir}`);
   console.log(`PO: clarify dir ${clarifyDir}`);
+  if (mode === "vision") {
+    console.log(`PO: vision decision file ${visionDecisionFile}`);
+  }
 
   const promptPath = path.join(agentRoot, "prompt.md");
   if (!fs.existsSync(promptPath)) {
@@ -94,7 +164,7 @@ async function main() {
   const productVisionList = productVisionFiles.length > 0
     ? productVisionFiles.map((filePath) => `- ${path.basename(filePath)}`).join("\n")
     : "- none";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nBacklog dir: ${backlogDir}\nRefinement dir: ${refinementDir}\nSelected dir: ${selectedDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\nProduct vision dir: ${productVisionDir || "missing"}\nProduct vision files:\n${productVisionList}\nProduct vision priority: Product Vision files override other docs on conflict.\nVision file: ${posDocs.vision || "missing"}\nBlueprint file: ${posDocs.blueprint || "missing"}\nEpic matrix file: ${posDocs.epicMatrix || "missing"}\nNot-building file: ${posDocs.notBuilding || "missing"}\nVision achieved file: ${posDocs.visionAchieved || "missing"}\nDev routing mode: ${runtime.devRouting.mode}\nDefault implementation scope: ${runtime.devRouting.defaultScope}\nAllowed implementation_scope values: frontend | backend | fullstack\nEnabled dev agents: fe=${runtime.devAgents.useFe}, be=${runtime.devAgents.useBe}, fs=${runtime.devAgents.useFs}\n`;
+  const context = `# Context\nPO mode: ${mode}\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nBacklog dir: ${backlogDir}\nRefinement dir: ${refinementDir}\nSelected dir: ${selectedDir}\nTo-clarify dir: ${clarifyDir}\nDocs dir: ${docsDir}\nProduct vision dir: ${productVisionDir || "missing"}\nProduct vision files:\n${productVisionList}\nProduct vision priority: Product Vision files override other docs on conflict.\nVision file: ${posDocs.vision || "missing"}\nBlueprint file: ${posDocs.blueprint || "missing"}\nEpic matrix file: ${posDocs.epicMatrix || "missing"}\nNot-building file: ${posDocs.notBuilding || "missing"}\nVision achieved file: ${posDocs.visionAchieved || "missing"}\nVision decision file: ${visionDecisionFile}\nDev routing mode: ${runtime.devRouting.mode}\nDefault implementation scope: ${runtime.devRouting.defaultScope}\nAllowed implementation_scope values: frontend | backend | fullstack\nEnabled dev agents: fe=${runtime.devAgents.useFe}, be=${runtime.devAgents.useBe}, fs=${runtime.devAgents.useFs}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("PO"));
@@ -103,6 +173,7 @@ async function main() {
     agentsRoot: runtime.agentsRoot,
     agentRoot,
     auto,
+    threadKey: `mode-${mode}`,
   });
   let threadId = readThreadId(threadFile);
 

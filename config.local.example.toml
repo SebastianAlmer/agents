@@ -41,6 +41,13 @@ mode = "commit"
 final_push_on_success = true
 require_clean_start_for_commits = true
 
+[po]
+# intake | vision
+default_mode = "intake"
+vision_max_cycles = 100
+vision_max_requirements = 1000
+vision_stable_cycles = 2
+
 [dev_routing]
 # fullstack_only | split
 mode = "fullstack_only"
