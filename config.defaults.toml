@@ -50,6 +50,9 @@ default_mode = "vision"
 vision_max_cycles = 100
 vision_max_requirements = 1000
 vision_stable_cycles = 2
+# Intake queue watermarks (how many items PO keeps ready in selected).
+selected_low_watermark = 1
+selected_high_watermark = 3
 # Intake token/loop controls
 intake_max_per_cycle = 3
 intake_loop_cooldown_cycles = 3

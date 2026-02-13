@@ -808,6 +808,64 @@ function moveWithFallback(runtime, sourcePath, targetQueue, status, notes) {
   return moveRequirementFile(sourcePath, fallbackPath);
 }
 
+function updatePoStateAfterDirectMove({ runtime, state, cycle, sourcePath, sourceQueue, targetQueue }) {
+  if (!state || !state.items || !runtime.po.intakeIdempotenceEnabled) {
+    return;
+  }
+  const key = requirementKey(sourcePath);
+  const movedPath = resolveSourcePath(runtime, sourcePath) || sourcePath;
+  const next = {
+    lastHash: fileHash(movedPath),
+    lastSourceQueue: sourceQueue,
+    lastTargetQueue: targetQueue,
+    lastProcessedCycle: cycle,
+    repeatCount: 0,
+    skipUntilCycle: 0,
+  };
+  state.items[key] = next;
+  state.cycle = cycle;
+  writePoRunnerState(runtime, state);
+}
+
+function promoteBacklogForProgress(runtime, controls, state, cycle) {
+  if (countFiles(runtime.queues.selected) > 0) {
+    return false;
+  }
+  if (countFiles(runtime.queues.arch) > 0 || countFiles(runtime.queues.dev) > 0) {
+    return false;
+  }
+
+  const candidate = getFirstFile(runtime.queues.backlog);
+  if (!candidate) {
+    return false;
+  }
+
+  const moved = moveWithFallback(
+    runtime,
+    candidate,
+    "selected",
+    "selected",
+    [
+      "PO runner starvation guard",
+      "- selected/arch/dev were empty; promoted backlog item to selected to keep delivery moving",
+    ]
+  );
+  if (!moved) {
+    return false;
+  }
+
+  updatePoStateAfterDirectMove({
+    runtime,
+    state,
+    cycle,
+    sourcePath: candidate,
+    sourceQueue: "backlog",
+    targetQueue: "selected",
+  });
+  log(controls, `starvation guard promoted ${path.basename(candidate)} backlog->selected`);
+  return true;
+}
+
 async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", state = null, cycle = 0) {
   const sourceBefore = resolveSourcePath(runtime, filePath) || filePath;
   const originQueue = sourceHint || queueNameFromPath(sourceBefore, runtime.queues) || "";
@@ -954,11 +1012,21 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
 
   let followUpRequirements = Array.isArray(decision.new_requirements) ? decision.new_requirements : [];
   if (sourceQueue === "toClarify" && targetQueue === "backlog" && followUpRequirements.length === 0) {
-    followUpRequirements = [buildFallbackFollowUpItem(decision, frontMatter, currentPath)];
-    appendQueueSection(currentPath, [
-      "PO runner follow-up guard",
-      "- source queue was to-clarify and no follow-up requirements were emitted; auto-created one refinement follow-up item",
-    ]);
+    const idUpper = String(frontMatter.id || "").toUpperCase();
+    const nameUpper = path.basename(currentPath, path.extname(currentPath)).toUpperCase();
+    const isFollowUpSource = /-FOLLOWUP(?:-|$)/.test(idUpper) || /-FOLLOWUP(?:-|$)/.test(nameUpper);
+    if (!isFollowUpSource) {
+      followUpRequirements = [buildFallbackFollowUpItem(decision, frontMatter, currentPath)];
+      appendQueueSection(currentPath, [
+        "PO runner follow-up guard",
+        "- source queue was to-clarify and no follow-up requirements were emitted; auto-created one refinement follow-up item",
+      ]);
+    } else {
+      appendQueueSection(currentPath, [
+        "PO runner follow-up guard",
+        "- follow-up source detected; skipped auto-creation of another follow-up to prevent queue loops",
+      ]);
+    }
   }
 
   if (followUpRequirements.length > 0) {
@@ -1134,6 +1202,10 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
       await fillSelected(runtime, highWatermark, controls, state, cycle);
     }
 
+    if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
+      // keep cycle moving after direct promotion
+    }
+
     writePoRunnerState(runtime, state);
 
     if (once) {
@@ -1249,6 +1321,10 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
       await fillSelected(runtime, highWatermark, controls, state, cycle);
     }
 
+    if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
+      // keep cycle moving after direct promotion
+    }
+
     writePoRunnerState(runtime, state);
 
     if (once) {
@@ -1276,10 +1352,10 @@ async function main() {
     validateProductVision(runtime);
   }
 
-  const lowWatermark = normalizePositiveInt(args.lowWatermark, runtime.loops.bundleMinSize);
+  const lowWatermark = normalizePositiveInt(args.lowWatermark, runtime.po.selectedLowWatermark);
   const highWatermark = Math.max(
     lowWatermark,
-    normalizePositiveInt(args.highWatermark, runtime.loops.bundleMaxSize)
+    normalizePositiveInt(args.highWatermark, runtime.po.selectedHighWatermark)
   );
 
   const controls = createControls(args.verbose, runtime);
