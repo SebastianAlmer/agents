@@ -8,3 +8,4 @@ logs/
 # requirements: ignore markdown payloads only
 requirements/**/*.md
 !requirements/README.md
+requirement_old/
