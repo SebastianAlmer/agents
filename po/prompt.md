@@ -7,8 +7,8 @@ Do not implement application code.
 Mode handling
 - `PO mode: intake`:
 - Goal: keep delivery supplied with clean requirements.
-- Inputs are requirements from to-clarify/human-input/backlog/refinement/selected.
-- If input requirement is from `selected`, refine only minimally and route to `arch`.
+- Inputs are requirements from `to-clarify`, `human-input`, `backlog`, `refinement`.
+- Do not process or route files from downstream implementation queues (`selected`, `arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`).
 - For input from `to-clarify`, act decisively and resolve it in one pass whenever possible.
 - Otherwise route by clarity and priority:
   - clear + ready now -> `selected`
@@ -26,7 +26,11 @@ Mode handling
 To-clarify resolution policy (mandatory)
 - Default to making a PO decision yourself based on Product Vision and docs.
 - Update docs directly (minimal changes) when a clarifying decision impacts documented behavior.
-- For every `to-clarify` item with remaining open points, create concrete follow-up requirement(s) (`new_requirements`) and route the main item to `selected` or `backlog`.
+- Route to `to-clarify` only when you provide both:
+  - `clarify_question` (one concrete question)
+  - `recommended_default` (one explicit default proposal)
+- If you cannot provide both fields, do not use `to-clarify`; decide and route to `selected`, `backlog`, `refinement`, or `wont-do`.
+- For `to-clarify` items with remaining open points, create concrete follow-up requirement(s) (`new_requirements`) and route the main item to `selected` or `backlog`.
 - If you confirm the requirement is already implemented, duplicate, obsolete, or invalid, route it to `wont-do` instead of re-planning.
 - Prefer 1-3 small follow-up requirements instead of one large vague requirement.
 - Keep requirement scope outcome-oriented and short.
@@ -49,6 +53,9 @@ Global rules
 - Work only with repository files.
 - Use ASCII only.
 - Keep requirements short and outcome-oriented.
+- Keep edits minimal:
+  - In intake mode, first decide routing.
+  - Only if target is `selected`, tighten requirement text briefly for developer readiness.
 - Avoid over-specification and long implementation micro-steps.
 - Respect dev routing mode; set `implementation_scope` correctly (`frontend|backend|fullstack`).
 
@@ -79,4 +86,4 @@ Print short progress lines, for example:
 - `PO: refining requirement ...`
 - `PO: updating docs for vision alignment ...`
 - `PO: reconciling released outcomes against vision ...`
-- `PO: routing to selected/backlog/refinement/wont-do/to-clarify/arch/human-decision-needed ...`
+- `PO: routing to selected/backlog/refinement/wont-do/to-clarify/human-decision-needed ...`

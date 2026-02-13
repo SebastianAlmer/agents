@@ -54,6 +54,49 @@ default_mode = "vision"
 vision_max_cycles = 100
 vision_max_requirements = 1000
 vision_stable_cycles = 2
+intake_max_per_cycle = 3
+intake_loop_cooldown_cycles = 3
+intake_idempotence_enabled = true
+
+[arch]
+# always | triggered | never
+routing_mode = "triggered"
+require_for_scopes = ["fullstack"]
+require_for_review_risks = ["high"]
+require_for_review_scopes = ["qa_sec", "full"]
+trigger_frontmatter_flags = ["arch_required", "needs_arch"]
+trigger_keywords = [
+  "auth",
+  "authorization",
+  "permission",
+  "security",
+  "secret",
+  "token",
+  "login",
+  "password",
+  "encryption",
+  "privacy",
+  "compliance",
+  "gdpr",
+  "pii",
+  "payment",
+  "billing",
+  "migration",
+  "schema",
+  "database",
+  "prisma",
+  "webhook",
+  "oauth",
+  "rbac",
+  "acl",
+  "sso",
+  "destructive"
+]
+digest_enabled = true
+digest_file = ".runtime/arch-docs-digest.md"
+digest_max_files = 12
+digest_max_headings_per_file = 20
+max_retries = 0
 
 [dev_routing]
 # fullstack_only | split

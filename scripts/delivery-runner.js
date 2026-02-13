@@ -15,6 +15,7 @@ const {
   chooseBundleByBusinessScore,
   parseFrontMatter,
   normalizeStatus,
+  getActivePauseState,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -236,6 +237,31 @@ function log(controls, message) {
   }
 }
 
+function formatPauseLine(pauseState) {
+  const reason = String((pauseState && pauseState.reason) || "limit").replace(/_/g, "-");
+  const source = String((pauseState && pauseState.source) || "unknown");
+  const resumeAfter = String((pauseState && pauseState.resumeAfter) || "");
+  const remainingMs = Number.isFinite(pauseState && pauseState.remainingMs)
+    ? pauseState.remainingMs
+    : 0;
+  const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
+  return `global pause active reason=${reason} source=${source} resume_after=${resumeAfter || "unknown"} remaining~${remainingMin}m`;
+}
+
+async function waitIfGloballyPaused(runtime, controls) {
+  const pauseState = getActivePauseState(runtime.agentsRoot);
+  if (!pauseState) {
+    return false;
+  }
+  process.stdout.write(`DELIVERY: ${formatPauseLine(pauseState)}\n`);
+  const fallbackMs = Math.max(1, runtime.loops.deliveryPollSeconds) * 1000;
+  const waitMs = Number.isFinite(pauseState.remainingMs)
+    ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
+    : fallbackMs;
+  await sleep(waitMs);
+  return true;
+}
+
 function looksLikeInlineRequirementText(value) {
   const text = String(value || "");
   return text.startsWith("---") && text.includes("\n") && /(^|\n)id\s*:/i.test(text);
@@ -381,6 +407,125 @@ function hasArchHardBlockEvidence(filePath) {
   const hasBlockerType = /blocker[_ -]?type\s*:\s*(missing-input|hard-contradiction)/i.test(raw);
   const hasRequiredInput = /required[_ -]?input\s*:/i.test(raw) || /missing[_ -]?input\s*:/i.test(raw);
   return hasBlockerType && hasRequiredInput;
+}
+
+function parseDelimitedLower(value) {
+  return String(value || "")
+    .toLowerCase()
+    .split(/[,\s|/]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeScopeValue(value, fallback = "fullstack") {
+  const normalized = String(value || fallback || "")
+    .trim()
+    .toLowerCase();
+  if (["frontend", "fe", "ui", "web"].includes(normalized)) {
+    return "frontend";
+  }
+  if (["backend", "be", "api", "server"].includes(normalized)) {
+    return "backend";
+  }
+  if (["fullstack", "full", "fs"].includes(normalized)) {
+    return "fullstack";
+  }
+  return fallback;
+}
+
+function archKeywordMatch(rawLower, keywords) {
+  for (const keyword of keywords) {
+    const needle = String(keyword || "").trim().toLowerCase();
+    if (!needle) {
+      continue;
+    }
+    if (needle.includes(" ")) {
+      if (rawLower.includes(needle)) {
+        return needle;
+      }
+      continue;
+    }
+    const pattern = new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    if (pattern.test(rawLower)) {
+      return needle;
+    }
+  }
+  return "";
+}
+
+function archRoutingDecision(runtime, filePath) {
+  const mode = String((runtime.arch && runtime.arch.routingMode) || "triggered").toLowerCase();
+  if (mode === "always") {
+    return { useArch: true, reason: "routing_mode=always" };
+  }
+  if (mode === "never") {
+    return { useArch: false, reason: "routing_mode=never" };
+  }
+
+  if (!filePath || !fs.existsSync(filePath)) {
+    return { useArch: true, reason: "fallback: missing requirement file" };
+  }
+
+  const fm = parseFrontMatter(filePath);
+  const requiredFlags = new Set(
+    Array.isArray(runtime.arch && runtime.arch.triggerFrontmatterFlags)
+      ? runtime.arch.triggerFrontmatterFlags.map((x) => String(x || "").toLowerCase())
+      : []
+  );
+  for (const flag of requiredFlags) {
+    const value = fm[flag];
+    if (frontMatterTruthy(value)) {
+      return { useArch: true, reason: `frontmatter flag ${flag}=true` };
+    }
+  }
+
+  const scope = normalizeScopeValue(
+    fm.implementation_scope || fm.dev_scope || fm.scope || (runtime.devRouting && runtime.devRouting.defaultScope) || "fullstack",
+    "fullstack"
+  );
+  const requiredScopes = new Set(
+    Array.isArray(runtime.arch && runtime.arch.requireForScopes)
+      ? runtime.arch.requireForScopes.map((x) => normalizeScopeValue(x, "fullstack"))
+      : []
+  );
+  if (requiredScopes.has(scope)) {
+    return { useArch: true, reason: `implementation_scope=${scope}` };
+  }
+
+  const reviewRisk = String(fm.review_risk || "").trim().toLowerCase();
+  const requiredRisks = new Set(
+    Array.isArray(runtime.arch && runtime.arch.requireForReviewRisks)
+      ? runtime.arch.requireForReviewRisks.map((x) => String(x || "").trim().toLowerCase()).filter(Boolean)
+      : []
+  );
+  if (reviewRisk && requiredRisks.has(reviewRisk)) {
+    return { useArch: true, reason: `review_risk=${reviewRisk}` };
+  }
+
+  const reviewScopes = new Set(parseDelimitedLower(fm.review_scope || ""));
+  const requiredReviewScopes = new Set(
+    Array.isArray(runtime.arch && runtime.arch.requireForReviewScopes)
+      ? runtime.arch.requireForReviewScopes.map((x) => String(x || "").trim().toLowerCase()).filter(Boolean)
+      : []
+  );
+  for (const scopeToken of reviewScopes) {
+    if (requiredReviewScopes.has(scopeToken)) {
+      return { useArch: true, reason: `review_scope=${scopeToken}` };
+    }
+  }
+
+  const rawLower = fs.readFileSync(filePath, "utf8").toLowerCase();
+  const keyword = archKeywordMatch(
+    rawLower,
+    Array.isArray(runtime.arch && runtime.arch.triggerKeywords)
+      ? runtime.arch.triggerKeywords
+      : []
+  );
+  if (keyword) {
+    return { useArch: true, reason: `keyword=${keyword}` };
+  }
+
+  return { useArch: false, reason: "no arch trigger matched" };
 }
 
 function findRequirementInUnexpectedQueues(runtime, fileName, excludedQueues = []) {
@@ -543,13 +688,16 @@ function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, co
     return { started: false, underfilledCycles };
   }
 
+  let toArch = 0;
   for (const file of picked) {
     moveToQueue(runtime, file, "arch", "arch", [
       "Delivery runner: bundle intake by business score",
       `- bundle size target max=${maxBundle}`,
+      "- route: arch intake",
     ]);
+    toArch += 1;
   }
-  log(controls, `bundle started with ${picked.length} requirement(s)`);
+  log(controls, `bundle started with ${picked.length} requirement(s): arch=${toArch}`);
   return { started: true, underfilledCycles: 0 };
 }
 
@@ -562,17 +710,33 @@ async function runArch(runtime, controls) {
     }
     const sourceFile = resolveRequirementPath(runtime, file) || file;
     const name = path.basename(sourceFile);
-    log(controls, `ARCH start ${name}`);
+    const decision = archRoutingDecision(runtime, sourceFile);
+    if (!decision.useArch) {
+      moveToQueue(runtime, sourceFile, "dev", "dev", [
+        "Delivery runner: ARCH bypass",
+        `- no arch trigger matched (${decision.reason})`,
+      ]);
+      progressed = true;
+      continue;
+    }
+
+    log(controls, `ARCH start ${name} (${decision.reason})`);
     const result = await runNodeScript({
       scriptPath: path.join(runtime.agentsRoot, "arch", "arch.js"),
       args: ["--auto", "--requirement", sourceFile],
       cwd: runtime.agentsRoot,
-      maxRetries: runtime.loops.maxRetries,
+      maxRetries: runtime.arch && Number.isInteger(runtime.arch.maxRetries)
+        ? runtime.arch.maxRetries
+        : 0,
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
       stopSignal: getStopSignal(controls),
     });
     if (!result.ok) {
       if (result.aborted && controls.stopRequested) {
+        break;
+      }
+      if (result.paused) {
+        log(controls, `ARCH paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
         break;
       }
       moveToQueue(runtime, sourceFile, "dev", "dev", [
@@ -652,6 +816,10 @@ async function runDev(runtime, controls) {
       if (result.aborted && controls.stopRequested) {
         break;
       }
+      if (result.paused) {
+        log(controls, `DEV paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+        break;
+      }
       moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
         "Delivery runner: DEV failed",
         `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
@@ -729,6 +897,10 @@ async function runUxBatch(runtime, controls) {
     if (result.aborted && controls.stopRequested) {
       return false;
     }
+    if (result.paused) {
+      log(controls, `UX paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+      return false;
+    }
     moveAll(runtime, "ux", "toClarify", "to-clarify", "Delivery runner: UX batch failed");
     return true;
   }
@@ -763,6 +935,10 @@ async function runSecBatch(runtime, controls) {
 
   if (!result.ok) {
     if (result.aborted && controls.stopRequested) {
+      return false;
+    }
+    if (result.paused) {
+      log(controls, `SEC paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
       return false;
     }
     moveAll(runtime, "sec", "toClarify", "to-clarify", "Delivery runner: SEC batch failed");
@@ -872,6 +1048,10 @@ async function runQaBundle(runtime, controls) {
   if (result.aborted && controls.stopRequested) {
     return false;
   }
+  if (result.paused) {
+    log(controls, `QA paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return false;
+  }
 
   const gate = parseGate(gatePath);
   const pass = result.ok && String(gate.status || "").toLowerCase() === "pass";
@@ -978,6 +1158,10 @@ async function runDeployBundle(runtime, controls) {
     if (result.aborted && controls.stopRequested) {
       return false;
     }
+    if (result.paused) {
+      log(controls, `DEPLOY paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+      return false;
+    }
     moveAll(runtime, "deploy", "toClarify", "to-clarify", "Delivery runner: deploy bundle failed");
     return true;
   }
@@ -1034,6 +1218,13 @@ async function runQaPostBundle(runtime, controls, lastSignature) {
   }
 
   if (!result.ok) {
+    if (result.paused) {
+      log(controls, `QA post-bundle paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+      return {
+        progressed: false,
+        signature: lastSignature,
+      };
+    }
     const filePath = createQaFollowUp(runtime, {
       blocking_findings: ["QA final pass execution failed. Inspect logs and rerun."],
     });
@@ -1115,6 +1306,13 @@ async function main() {
   let lastReleasedSignature = "";
 
   while (!controls.stopRequested) {
+    if (await waitIfGloballyPaused(runtime, controls)) {
+      if (args.once) {
+        break;
+      }
+      continue;
+    }
+
     const before = snapshotHash(runtime);
 
     const bundle = startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, controls);

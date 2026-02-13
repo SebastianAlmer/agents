@@ -409,6 +409,80 @@ function main() {
     ["vision", "intake"],
     "vision"
   );
+  const poVisionMaxCycles = Number.isFinite(base.po && base.po.vision_max_cycles)
+    ? base.po.vision_max_cycles
+    : 100;
+  const poVisionMaxRequirements = Number.isFinite(base.po && base.po.vision_max_requirements)
+    ? base.po.vision_max_requirements
+    : 1000;
+  const poVisionStableCycles = Number.isFinite(base.po && base.po.vision_stable_cycles)
+    ? base.po.vision_stable_cycles
+    : 2;
+  const poIntakeMaxPerCycle = Number.isFinite(base.po && base.po.intake_max_per_cycle)
+    ? base.po.intake_max_per_cycle
+    : 3;
+  const poIntakeLoopCooldownCycles = Number.isFinite(base.po && base.po.intake_loop_cooldown_cycles)
+    ? base.po.intake_loop_cooldown_cycles
+    : 3;
+  const poIntakeIdempotenceEnabled = normalizeBool(
+    base.po && base.po.intake_idempotence_enabled,
+    true
+  );
+
+  const baseArch = base.arch && typeof base.arch === "object" ? base.arch : {};
+  const archRoutingMode = normalizeEnum(
+    baseArch.routing_mode || "triggered",
+    ["always", "triggered", "never"],
+    "triggered"
+  );
+  const archRequireForScopes = Array.isArray(baseArch.require_for_scopes)
+    ? baseArch.require_for_scopes.map((x) => String(x))
+    : ["fullstack"];
+  const archRequireForReviewRisks = Array.isArray(baseArch.require_for_review_risks)
+    ? baseArch.require_for_review_risks.map((x) => String(x))
+    : ["high"];
+  const archRequireForReviewScopes = Array.isArray(baseArch.require_for_review_scopes)
+    ? baseArch.require_for_review_scopes.map((x) => String(x))
+    : ["qa_sec", "full"];
+  const archTriggerFrontmatterFlags = Array.isArray(baseArch.trigger_frontmatter_flags)
+    ? baseArch.trigger_frontmatter_flags.map((x) => String(x))
+    : ["arch_required", "needs_arch"];
+  const archTriggerKeywords = Array.isArray(baseArch.trigger_keywords)
+    ? baseArch.trigger_keywords.map((x) => String(x))
+    : [
+        "auth",
+        "authorization",
+        "permission",
+        "security",
+        "secret",
+        "token",
+        "login",
+        "password",
+        "encryption",
+        "privacy",
+        "compliance",
+        "gdpr",
+        "pii",
+        "payment",
+        "billing",
+        "migration",
+        "schema",
+        "database",
+        "prisma",
+        "webhook",
+        "oauth",
+        "rbac",
+        "acl",
+        "sso",
+        "destructive",
+      ];
+  const archDigestEnabled = normalizeBool(baseArch.digest_enabled, true);
+  const archDigestFile = String(baseArch.digest_file || ".runtime/arch-docs-digest.md");
+  const archDigestMaxFiles = Number.isFinite(baseArch.digest_max_files) ? baseArch.digest_max_files : 12;
+  const archDigestMaxHeadingsPerFile = Number.isFinite(baseArch.digest_max_headings_per_file)
+    ? baseArch.digest_max_headings_per_file
+    : 20;
+  const archMaxRetries = Number.isFinite(baseArch.max_retries) ? baseArch.max_retries : 0;
 
   const qaChecks = args.qaChecks.length > 0
     ? args.qaChecks
@@ -508,9 +582,25 @@ function main() {
     "",
     "[po]",
     `default_mode = ${toTomlString(poMode)}`,
-    `vision_max_cycles = ${toTomlInt(Number.isFinite(base.po && base.po.vision_max_cycles) ? base.po.vision_max_cycles : 100)}`,
-    `vision_max_requirements = ${toTomlInt(Number.isFinite(base.po && base.po.vision_max_requirements) ? base.po.vision_max_requirements : 1000)}`,
-    `vision_stable_cycles = ${toTomlInt(Number.isFinite(base.po && base.po.vision_stable_cycles) ? base.po.vision_stable_cycles : 2)}`,
+    `vision_max_cycles = ${toTomlInt(poVisionMaxCycles)}`,
+    `vision_max_requirements = ${toTomlInt(poVisionMaxRequirements)}`,
+    `vision_stable_cycles = ${toTomlInt(poVisionStableCycles)}`,
+    `intake_max_per_cycle = ${toTomlInt(poIntakeMaxPerCycle)}`,
+    `intake_loop_cooldown_cycles = ${toTomlInt(poIntakeLoopCooldownCycles)}`,
+    `intake_idempotence_enabled = ${toTomlBool(poIntakeIdempotenceEnabled)}`,
+    "",
+    "[arch]",
+    `routing_mode = ${toTomlString(archRoutingMode)}`,
+    `require_for_scopes = ${toTomlArray(archRequireForScopes)}`,
+    `require_for_review_risks = ${toTomlArray(archRequireForReviewRisks)}`,
+    `require_for_review_scopes = ${toTomlArray(archRequireForReviewScopes)}`,
+    `trigger_frontmatter_flags = ${toTomlArray(archTriggerFrontmatterFlags)}`,
+    `trigger_keywords = ${toTomlArray(archTriggerKeywords)}`,
+    `digest_enabled = ${toTomlBool(archDigestEnabled)}`,
+    `digest_file = ${toTomlString(archDigestFile)}`,
+    `digest_max_files = ${toTomlInt(archDigestMaxFiles)}`,
+    `digest_max_headings_per_file = ${toTomlInt(archDigestMaxHeadingsPerFile)}`,
+    `max_retries = ${toTomlInt(archMaxRetries)}`,
     "",
     "[dev_routing]",
     `mode = ${toTomlString(routingMode)}`,
@@ -562,7 +652,8 @@ function main() {
   console.log(`- run_defaults.preflight: ${preflight}`);
   console.log(`- run_defaults.manual_downstream: ${manualDownstream}`);
   console.log(`- deploy.mode: ${deployMode}`);
-  console.log(`- po.default_mode: ${poMode}`);
+  console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled})`);
+  console.log(`- arch.routing_mode: ${archRoutingMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
   console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, ux=${models.ux}, deploy=${models.deploy}`);

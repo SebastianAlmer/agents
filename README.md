@@ -14,7 +14,7 @@ All runners use the same role agents:
 - `DEPLOY`
 
 Role intent:
-- `ARCH` is always before DEV, keeps requirements short, adds minimal stack/tech routing guardrails.
+- `ARCH` is trigger-based before DEV, keeps requirements short, adds minimal stack/tech routing guardrails when risk/complexity requires it.
 - DEV agents may change all required code (including DB) within requirement scope.
 - `UX` actively improves frontend/pages in code (not only requirement text), guided by docs and git diff.
 - `SEC` actively hardens security in code/config.
@@ -44,8 +44,8 @@ PO vision rules:
 - `node scripts/delivery-runner.js --mode dev-only`
 
 Modes:
-- `full`: ARCH -> DEV, then downstream once-per-bundle gates (UX -> SEC -> QA -> DEPLOY).
-- `dev-only`: ARCH -> DEV only.
+- `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> DEPLOY).
+- `dev-only`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream.
 
 Bundle behavior:
 - Bundles start from `selected`.
@@ -88,6 +88,11 @@ All long-running runners support:
 - `s` print queue status snapshot
 - `q` stop loop gracefully
 
+Global pause guard:
+- PO and Delivery react to provider limit errors (`usage limit`, `rate limit`, `insufficient_quota`, `try again at ...`).
+- A shared pause state is written to `.runtime/pause-state.json`.
+- While active, runners pause processing (no queue failure rerouting) and resume automatically after `resume_after`.
+
 ## Quick start
 
 1) Setup local config:
@@ -108,6 +113,7 @@ Important sections:
 - `[paths]`: `repo_root`, `requirements_root`, `docs_dir`, `product_vision_dir`
 - `[loops]`: bundle sizes, polling, retry policy
 - `[po]`: vision defaults and limits
+- `[arch]`: trigger policy, risk/scope guards, docs digest behavior, retries
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)
 - `[dev_routing]`, `[dev_agents]`
 - `[models]`
@@ -135,6 +141,7 @@ Intake recommendation:
 - Put unstructured requirements into `refinement`.
 - Use an AI chat (e.g. ReqEng) to route into `backlog` or `selected`.
 - ARCH/DEV/QA/SEC/UX/DEPLOY route unresolved items to `to-clarify`.
+- PO intake ownership is `to-clarify`, `human-input`, `backlog`, `refinement`.
 - PO resolves `to-clarify` when possible and escalates only hard unresolved conflicts to `human-decision-needed`.
 - Items in `human-decision-needed` are human-owned and must not be moved by autonomous runners.
 - After manual evaluation, move items to `human-input`; PO ingests `human-input` in the next iteration.

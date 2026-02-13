@@ -5,6 +5,9 @@ const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 
+const PAUSE_STATE_RELATIVE_PATH = path.join(".runtime", "pause-state.json");
+const DEFAULT_LIMIT_PAUSE_MS = 20 * 60 * 1000;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -192,6 +195,156 @@ function isRetryable(stderrText) {
   );
 }
 
+function pauseStatePath(agentsRoot) {
+  const base = path.resolve(String(agentsRoot || process.cwd()));
+  const filePath = path.join(base, PAUSE_STATE_RELATIVE_PATH);
+  ensureDir(path.dirname(filePath));
+  return filePath;
+}
+
+function readPauseState(agentsRoot) {
+  const filePath = pauseStatePath(agentsRoot);
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writePauseState(agentsRoot, state) {
+  const filePath = pauseStatePath(agentsRoot);
+  fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  return filePath;
+}
+
+function clearPauseState(agentsRoot) {
+  const filePath = pauseStatePath(agentsRoot);
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+}
+
+function parseTryAgainTime(text, now = new Date()) {
+  const source = String(text || "");
+  const match = source.match(/try again at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+  if (!match) {
+    return null;
+  }
+  let hour = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2] || "0", 10);
+  const meridiem = String(match[3] || "").toLowerCase();
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return null;
+  }
+  hour = hour % 12;
+  if (meridiem === "pm") {
+    hour += 12;
+  }
+
+  const candidate = new Date(now.getTime());
+  candidate.setHours(hour, minute, 0, 0);
+  if (candidate.getTime() <= now.getTime()) {
+    candidate.setDate(candidate.getDate() + 1);
+  }
+  return candidate;
+}
+
+function detectLimitFailure(stderrText) {
+  const text = String(stderrText || "");
+  if (!text.trim()) {
+    return null;
+  }
+  const patterns = [
+    { regex: /usage limit/i, reason: "usage_limit" },
+    { regex: /rate limit/i, reason: "rate_limit" },
+    { regex: /insufficient[_ -]?quota/i, reason: "insufficient_quota" },
+    { regex: /quota exceeded/i, reason: "quota_exceeded" },
+    { regex: /too many requests/i, reason: "too_many_requests" },
+    { regex: /try again at/i, reason: "retry_later" },
+  ];
+  const hit = patterns.find((item) => item.regex.test(text));
+  if (!hit) {
+    return null;
+  }
+  const now = new Date();
+  const parsedRetryTime = parseTryAgainTime(text, now);
+  const resumeAt = parsedRetryTime || new Date(now.getTime() + DEFAULT_LIMIT_PAUSE_MS);
+  const excerpt = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-6)
+    .join(" | ")
+    .slice(0, 1200);
+
+  return {
+    reason: hit.reason,
+    resumeAt: resumeAt.toISOString(),
+    rawExcerpt: excerpt,
+  };
+}
+
+function activatePauseFromError({ agentsRoot, stderrText, source }) {
+  const detection = detectLimitFailure(stderrText);
+  if (!detection) {
+    return null;
+  }
+  const existing = readPauseState(agentsRoot);
+  const nowIso = new Date().toISOString();
+  const next = {
+    active: true,
+    reason: detection.reason,
+    source: String(source || "runner"),
+    createdAt: existing && existing.createdAt ? existing.createdAt : nowIso,
+    updatedAt: nowIso,
+    resumeAfter: detection.resumeAt,
+    rawExcerpt: detection.rawExcerpt,
+  };
+
+  if (existing && existing.active && existing.resumeAfter) {
+    const existingTs = Date.parse(existing.resumeAfter);
+    const nextTs = Date.parse(next.resumeAfter);
+    if (Number.isFinite(existingTs) && Number.isFinite(nextTs) && existingTs > nextTs) {
+      next.resumeAfter = existing.resumeAfter;
+      if (existing.reason) {
+        next.reason = existing.reason;
+      }
+      if (existing.rawExcerpt) {
+        next.rawExcerpt = existing.rawExcerpt;
+      }
+    }
+  }
+
+  writePauseState(agentsRoot, next);
+  return next;
+}
+
+function getActivePauseState(agentsRoot) {
+  const state = readPauseState(agentsRoot);
+  if (!state || !state.active) {
+    return null;
+  }
+  const resumeTs = Date.parse(String(state.resumeAfter || ""));
+  if (!Number.isFinite(resumeTs)) {
+    return state;
+  }
+  if (Date.now() >= resumeTs) {
+    clearPauseState(agentsRoot);
+    return null;
+  }
+  return {
+    ...state,
+    remainingMs: Math.max(0, resumeTs - Date.now()),
+  };
+}
+
 async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDelaySeconds, stopSignal }) {
   const retries = Math.max(0, Number.parseInt(String(maxRetries || 0), 10));
   const attempts = retries + 1;
@@ -299,6 +452,20 @@ async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDela
     }
 
     lastError = stderrText || `exit_code_${exitCode}`;
+    const pauseState = activatePauseFromError({
+      agentsRoot: cwd,
+      stderrText: lastError,
+      source: path.basename(String(scriptPath || "script")),
+    });
+    if (pauseState) {
+      return {
+        ok: false,
+        paused: true,
+        pauseState,
+        stderr: lastError,
+        exitCode: exitCode || 1,
+      };
+    }
     if (attempt + 1 < attempts && isRetryable(lastError)) {
       continue;
     }
@@ -383,6 +550,23 @@ function parseDecisionFile(filePath, fallbackLabel = "agent") {
         raw.hardVisionConflict === true ||
         raw.vision_conflict_hard === true
       ),
+      clarifyQuestion: String(
+        raw.clarify_question ||
+        raw.question ||
+        raw.required_input ||
+        raw.requiredInput ||
+        raw.missing_input ||
+        raw.missingInput ||
+        ""
+      ).trim(),
+      recommendedDefault: String(
+        raw.recommended_default ||
+        raw.recommendedDefault ||
+        raw.proposal ||
+        raw.default_decision ||
+        raw.defaultDecision ||
+        ""
+      ).trim(),
       targetQueue: String(
         raw.target_queue || raw.targetQueue || raw.target || raw.next_queue || raw.nextQueue || ""
       ).trim(),
@@ -395,6 +579,8 @@ function parseDecisionFile(filePath, fallbackLabel = "agent") {
       new_requirements: [],
       wontDo: false,
       hardVisionConflict: false,
+      clarifyQuestion: "",
+      recommendedDefault: "",
       targetQueue: "",
     };
   }
@@ -590,4 +776,8 @@ module.exports = {
   routeByStatus,
   resolveSourcePath,
   chooseBundleByBusinessScore,
+  readPauseState,
+  writePauseState,
+  clearPauseState,
+  getActivePauseState,
 };

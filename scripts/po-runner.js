@@ -17,11 +17,11 @@ const {
   appendQueueSection,
   upsertMarkdownSection,
   writeRefinementItems,
-  detectCurrentQueue,
   resolveSourcePath,
   runNodeScript,
   normalizeStatus,
   listQueueFiles,
+  getActivePauseState,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
@@ -242,6 +242,31 @@ function log(controls, message) {
   }
 }
 
+function formatPauseLine(pauseState) {
+  const reason = String((pauseState && pauseState.reason) || "limit").replace(/_/g, "-");
+  const source = String((pauseState && pauseState.source) || "unknown");
+  const resumeAfter = String((pauseState && pauseState.resumeAfter) || "");
+  const remainingMs = Number.isFinite(pauseState && pauseState.remainingMs)
+    ? pauseState.remainingMs
+    : 0;
+  const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
+  return `global pause active reason=${reason} source=${source} resume_after=${resumeAfter || "unknown"} remaining~${remainingMin}m`;
+}
+
+async function waitIfGloballyPaused(runtime, controls) {
+  const pauseState = getActivePauseState(runtime.agentsRoot);
+  if (!pauseState) {
+    return false;
+  }
+  process.stdout.write(`PO-RUNNER: ${formatPauseLine(pauseState)}\n`);
+  const fallbackMs = Math.max(1, runtime.loops.poPollSeconds) * 1000;
+  const waitMs = Number.isFinite(pauseState.remainingMs)
+    ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
+    : fallbackMs;
+  await sleep(waitMs);
+  return true;
+}
+
 function validateProductVision(runtime) {
   const dir = String(runtime.productVisionDir || "").trim();
   const files = Array.isArray(runtime.productVisionFiles) ? runtime.productVisionFiles : [];
@@ -282,6 +307,110 @@ function buildPlanningSnapshot(runtime) {
   const hash = crypto.createHash("sha1").update(encoded).digest("hex");
   const keys = new Set(items.map((item) => `${item.queue}/${item.file}`));
   return { hash, keys, count: items.length };
+}
+
+function poRunnerStatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "po-runner-state.json");
+}
+
+function readPoRunnerState(runtime) {
+  const filePath = poRunnerStatePath(runtime);
+  if (!fs.existsSync(filePath)) {
+    return { version: 1, cycle: 0, items: {} };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object") {
+      return { version: 1, cycle: 0, items: {} };
+    }
+    return {
+      version: 1,
+      cycle: Number.isInteger(parsed.cycle) ? parsed.cycle : 0,
+      items: parsed.items && typeof parsed.items === "object" ? parsed.items : {},
+    };
+  } catch {
+    return { version: 1, cycle: 0, items: {} };
+  }
+}
+
+function writePoRunnerState(runtime, state) {
+  const filePath = poRunnerStatePath(runtime);
+  fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function requirementKey(filePath) {
+  const fm = parseFrontMatter(filePath);
+  const id = String(fm.id || "").trim();
+  if (id) {
+    return id.toUpperCase();
+  }
+  return path.basename(filePath).toUpperCase();
+}
+
+function fileHash(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    return crypto.createHash("sha1").update(raw).digest("hex");
+  } catch {
+    return "";
+  }
+}
+
+function decisionQuestionText(decision) {
+  if (!decision || typeof decision !== "object") {
+    return "";
+  }
+  const explicit = String(decision.clarifyQuestion || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  const summary = String(decision.summary || "").trim();
+  if (summary.includes("?")) {
+    return summary;
+  }
+  const findings = Array.isArray(decision.findings)
+    ? decision.findings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  return findings.find((item) => item.includes("?")) || "";
+}
+
+function decisionRecommendedDefaultText(decision) {
+  if (!decision || typeof decision !== "object") {
+    return "";
+  }
+  const explicit = String(decision.recommendedDefault || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  const summary = String(decision.summary || "").trim();
+  if (summary) {
+    return summary;
+  }
+  const findings = Array.isArray(decision.findings)
+    ? decision.findings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  return findings[0] || "";
+}
+
+function isActionableClarifyDecision(decision) {
+  const question = decisionQuestionText(decision);
+  const recommendation = decisionRecommendedDefaultText(decision);
+  return Boolean(question && recommendation);
+}
+
+function ensureToClarifyRequest(filePath, decision) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const question = decisionQuestionText(decision) || "What concrete decision is still required?";
+  const recommendation = decisionRecommendedDefaultText(decision)
+    || "Adopt PO's minimal Product Vision-aligned default and continue delivery.";
+  upsertMarkdownSection(filePath, "Clarification Needed", [
+    `- Question: ${question}`,
+    `- Recommended default: ${recommendation}`,
+  ]);
 }
 
 function countNewRequirementsSince(baseSnapshot, currentSnapshot) {
@@ -482,12 +611,72 @@ function ensureHumanDecisionRequest(filePath, decision) {
   upsertMarkdownSection(filePath, "Human Decision", lines);
 }
 
-function hasEscalationConfirmed(filePath) {
-  if (!filePath || !fs.existsSync(filePath)) {
+function queueNameFromPath(filePath, queues) {
+  if (!filePath) {
+    return "";
+  }
+  const resolvedFile = path.resolve(String(filePath));
+  const resolvedDir = path.dirname(resolvedFile);
+  for (const [name, queueDir] of Object.entries(queues || {})) {
+    if (!queueDir) {
+      continue;
+    }
+    if (path.resolve(queueDir) === resolvedDir) {
+      return name;
+    }
+  }
+  return "";
+}
+
+function stalePlanningDuplicateTargets(originQueue) {
+  if (originQueue === "toClarify" || originQueue === "humanInput") {
+    return [
+      "arch",
+      "selected",
+      "backlog",
+      "refinement",
+      "wontDo",
+      "humanDecisionNeeded",
+      "dev",
+      "qa",
+      "sec",
+      "ux",
+      "deploy",
+      "released",
+    ];
+  }
+  return [];
+}
+
+function removeStalePlanningDuplicate(runtime, sourcePath, originQueue, controls) {
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
     return false;
   }
-  const raw = fs.readFileSync(filePath, "utf8");
-  return /\n##\s+Flow Routing Notes\b[\s\S]*PO runner escalation confirmed/i.test(raw);
+  const fileName = path.basename(sourcePath);
+  const targets = stalePlanningDuplicateTargets(originQueue);
+  if (targets.length === 0) {
+    return false;
+  }
+
+  for (const queueName of targets) {
+    const queueDir = runtime.queues[queueName];
+    if (!queueDir) {
+      continue;
+    }
+    const candidate = path.join(queueDir, fileName);
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    try {
+      fs.unlinkSync(sourcePath);
+      log(controls, `removed stale ${originQueue} duplicate ${fileName}; canonical in ${queueName}`);
+      return true;
+    } catch (err) {
+      log(controls, `failed removing stale duplicate ${fileName}: ${err.message || err}`);
+      return false;
+    }
+  }
+  return false;
 }
 
 function buildFallbackFollowUpItem(decision, frontMatter, currentPath) {
@@ -535,16 +724,52 @@ function moveWithFallback(runtime, sourcePath, targetQueue, status, notes) {
   return moveRequirementFile(sourcePath, fallbackPath);
 }
 
-async function runPoIntakeOnFile(runtime, filePath, controls) {
+async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", state = null, cycle = 0) {
+  const sourceBefore = resolveSourcePath(runtime, filePath) || filePath;
+  const originQueue = sourceHint || queueNameFromPath(sourceBefore, runtime.queues) || "";
+  if (removeStalePlanningDuplicate(runtime, sourceBefore, originQueue, controls)) {
+    return true;
+  }
+
+  const allowedSourceQueues = new Set(["toClarify", "humanInput", "backlog", "refinement"]);
+  if (!allowedSourceQueues.has(originQueue)) {
+    log(controls, `skip ${path.basename(sourceBefore)} from non-PO queue ${originQueue || "unknown"}`);
+    return false;
+  }
+
+  const key = requirementKey(sourceBefore);
+  const beforeHash = fileHash(sourceBefore);
+  const existingState = state && state.items && state.items[key] ? state.items[key] : null;
+  if (
+    runtime.po.intakeIdempotenceEnabled &&
+    existingState &&
+    existingState.lastHash === beforeHash &&
+    existingState.lastSourceQueue === originQueue &&
+    Number.isInteger(existingState.skipUntilCycle) &&
+    cycle > 0 &&
+    existingState.skipUntilCycle > cycle
+  ) {
+    log(
+      controls,
+      `cooldown skip ${path.basename(sourceBefore)} until cycle ${existingState.skipUntilCycle}`
+    );
+    return false;
+  }
+
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "po", "po.js"),
-    args: ["--auto", "--mode", "intake", "--requirement", filePath],
+    args: ["--auto", "--mode", "intake", "--requirement", sourceBefore],
     cwd: runtime.agentsRoot,
     maxRetries: runtime.loops.maxRetries,
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
   });
 
-  const currentPath = resolveSourcePath(runtime, filePath);
+  if (result.paused) {
+    log(controls, `PO intake paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return false;
+  }
+
+  const currentPath = resolveSourcePath(runtime, sourceBefore);
   if (!currentPath) {
     log(controls, `intake item vanished during PO run: ${path.basename(filePath)}`);
     return true;
@@ -553,7 +778,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
   const decision = parseDecisionFile(`${currentPath}.decision.json`, "PO");
   const frontMatter = parseFrontMatter(currentPath);
   const status = normalizeStatus(decision.status || frontMatter.status || (result.ok ? "pass" : "clarify"));
-  const sourceQueue = detectCurrentQueue(path.basename(currentPath), runtime.queues).name || "";
+  const sourceQueue = originQueue || queueNameFromPath(sourceBefore, runtime.queues) || "";
 
   if (!result.ok) {
     appendQueueSection(currentPath, [
@@ -566,11 +791,21 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
   const explicitTarget = normalizePoTarget(decision.targetQueue);
   let targetQueue = explicitTarget || routeFromPo(runtime, currentPath, status);
   const hardVisionConflict = isHardVisionConflict(decision);
+
   if (!explicitTarget && wantsWontDo(decision)) {
     targetQueue = "wontDo";
     appendQueueSection(currentPath, [
       "PO runner wont-do guard",
       "- detected duplicate/already-implemented/invalid requirement signal; routed to wont-do",
+    ]);
+  }
+
+  // To-clarify requires an actionable question + recommendation.
+  if (targetQueue === "toClarify" && !hardVisionConflict && !isActionableClarifyDecision(decision)) {
+    targetQueue = sourceQueue === "toClarify" ? "backlog" : "refinement";
+    appendQueueSection(currentPath, [
+      "PO runner clarify contract guard",
+      "- to-clarify requested without actionable question+recommended_default; PO routed decisively instead",
     ]);
   }
 
@@ -597,6 +832,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
       "- hard vision conflict confirmed; awaiting explicit human decision",
     ]);
   }
+
   const targetStatus = queueStatusByTarget(targetQueue);
 
   moveWithFallback(runtime, currentPath, targetQueue, targetStatus, [
@@ -608,6 +844,10 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
   if (targetQueue === "humanDecisionNeeded") {
     const movedPath = path.join(runtime.queues.humanDecisionNeeded, path.basename(currentPath));
     ensureHumanDecisionRequest(movedPath, decision);
+  }
+  if (targetQueue === "toClarify") {
+    const movedPath = path.join(runtime.queues.toClarify, path.basename(currentPath));
+    ensureToClarifyRequest(movedPath, decision);
   }
 
   let followUpRequirements = Array.isArray(decision.new_requirements) ? decision.new_requirements : [];
@@ -624,6 +864,38 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
     if (created.length > 0) {
       log(controls, `created ${created.length} refinement item(s) from ${path.basename(currentPath)}`);
     }
+  }
+
+  if (state && state.items && runtime.po.intakeIdempotenceEnabled) {
+    const currentResolved = resolveSourcePath(runtime, currentPath) || currentPath;
+    const finalQueue = queueNameFromPath(currentResolved, runtime.queues) || targetQueue || "";
+    const finalHash = fileHash(currentResolved);
+    const previous = state.items[key] || {};
+    const sameOutcome = previous.lastHash === finalHash
+      && previous.lastSourceQueue === sourceQueue
+      && previous.lastTargetQueue === finalQueue;
+    const repeatCount = sameOutcome
+      ? Math.max(0, Number.parseInt(String(previous.repeatCount || 0), 10)) + 1
+      : 0;
+    const next = {
+      lastHash: finalHash,
+      lastSourceQueue: sourceQueue,
+      lastTargetQueue: finalQueue,
+      lastProcessedCycle: cycle,
+      repeatCount,
+      skipUntilCycle: Number.isInteger(previous.skipUntilCycle) ? previous.skipUntilCycle : 0,
+    };
+    if (repeatCount >= 2) {
+      const cooldown = Math.max(1, runtime.po.intakeLoopCooldownCycles || 3);
+      next.skipUntilCycle = Math.max(next.skipUntilCycle, cycle + cooldown);
+      log(
+        controls,
+        `loop cooldown ${key} for ${cooldown} cycle(s) after repeated ${sourceQueue}->${finalQueue}`
+      );
+    }
+    state.items[key] = next;
+    state.cycle = cycle;
+    writePoRunnerState(runtime, state);
   }
 
   return true;
@@ -651,64 +923,50 @@ async function runVisionCycle(runtime, controls) {
 
   return {
     ok: result.ok,
+    paused: Boolean(result.paused),
+    pauseState: result.pauseState || null,
     decision,
   };
 }
 
-async function processHumanInput(runtime, controls) {
+async function processHumanInput(runtime, controls, state, cycle) {
   const filePath = getFirstFile(runtime.queues.humanInput);
   if (!filePath) {
     return false;
   }
-  const progressed = await runPoIntakeOnFile(runtime, filePath, controls);
+  const progressed = await runPoIntakeOnFile(runtime, filePath, controls, "humanInput", state, cycle);
   if (progressed) {
     log(controls, `processed human-input ${path.basename(filePath)}`);
   }
   return progressed;
 }
 
-function pickHumanDecisionCandidate(runtime) {
-  const files = listQueueFiles(runtime.queues.humanDecisionNeeded);
-  for (const filePath of files) {
-    if (!hasEscalationConfirmed(filePath)) {
-      return filePath;
-    }
-  }
-  return "";
-}
-
-async function processHumanDecisionNeeded(runtime, controls) {
-  const filePath = pickHumanDecisionCandidate(runtime);
-  if (!filePath) {
-    return false;
-  }
-  const progressed = await runPoIntakeOnFile(runtime, filePath, controls);
-  if (progressed) {
-    log(controls, `re-checked human-decision-needed ${path.basename(filePath)}`);
-  }
-  return progressed;
-}
-
-async function processToClarify(runtime, controls) {
+async function processToClarify(runtime, controls, state, cycle) {
   const filePath = getFirstFile(runtime.queues.toClarify);
   if (!filePath) {
     return false;
   }
-  const progressed = await runPoIntakeOnFile(runtime, filePath, controls);
+  const progressed = await runPoIntakeOnFile(runtime, filePath, controls, "toClarify", state, cycle);
   if (progressed) {
     log(controls, `processed to-clarify ${path.basename(filePath)}`);
   }
   return progressed;
 }
 
-async function fillSelected(runtime, highWatermark, controls) {
+async function fillSelected(runtime, highWatermark, controls, state, cycle) {
   let progressed = false;
-  while (!controls.stopRequested && countFiles(runtime.queues.selected) < highWatermark) {
+  let processed = 0;
+  const perCycleCap = Math.max(1, runtime.po.intakeMaxPerCycle || 3);
+  while (!controls.stopRequested && countFiles(runtime.queues.selected) < highWatermark && processed < perCycleCap) {
     const source = selectIntakeSource(runtime);
     if (!source.path) {
       break;
     }
-    await runPoIntakeOnFile(runtime, source.path, controls);
+    const handled = await runPoIntakeOnFile(runtime, source.path, controls, source.queue, state, cycle);
+    if (!handled) {
+      break;
+    }
+    processed += 1;
     progressed = true;
   }
   return progressed;
@@ -740,17 +998,28 @@ function releasedSignature(runtime) {
 }
 
 async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, once) {
+  const state = readPoRunnerState(runtime);
   while (!controls.stopRequested) {
+    if (await waitIfGloballyPaused(runtime, controls)) {
+      if (once) {
+        return;
+      }
+      continue;
+    }
+
+    state.cycle = Math.max(0, Number.parseInt(String(state.cycle || 0), 10)) + 1;
+    const cycle = state.cycle;
     const before = snapshotHash(runtime);
 
-    await processHumanDecisionNeeded(runtime, controls);
-    await processToClarify(runtime, controls);
-    await processHumanInput(runtime, controls);
+    await processToClarify(runtime, controls, state, cycle);
+    await processHumanInput(runtime, controls, state, cycle);
 
     const selectedCount = countFiles(runtime.queues.selected);
     if (selectedCount < lowWatermark || selectedCount < highWatermark) {
-      await fillSelected(runtime, highWatermark, controls);
+      await fillSelected(runtime, highWatermark, controls, state, cycle);
     }
+
+    writePoRunnerState(runtime, state);
 
     if (once) {
       return;
@@ -774,13 +1043,22 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
   let planningCycles = 0;
   let visionComplete = false;
   let lastReleased = releasedSignature(runtime);
+  const state = readPoRunnerState(runtime);
 
   while (!controls.stopRequested) {
+    if (await waitIfGloballyPaused(runtime, controls)) {
+      if (once) {
+        return;
+      }
+      continue;
+    }
+
+    state.cycle = Math.max(0, Number.parseInt(String(state.cycle || 0), 10)) + 1;
+    const cycle = state.cycle;
     const before = snapshotHash(runtime);
 
-    await processHumanDecisionNeeded(runtime, controls);
-    await processToClarify(runtime, controls);
-    await processHumanInput(runtime, controls);
+    await processToClarify(runtime, controls, state, cycle);
+    await processHumanInput(runtime, controls, state, cycle);
 
     const selectedCount = countFiles(runtime.queues.selected);
     const currentReleased = releasedSignature(runtime);
@@ -793,6 +1071,16 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
     const planningFillNeeded = selectedCount < highWatermark && !visionComplete;
     if (planningFillNeeded || releasedChanged) {
       const cycle = await runVisionCycle(runtime, controls);
+      if (cycle.paused) {
+        log(
+          controls,
+          `vision cycle paused by token guard (${(cycle.pauseState && cycle.pauseState.reason) || "limit"})`
+        );
+        if (once) {
+          return;
+        }
+        continue;
+      }
       if (planningFillNeeded) {
         planningCycles += 1;
       }
@@ -843,8 +1131,10 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
     }
 
     if (countFiles(runtime.queues.selected) < lowWatermark) {
-      await fillSelected(runtime, highWatermark, controls);
+      await fillSelected(runtime, highWatermark, controls, state, cycle);
     }
+
+    writePoRunnerState(runtime, state);
 
     if (once) {
       return;

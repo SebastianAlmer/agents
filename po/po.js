@@ -108,6 +108,22 @@ function resolveRequirementPath(requirement, candidateDirs) {
   return "";
 }
 
+function pickIntakeFile(queues) {
+  const order = [
+    queues.toClarify,
+    queues.humanInput,
+    queues.backlog,
+    queues.refinement,
+  ];
+  for (const queueDir of order) {
+    const first = getFirstFile(queueDir);
+    if (first) {
+      return first;
+    }
+  }
+  return "";
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   const parsed = parseArgs(rawArgs);
@@ -148,12 +164,11 @@ async function main() {
     : path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
 
   console.log(`PO: mode ${mode}`);
-  console.log(`PO: scan selected ${selectedDir}`);
+  console.log("PO: scan intake queues");
 
   let reqFile = "";
   if (requirement) {
     reqFile = resolveRequirementPath(requirement, [
-      selectedDir,
       backlogDir,
       refinementDir,
       humanInputDir,
@@ -165,9 +180,14 @@ async function main() {
       throw new Error(`Requirement not found: ${requirement}`);
     }
   } else if (mode !== "vision") {
-    const firstFile = getFirstFile(selectedDir);
+    const firstFile = pickIntakeFile({
+      toClarify: toClarifyDir,
+      humanInput: humanInputDir,
+      backlog: backlogDir,
+      refinement: refinementDir,
+    });
     if (!firstFile) {
-      console.log("PO: selected empty");
+      console.log("PO: intake queues empty");
       if (auto) {
         process.exit(0);
       }
