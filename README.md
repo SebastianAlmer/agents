@@ -115,6 +115,7 @@ Important sections:
 - `[po]`: vision defaults and limits
 - `[arch]`: trigger policy, risk/scope guards, docs digest behavior, retries
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)
+- `[deploy.pr]`: optional PR creation after deploy push (`enabled`, `provider`, `remote`, `base_branch`, `head_mode`, `head_branch`, templates). Template vars: `${type}` (`feat|fix|chore` inferred from branch), `${branch}`, `${base}`, `${remote}`
 - `[dev_routing]`, `[dev_agents]`
 - `[models]`
 

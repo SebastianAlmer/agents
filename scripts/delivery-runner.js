@@ -1098,46 +1098,185 @@ function runGit(repoRoot, args) {
   };
 }
 
+function runCli(cmd, args, cwd) {
+  const result = spawnSync(cmd, args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return {
+    ok: result.status === 0,
+    output: `${String(result.stdout || "").trim()}\n${String(result.stderr || "").trim()}`.trim(),
+    status: result.status,
+  };
+}
+
+function renderTemplate(template, vars) {
+  const source = String(template || "");
+  return source.replace(/\$\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
+    const value = Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : "";
+    return String(value == null ? "" : value);
+  });
+}
+
+function getCurrentBranch(repoRoot) {
+  const result = runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (!result.ok) {
+    return "";
+  }
+  const branch = String(result.output || "").trim();
+  if (!branch || branch === "HEAD") {
+    return "";
+  }
+  return branch;
+}
+
+function ensureRemoteBranchPushed(repoRoot, remote, branch) {
+  const result = runGit(repoRoot, ["ls-remote", "--heads", remote, branch]);
+  return result.ok && Boolean(String(result.output || "").trim());
+}
+
+function inferChangeType(branch) {
+  const raw = String(branch || "").trim().toLowerCase();
+  if (/^(fix|bugfix|hotfix)(\/|-|_)/.test(raw)) {
+    return "fix";
+  }
+  if (/^(feat|feature)(\/|-|_)/.test(raw)) {
+    return "feat";
+  }
+  return "chore";
+}
+
+function createPullRequest(runtime, controls, deployInfo) {
+  const pr = runtime.deploy && runtime.deploy.pr;
+  if (!pr || !pr.enabled) {
+    return;
+  }
+
+  const provider = String(pr.provider || "github").toLowerCase();
+  if (provider !== "github") {
+    log(controls, `deploy PR skipped: unsupported provider '${provider}'`);
+    return;
+  }
+
+  const remote = String(pr.remote || "origin").trim() || "origin";
+  const baseBranch = String(pr.baseBranch || "main").trim() || "main";
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (!currentBranch) {
+    log(controls, "deploy PR skipped: could not resolve current branch");
+    return;
+  }
+  const headBranch = String(pr.headMode || "current").toLowerCase() === "fixed"
+    ? (String(pr.headBranch || "").trim() || currentBranch)
+    : currentBranch;
+
+  if (pr.createOnlyAfterPush && !deployInfo.pushed) {
+    log(controls, "deploy PR skipped: create_only_after_push=true and no push happened");
+    return;
+  }
+  if (!ensureRemoteBranchPushed(runtime.repoRoot, remote, headBranch)) {
+    log(controls, `deploy PR skipped: remote branch not found ${remote}/${headBranch}`);
+    return;
+  }
+
+  const ghVersion = runCli("gh", ["--version"], runtime.repoRoot);
+  if (!ghVersion.ok) {
+    log(controls, "deploy PR skipped: gh CLI not available");
+    return;
+  }
+
+  const existing = runCli(
+    "gh",
+    ["pr", "list", "--state", "open", "--base", baseBranch, "--head", headBranch, "--json", "url", "--jq", ".[0].url"],
+    runtime.repoRoot
+  );
+  if (existing.ok) {
+    const url = String(existing.output || "").trim();
+    if (url) {
+      log(controls, `deploy PR already exists: ${url}`);
+      return;
+    }
+  }
+
+  const vars = {
+    base: baseBranch,
+    branch: headBranch,
+    remote,
+    type: inferChangeType(headBranch),
+  };
+  const title = renderTemplate(pr.titleTemplate, vars) || `${vars.type}: ${headBranch} -> ${baseBranch}`;
+  const body = renderTemplate(pr.bodyTemplate, vars) || `Automated PR from ${headBranch} to ${baseBranch}.`;
+
+  const args = ["pr", "create", "--base", baseBranch, "--head", headBranch, "--title", title, "--body", body];
+  if (pr.draft) {
+    args.push("--draft");
+  }
+  const created = runCli("gh", args, runtime.repoRoot);
+  if (!created.ok) {
+    const out = String(created.output || "");
+    if (/already exists/i.test(out)) {
+      log(controls, "deploy PR already exists for this head/base");
+      return;
+    }
+    log(controls, `deploy PR create failed: ${out.slice(0, 500)}`);
+    return;
+  }
+
+  const url = String(created.output || "").split(/\s+/).find((token) => /^https?:\/\//i.test(token)) || "";
+  if (url) {
+    log(controls, `deploy PR created: ${url}`);
+  } else {
+    log(controls, "deploy PR created");
+  }
+}
+
 function deployCommitPush(runtime, controls) {
+  const outcome = {
+    committed: false,
+    pushed: false,
+  };
   if (runtime.deploy.mode === "check") {
     log(controls, "deploy git actions skipped (mode=check)");
-    return;
+    return outcome;
   }
 
   const agentsRootGit = gitRoot(runtime.agentsRoot);
   const targetRootGit = gitRoot(runtime.repoRoot);
   if (!targetRootGit) {
     log(controls, "deploy git actions skipped: target repo is not git");
-    return;
+    return outcome;
   }
   if (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit) {
     log(controls, "deploy git actions skipped: safety guard prevented agents repo commit");
-    return;
+    return outcome;
   }
 
   runGit(runtime.repoRoot, ["add", "-A"]);
   const diff = runGit(runtime.repoRoot, ["diff", "--cached", "--quiet"]);
   if (diff.ok) {
     log(controls, "deploy git actions skipped: no staged changes");
-    return;
+    return outcome;
   }
 
   const stamp = new Date().toISOString().replace("T", " ").slice(0, 19);
   const commit = runGit(runtime.repoRoot, ["commit", "-m", `chore(release): deploy bundle ${stamp}`]);
   if (!commit.ok) {
     log(controls, `deploy commit failed: ${(commit.output || "").slice(0, 500)}`);
-    return;
+    return outcome;
   }
+  outcome.committed = true;
   log(controls, "deploy commit created");
 
   if (runtime.deploy.mode === "commit_push") {
     const push = runGit(runtime.repoRoot, ["push"]);
     if (!push.ok) {
       log(controls, `deploy push failed: ${(push.output || "").slice(0, 500)}`);
-      return;
+      return outcome;
     }
+    outcome.pushed = true;
     log(controls, "deploy push completed");
   }
+  return outcome;
 }
 
 async function runDeployBundle(runtime, controls) {
@@ -1167,7 +1306,8 @@ async function runDeployBundle(runtime, controls) {
   }
 
   moveAll(runtime, "deploy", "released", "released", "Delivery runner: deploy bundle released");
-  deployCommitPush(runtime, controls);
+  const deployInfo = deployCommitPush(runtime, controls);
+  createPullRequest(runtime, controls, deployInfo);
   return true;
 }
 

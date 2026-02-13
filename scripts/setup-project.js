@@ -373,6 +373,29 @@ function main() {
     args.requireCleanStartForCommits,
     normalizeBool(base.deploy && base.deploy.require_clean_start_for_commits, true)
   );
+  const deployPrBase = (base.deploy && typeof base.deploy.pr === "object") ? base.deploy.pr : {};
+  const deployPrEnabled = normalizeBool(deployPrBase.enabled, false);
+  const deployPrProvider = normalizeEnum(
+    deployPrBase.provider || "github",
+    ["github", "gitlab"],
+    "github"
+  );
+  const deployPrRemote = String(deployPrBase.remote || "origin").trim() || "origin";
+  const deployPrBaseBranch = String(deployPrBase.base_branch || "main").trim() || "main";
+  const deployPrHeadMode = normalizeEnum(
+    deployPrBase.head_mode || "current",
+    ["current", "fixed"],
+    "current"
+  );
+  const deployPrHeadBranch = String(deployPrBase.head_branch || "").trim();
+  const deployPrDraft = normalizeBool(deployPrBase.draft, false);
+  const deployPrCreateOnlyAfterPush = normalizeBool(deployPrBase.create_only_after_push, true);
+  const deployPrTitleTemplate = String(
+    deployPrBase.title_template || "chore(release): ${branch} -> ${base}"
+  ).trim() || "chore(release): ${branch} -> ${base}";
+  const deployPrBodyTemplate = String(
+    deployPrBase.body_template || "Automated PR from ${branch} to ${base} after deploy bundle."
+  ).trim() || "Automated PR from ${branch} to ${base} after deploy bundle.";
 
   let useFe = args.useFe;
   let useBe = args.useBe;
@@ -579,6 +602,18 @@ function main() {
     `mode = ${toTomlString(deployMode)}`,
     `final_push_on_success = ${toTomlBool(finalPushOnSuccess)}`,
     `require_clean_start_for_commits = ${toTomlBool(requireCleanStartForCommits)}`,
+    "",
+    "[deploy.pr]",
+    `enabled = ${toTomlBool(deployPrEnabled)}`,
+    `provider = ${toTomlString(deployPrProvider)}`,
+    `remote = ${toTomlString(deployPrRemote)}`,
+    `base_branch = ${toTomlString(deployPrBaseBranch)}`,
+    `head_mode = ${toTomlString(deployPrHeadMode)}`,
+    `head_branch = ${toTomlString(deployPrHeadBranch)}`,
+    `draft = ${toTomlBool(deployPrDraft)}`,
+    `create_only_after_push = ${toTomlBool(deployPrCreateOnlyAfterPush)}`,
+    `title_template = ${toTomlString(deployPrTitleTemplate)}`,
+    `body_template = ${toTomlString(deployPrBodyTemplate)}`,
     "",
     "[po]",
     `default_mode = ${toTomlString(poMode)}`,

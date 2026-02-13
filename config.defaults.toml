@@ -44,6 +44,22 @@ mode = "commit_push"
 final_push_on_success = true
 require_clean_start_for_commits = true
 
+[deploy.pr]
+enabled = false
+# github | gitlab
+provider = "github"
+remote = "origin"
+# Target branch for the PR (base)
+base_branch = "main"
+# current | fixed
+head_mode = "current"
+# Used only when head_mode = "fixed"
+head_branch = ""
+draft = false
+create_only_after_push = true
+title_template = "${type}: ${branch} -> ${base}"
+body_template = "Automated PR from ${branch} to ${base} after deploy bundle."
+
 [po]
 # intake | vision
 default_mode = "vision"
