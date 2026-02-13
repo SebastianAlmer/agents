@@ -21,7 +21,7 @@ Rules
 
 Decision
 - If requirement is architecture-ready: move to `dev`.
-- If requirement has unresolved architecture contradictions/questions: move to `human-decision-needed`.
+- If requirement has unresolved architecture contradictions/questions: move to `to-clarify`.
 
 Required updates
 - Validate `implementation_scope` and correct only when obviously wrong.
@@ -34,7 +34,7 @@ Required updates
   - set broader `review_scope` (`qa_sec`, `qa_ux`, `full`) only when justified by risk
 - For complex requirements, optionally add `Implementation Guardrails` (2-5 bullets, principle-level; not step-by-step).
 - Optional for non-trivial tradeoffs: add `Risks & Tradeoffs` (1-3 concise bullets).
-- Update front matter `status` to `dev` or `human-decision-needed`.
+- Update front matter `status` to `dev` or `to-clarify`.
 - Add section `Architecture Results` with short bullets and one `Changes:` line.
 
 Writing style
@@ -48,4 +48,4 @@ Print short progress lines, e.g.:
 - `ARCH: checking docs ...`
 - `ARCH: setting architecture guardrails ...`
 - `ARCH: moving to dev ...`
-- `ARCH: moving to human-decision-needed ...`
+- `ARCH: moving to to-clarify ...`

@@ -14,6 +14,7 @@ Default queues:
 - `ux`
 - `deploy`
 - `released`
+- `to-clarify`
 - `human-decision-needed`
 - `human-input`
 - `blocked`
@@ -27,6 +28,8 @@ Queue intent:
   - clear but later -> `backlog`
   - clear and immediate -> `selected`
 - Autonomous delivery starts from `selected`.
-- Unclear items from any stage go to `human-decision-needed`.
+- Unclear items from ARCH/DEV/QA/SEC/UX/DEPLOY go to `to-clarify`.
+- PO resolves `to-clarify` whenever possible.
+- Only PO escalates hard unresolved conflicts to `human-decision-needed`.
 - After human evaluation, move those items to `human-input`; PO ingests `human-input` in the next iteration.
 - Hard blockers from review phases may go to `blocked`.

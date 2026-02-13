@@ -112,7 +112,8 @@ function queueSummary(runtime) {
     sec: countFiles(runtime.queues.sec),
     deploy: countFiles(runtime.queues.deploy),
     released: countFiles(runtime.queues.released),
-    humanDecisionNeeded: countFiles(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify),
+    toClarify: countFiles(runtime.queues.toClarify),
+    humanDecisionNeeded: countFiles(runtime.queues.humanDecisionNeeded),
     humanInput: countFiles(runtime.queues.humanInput),
     blocked: countFiles(runtime.queues.blocked),
   };
@@ -130,6 +131,7 @@ function formatSummary(summary) {
     `sec=${summary.sec}`,
     `deploy=${summary.deploy}`,
     `released=${summary.released}`,
+    `to-clarify=${summary.toClarify}`,
     `human-decision-needed=${summary.humanDecisionNeeded}`,
     `human-input=${summary.humanInput}`,
     `blocked=${summary.blocked}`,
@@ -189,28 +191,92 @@ function log(controls, message) {
   }
 }
 
+function looksLikeInlineRequirementText(value) {
+  const text = String(value || "");
+  return text.startsWith("---") && text.includes("\n") && /(^|\n)id\s*:/i.test(text);
+}
+
+function extractRequirementId(text) {
+  const match = String(text || "").match(/(^|\n)id\s*:\s*([^\n\r]+)/i);
+  return match ? String(match[2] || "").trim() : "";
+}
+
+function uniqueQueueDirs(runtime) {
+  return Array.from(new Set(Object.values(runtime.queues || {}).filter(Boolean)));
+}
+
+function findRequirementById(runtime, id) {
+  const needle = String(id || "").trim();
+  if (!needle) {
+    return "";
+  }
+  for (const dir of uniqueQueueDirs(runtime)) {
+    const files = listQueueFiles(dir);
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(file, "utf8");
+        const match = raw.match(/(^|\n)id\s*:\s*([^\n\r]+)/i);
+        if (match && String(match[2] || "").trim() === needle) {
+          return file;
+        }
+      } catch {
+        // Ignore unreadable file and continue.
+      }
+    }
+  }
+  return "";
+}
+
+function resolveRequirementPath(runtime, sourcePath) {
+  const candidate = String(sourcePath || "");
+  if (!candidate) {
+    return "";
+  }
+  if (looksLikeInlineRequirementText(candidate)) {
+    const id = extractRequirementId(candidate);
+    if (!id) {
+      return "";
+    }
+    return findRequirementById(runtime, id);
+  }
+  try {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
 function moveToQueue(runtime, sourcePath, targetQueue, status, noteLines) {
-  if (!sourcePath || !fs.existsSync(sourcePath)) {
+  const sourceFile = resolveRequirementPath(runtime, sourcePath);
+  if (!sourceFile || !fs.existsSync(sourceFile)) {
     return false;
   }
   if (!runtime.queues[targetQueue]) {
     return false;
   }
   if (Array.isArray(noteLines) && noteLines.length > 0) {
-    appendQueueSection(sourcePath, noteLines);
+    appendQueueSection(sourceFile, noteLines);
   }
 
-  const raw = fs.readFileSync(sourcePath, "utf8");
-  const next = raw.replace(/^---\r?\n([\s\S]*?)\r?\n---/, (match, frontMatter) => {
-    if (/^status\s*:/m.test(frontMatter)) {
-      return `---\n${frontMatter.replace(/^status\s*:.*$/m, `status: ${status}`)}\n---`;
-    }
-    return `---\n${frontMatter}\nstatus: ${status}\n---`;
-  });
-  fs.writeFileSync(sourcePath, next, "utf8");
+  try {
+    const raw = fs.readFileSync(sourceFile, "utf8");
+    const next = raw.replace(/^---\r?\n([\s\S]*?)\r?\n---/, (match, frontMatter) => {
+      if (/^status\s*:/m.test(frontMatter)) {
+        return `---\n${frontMatter.replace(/^status\s*:.*$/m, `status: ${status}`)}\n---`;
+      }
+      return `---\n${frontMatter}\nstatus: ${status}\n---`;
+    });
+    fs.writeFileSync(sourceFile, next, "utf8");
+  } catch (err) {
+    process.stderr.write(`DELIVERY: moveToQueue failed for ${path.basename(String(sourceFile || sourcePath || ""))}: ${err.message || err}\n`);
+    return false;
+  }
 
-  const targetPath = path.join(runtime.queues[targetQueue], path.basename(sourcePath));
-  return moveRequirementFile(sourcePath, targetPath);
+  const targetPath = path.join(runtime.queues[targetQueue], path.basename(sourceFile));
+  return moveRequirementFile(sourceFile, targetPath);
 }
 
 function moveAll(runtime, fromQueue, toQueue, status, note) {
@@ -224,8 +290,37 @@ function moveAll(runtime, fromQueue, toQueue, status, note) {
   return moved;
 }
 
+function normalizeUnauthorizedHumanDecisionRoutes(runtime, fileNames, agentLabel) {
+  if (!runtime.queues.humanDecisionNeeded || !runtime.queues.toClarify) {
+    return 0;
+  }
+  const names = Array.isArray(fileNames)
+    ? fileNames.map((item) => path.basename(String(item || ""))).filter(Boolean)
+    : [];
+  let moved = 0;
+  for (const name of names) {
+    const candidate = path.join(runtime.queues.humanDecisionNeeded, name);
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    const ok = moveToQueue(runtime, candidate, "toClarify", "to-clarify", [
+      `Delivery runner: normalized ${agentLabel} route`,
+      `- ${agentLabel} may only route to to-clarify for clarification`,
+    ]);
+    if (ok) {
+      moved += 1;
+    }
+  }
+  return moved;
+}
+
 function pickDevScript(runtime, requirementPath) {
-  const raw = fs.readFileSync(requirementPath, "utf8");
+  const sourceFile = resolveRequirementPath(runtime, requirementPath);
+  if (!sourceFile || !fs.existsSync(sourceFile)) {
+    return path.join(runtime.agentsRoot, "dev-fs", "dev-fs.js");
+  }
+
+  const raw = fs.readFileSync(sourceFile, "utf8");
   const frontMatter = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   let scope = String(runtime.devRouting.defaultScope || "fullstack").toLowerCase();
   if (frontMatter) {
@@ -314,17 +409,18 @@ async function runArch(runtime, controls) {
     if (!file || controls.stopRequested) {
       break;
     }
-    const name = path.basename(file);
+    const sourceFile = resolveRequirementPath(runtime, file) || file;
+    const name = path.basename(sourceFile);
     log(controls, `ARCH start ${name}`);
     const result = await runNodeScript({
       scriptPath: path.join(runtime.agentsRoot, "arch", "arch.js"),
-      args: ["--auto", "--requirement", file],
+      args: ["--auto", "--requirement", sourceFile],
       cwd: runtime.agentsRoot,
       maxRetries: runtime.loops.maxRetries,
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
     });
     if (!result.ok) {
-      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
+      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
         "Delivery runner: ARCH failed",
         `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
       ]);
@@ -336,15 +432,20 @@ async function runArch(runtime, controls) {
       progressed = true;
       continue;
     }
-    if (fs.existsSync(path.join(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify, name))) {
+    if (fs.existsSync(path.join(runtime.queues.toClarify, name))) {
+      progressed = true;
+      continue;
+    }
+    if (runtime.queues.humanDecisionNeeded && fs.existsSync(path.join(runtime.queues.humanDecisionNeeded, name))) {
+      normalizeUnauthorizedHumanDecisionRoutes(runtime, [name], "ARCH");
       progressed = true;
       continue;
     }
 
-    if (fs.existsSync(file)) {
-      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
+    if (fs.existsSync(sourceFile)) {
+      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
         "Delivery runner: ARCH output fallback",
-        "- requirement not routed by agent; moved to human-decision-needed",
+        "- requirement not routed by agent; moved to to-clarify",
       ]);
     }
     progressed = true;
@@ -360,20 +461,21 @@ async function runDev(runtime, controls) {
       break;
     }
 
-    const name = path.basename(file);
-    const scriptPath = pickDevScript(runtime, file);
+    const sourceFile = resolveRequirementPath(runtime, file) || file;
+    const name = path.basename(sourceFile);
+    const scriptPath = pickDevScript(runtime, sourceFile);
     log(controls, `DEV start ${name} (${path.basename(path.dirname(scriptPath))})`);
 
     const result = await runNodeScript({
       scriptPath,
-      args: ["--auto", "--requirement", file],
+      args: ["--auto", "--requirement", sourceFile],
       cwd: runtime.agentsRoot,
       maxRetries: runtime.loops.maxRetries,
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
     });
 
     if (!result.ok) {
-      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
+      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
         "Delivery runner: DEV failed",
         `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
       ]);
@@ -385,15 +487,20 @@ async function runDev(runtime, controls) {
       progressed = true;
       continue;
     }
-    if (fs.existsSync(path.join(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify, name))) {
+    if (fs.existsSync(path.join(runtime.queues.toClarify, name))) {
+      progressed = true;
+      continue;
+    }
+    if (runtime.queues.humanDecisionNeeded && fs.existsSync(path.join(runtime.queues.humanDecisionNeeded, name))) {
+      normalizeUnauthorizedHumanDecisionRoutes(runtime, [name], "DEV");
       progressed = true;
       continue;
     }
 
-    if (fs.existsSync(file)) {
-      moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
+    if (fs.existsSync(sourceFile)) {
+      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
         "Delivery runner: DEV output fallback",
-        "- requirement not routed by agent; moved to human-decision-needed",
+        "- requirement not routed by agent; moved to to-clarify",
       ]);
     }
     progressed = true;
@@ -420,6 +527,7 @@ async function runUxBatch(runtime, controls) {
   if (countFiles(runtime.queues.ux) === 0) {
     return movedQa > 0;
   }
+  const uxNames = listQueueFiles(runtime.queues.ux).map((file) => path.basename(file));
 
   log(controls, "UX batch start");
   const result = await runNodeScript({
@@ -431,9 +539,11 @@ async function runUxBatch(runtime, controls) {
   });
 
   if (!result.ok) {
-    moveAll(runtime, "ux", "humanDecisionNeeded", "human-decision-needed", "Delivery runner: UX batch failed");
+    normalizeUnauthorizedHumanDecisionRoutes(runtime, uxNames, "UX");
+    moveAll(runtime, "ux", "toClarify", "to-clarify", "Delivery runner: UX batch failed");
     return true;
   }
+  normalizeUnauthorizedHumanDecisionRoutes(runtime, uxNames, "UX");
 
   const normalized = moveAll(
     runtime,
@@ -453,6 +563,7 @@ async function runSecBatch(runtime, controls) {
   if (countFiles(runtime.queues.sec) === 0) {
     return false;
   }
+  const secNames = listQueueFiles(runtime.queues.sec).map((file) => path.basename(file));
 
   log(controls, "SEC batch start");
   const result = await runNodeScript({
@@ -464,9 +575,11 @@ async function runSecBatch(runtime, controls) {
   });
 
   if (!result.ok) {
-    moveAll(runtime, "sec", "humanDecisionNeeded", "human-decision-needed", "Delivery runner: SEC batch failed");
+    normalizeUnauthorizedHumanDecisionRoutes(runtime, secNames, "SEC");
+    moveAll(runtime, "sec", "toClarify", "to-clarify", "Delivery runner: SEC batch failed");
     return true;
   }
+  normalizeUnauthorizedHumanDecisionRoutes(runtime, secNames, "SEC");
 
   const normalized = moveAll(
     runtime,
@@ -659,6 +772,7 @@ async function runDeployBundle(runtime, controls) {
   if (countFiles(runtime.queues.deploy) === 0) {
     return false;
   }
+  const deployNames = listQueueFiles(runtime.queues.deploy).map((file) => path.basename(file));
 
   log(controls, "DEPLOY bundle start");
   const result = await runNodeScript({
@@ -670,9 +784,11 @@ async function runDeployBundle(runtime, controls) {
   });
 
   if (!result.ok) {
-    moveAll(runtime, "deploy", "humanDecisionNeeded", "human-decision-needed", "Delivery runner: deploy bundle failed");
+    normalizeUnauthorizedHumanDecisionRoutes(runtime, deployNames, "DEPLOY");
+    moveAll(runtime, "deploy", "toClarify", "to-clarify", "Delivery runner: deploy bundle failed");
     return true;
   }
+  normalizeUnauthorizedHumanDecisionRoutes(runtime, deployNames, "DEPLOY");
 
   moveAll(runtime, "deploy", "released", "released", "Delivery runner: deploy bundle released");
   deployCommitPush(runtime, controls);
@@ -828,6 +944,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err.message || err);
+  console.error((err && err.stack) ? err.stack : (err.message || err));
   process.exit(1);
 });

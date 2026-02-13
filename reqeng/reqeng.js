@@ -81,15 +81,22 @@ async function main() {
   const refinementDir = runtime.queues.refinement;
   const backlogDir = runtime.queues.backlog;
   const selectedDir = runtime.queues.selected;
-  const decisionNeededDir = runtime.queues.humanDecisionNeeded || runtime.queues.toClarify;
+  const toClarifyDir = runtime.queues.toClarify;
+  const decisionNeededDir = runtime.queues.humanDecisionNeeded;
   const humanInputDir = runtime.queues.humanInput;
 
   let reqPath = findRequirement(requirementsRoot, repoRoot, requirement);
   if (!reqPath && !requirement) {
-    const decisionCandidate = getFirstFile(decisionNeededDir);
-    if (decisionCandidate) {
-      reqPath = decisionCandidate;
-      console.log(`REQENG: picked from human-decision-needed ${reqPath}`);
+    const clarifyCandidate = getFirstFile(toClarifyDir);
+    if (clarifyCandidate) {
+      reqPath = clarifyCandidate;
+      console.log(`REQENG: picked from to-clarify ${reqPath}`);
+    } else {
+      const decisionCandidate = getFirstFile(decisionNeededDir);
+      if (decisionCandidate) {
+        reqPath = decisionCandidate;
+        console.log(`REQENG: picked from human-decision-needed ${reqPath}`);
+      }
     }
   }
   if (reqPath && !fs.existsSync(reqPath)) {
@@ -104,7 +111,7 @@ async function main() {
   const prompt = fs.readFileSync(promptPath, "utf8");
 
   const reqPathLine = reqPath || "None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqPathLine}\nRequirements root: ${requirementsRoot}\nRefinement dir: ${refinementDir}\nBacklog dir: ${backlogDir}\nSelected dir: ${selectedDir}\nHuman-decision-needed dir: ${decisionNeededDir}\nHuman-input dir: ${humanInputDir}\nDocs dir: ${docsDir}\nReqEng routing policy (outside run.js):\n- unclear/incomplete/conflicting -> refinement (status refinement)\n- clear but not immediate -> backlog (status backlog)\n- clear and immediate -> selected (status selected)\n- if input is from human-decision-needed: discuss and move to refinement/backlog/selected or human-input\n- never route ReqEng outcomes to arch/dev/qa/sec/ux/deploy/released/human-decision-needed/blocked queues\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqPathLine}\nRequirements root: ${requirementsRoot}\nRefinement dir: ${refinementDir}\nBacklog dir: ${backlogDir}\nSelected dir: ${selectedDir}\nTo-clarify dir: ${toClarifyDir}\nHuman-decision-needed dir: ${decisionNeededDir}\nHuman-input dir: ${humanInputDir}\nDocs dir: ${docsDir}\nReqEng routing policy (outside run.js):\n- unclear/incomplete/conflicting -> refinement (status refinement)\n- clear but not immediate -> backlog (status backlog)\n- clear and immediate -> selected (status selected)\n- if input is from to-clarify or human-decision-needed: discuss and move to refinement/backlog/selected or human-input\n- never route ReqEng outcomes to arch/dev/qa/sec/ux/deploy/released/to-clarify/human-decision-needed/blocked queues\n`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("REQENG"));
 
@@ -152,6 +159,7 @@ async function main() {
   console.log(`REQENG: refinement dir ${refinementDir}`);
   console.log(`REQENG: backlog dir ${backlogDir}`);
   console.log(`REQENG: selected dir ${selectedDir}`);
+  console.log(`REQENG: to-clarify dir ${toClarifyDir}`);
   console.log(`REQENG: human-decision-needed dir ${decisionNeededDir}`);
   console.log(`REQENG: human-input dir ${humanInputDir}`);
 

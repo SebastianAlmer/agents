@@ -28,6 +28,38 @@ function listQueueFiles(dir) {
     .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
 }
 
+function looksLikeInlineRequirementText(value) {
+  const text = String(value || "");
+  return text.startsWith("---") && text.includes("\n") && /(^|\n)id\s*:/i.test(text);
+}
+
+function parseFrontMatterFromRaw(raw) {
+  const text = String(raw || "");
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) {
+    return {};
+  }
+
+  const map = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const idx = trimmed.indexOf(":");
+    if (idx === -1) {
+      continue;
+    }
+    const key = trimmed.slice(0, idx).trim().toLowerCase().replace(/-/g, "_");
+    let value = trimmed.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    map[key] = value;
+  }
+  return map;
+}
+
 function getFirstFile(dir) {
   const files = listQueueFiles(dir);
   return files.length > 0 ? files[0] : "";
@@ -68,33 +100,18 @@ function moveRequirementFile(sourcePath, targetPath) {
 }
 
 function parseFrontMatter(filePath) {
-  if (!filePath || !fs.existsSync(filePath)) {
+  if (!filePath) {
     return {};
   }
-  const raw = fs.readFileSync(filePath, "utf8");
-  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  if (!match) {
+  const candidate = String(filePath);
+  if (looksLikeInlineRequirementText(candidate)) {
+    return parseFrontMatterFromRaw(candidate);
+  }
+  if (!fs.existsSync(candidate)) {
     return {};
   }
-
-  const map = {};
-  for (const line of match[1].split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const idx = trimmed.indexOf(":");
-    if (idx === -1) {
-      continue;
-    }
-    const key = trimmed.slice(0, idx).trim().toLowerCase().replace(/-/g, "_");
-    let value = trimmed.slice(idx + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    map[key] = value;
-  }
-  return map;
+  const raw = fs.readFileSync(candidate, "utf8");
+  return parseFrontMatterFromRaw(raw);
 }
 
 function parseBusinessScore(filePath) {
@@ -151,6 +168,7 @@ function upsertMarkdownSection(filePath, heading, lines) {
     fs.writeFileSync(filePath, raw.replace(pattern, replacement), "utf8");
   } else {
     fs.writeFileSync(
+      filePath,
       raw.endsWith("\n") ? `${raw}\n${replacement}` : `${raw}\n\n${replacement}`,
       "utf8"
     );
@@ -297,7 +315,7 @@ function normalizeQueueName(value) {
     normalized === "to_clarify" ||
     normalized === "toclarify"
   ) {
-    return "humanDecisionNeeded";
+    return "toClarify";
   }
   if (
     normalized === "human-input" ||
@@ -415,11 +433,11 @@ function routeByStatus({ runtime, filePath, status, routeMap, fallbackQueue }) {
     }
   }
 
-  const fallback = normalizeQueueName(fallbackQueue || "humanDecisionNeeded");
+  const fallback = normalizeQueueName(fallbackQueue || "toClarify");
   if (runtime && runtime.queues && runtime.queues[fallback]) {
     return fallback;
   }
-  return "humanDecisionNeeded";
+  return "toClarify";
 }
 
 function resolveSourcePath(runtime, candidate) {

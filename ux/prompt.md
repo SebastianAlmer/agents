@@ -30,7 +30,7 @@ Batch mode (`Batch mode: true`)
 4) Route each requirement:
 - pass -> `sec` (status `sec`)
 - hard blocker -> `blocked` (status `blocked`)
-- unresolved/non-blocking follow-up -> `human-decision-needed` (status `human-decision-needed`)
+- unresolved/non-blocking follow-up -> `to-clarify` (status `to-clarify`)
 
 Review-only mode
 - Do not move files.
@@ -41,7 +41,7 @@ Review-only mode
 
 Single requirement mode
 - Same intent as batch, but for one requirement.
-- Route pass -> `sec`, clarify -> `human-decision-needed`, block -> `blocked`.
+- Route pass -> `sec`, clarify -> `to-clarify`, block -> `blocked`.
 
 Final mode (`Final pass: true`)
 - Perform global final UX sanity pass.

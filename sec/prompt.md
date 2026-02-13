@@ -30,7 +30,7 @@ Batch mode (`Batch mode: true`)
 4) Route each requirement file:
 - pass -> `qa` (status `qa`)
 - hard blocker -> `blocked` (status `blocked`)
-- unresolved/non-blocking follow-up -> `human-decision-needed` (status `human-decision-needed`)
+- unresolved/non-blocking follow-up -> `to-clarify` (status `to-clarify`)
 
 Single requirement mode
 1) Review one requirement security scope.
@@ -39,7 +39,7 @@ Single requirement mode
 4) Route:
 - pass -> `qa`
 - hard blocker -> `blocked`
-- clarify -> `human-decision-needed`
+- clarify -> `to-clarify`
 
 Review-only mode
 - Do not move files.

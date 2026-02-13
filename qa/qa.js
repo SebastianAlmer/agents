@@ -183,7 +183,7 @@ async function main() {
   const secDir = runtime.queues.sec;
   const batchQueueName = batchQueue === "qa" ? "qa" : "sec";
   const batchQueueDir = batchQueueName === "qa" ? qaDir : secDir;
-  const clarifyDir = runtime.queues.humanDecisionNeeded || runtime.queues.toClarify;
+  const clarifyDir = runtime.queues.toClarify;
   const blockedDir = runtime.queues.blocked;
   const releasedDir = runtime.queues.released;
 
@@ -242,7 +242,7 @@ async function main() {
   console.log(`QA: quick-review ${quickReview}`);
   console.log(`QA: batch-tests ${batchTests}`);
   console.log(`QA: sec dir ${secDir}`);
-  console.log(`QA: human-decision-needed dir ${clarifyDir}`);
+  console.log(`QA: to-clarify dir ${clarifyDir}`);
   console.log(`QA: blocked dir ${blockedDir}`);
 
   const promptPath = path.join(agentRoot, "prompt.md");
@@ -262,7 +262,7 @@ async function main() {
   const batchListText = batchTargets.length > 0
     ? batchTargets.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nBatch queue: ${batchQueueName}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nHuman-decision-needed dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
+  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nBatch queue: ${batchQueueName}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("QA"));

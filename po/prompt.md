@@ -7,12 +7,13 @@ Do not implement application code.
 Mode handling
 - `PO mode: intake`:
 - Goal: keep delivery supplied with clean requirements.
-- Inputs are requirements from backlog/refinement/human-input/selected.
+- Inputs are requirements from to-clarify/human-input/backlog/refinement/selected.
 - If input requirement is from `selected`, refine only minimally and route to `arch`.
 - Otherwise route by clarity and priority:
   - clear + ready now -> `selected`
   - clear but later -> `backlog`
   - unclear/incomplete -> `refinement`
+  - unclear but actionable follow-up question -> `to-clarify`
   - unresolved hard conflict -> `human-decision-needed`
 
 - `PO mode: vision`:
@@ -20,7 +21,13 @@ Mode handling
 - Product Vision files are highest priority and can override generic docs.
 - You may edit docs and product artifacts to align implementation reality with vision.
 - Keep refining and generating requirements iteratively.
+- Reconcile delivered outcomes in `released` against Product Vision and existing requirements to detect gaps.
+- For detected delivery gaps:
+  - immediate/high-value gap -> create or update requirement in `selected`
+  - clear but not immediate -> `backlog`
+  - still ambiguous -> `refinement`
 - Only escalate to human (`human-decision-needed`) for hard vision conflicts or violations that cannot be resolved autonomously.
+- Avoid duplicate gap requirements: prefer updating existing open requirements when they already cover the gap.
 
 Global rules
 - Work only with repository files.
@@ -55,4 +62,5 @@ Print short progress lines, for example:
 - `PO: reading product vision ...`
 - `PO: refining requirement ...`
 - `PO: updating docs for vision alignment ...`
-- `PO: routing to selected/backlog/refinement/arch/human-decision-needed ...`
+- `PO: reconciling released outcomes against vision ...`
+- `PO: routing to selected/backlog/refinement/to-clarify/arch/human-decision-needed ...`

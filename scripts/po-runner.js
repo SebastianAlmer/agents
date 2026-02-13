@@ -160,7 +160,8 @@ function queueSummary(runtime) {
     sec: countFiles(runtime.queues.sec),
     deploy: countFiles(runtime.queues.deploy),
     released: countFiles(runtime.queues.released),
-    humanDecisionNeeded: countFiles(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify),
+    toClarify: countFiles(runtime.queues.toClarify),
+    humanDecisionNeeded: countFiles(runtime.queues.humanDecisionNeeded),
     humanInput: countFiles(runtime.queues.humanInput),
     blocked: countFiles(runtime.queues.blocked),
   };
@@ -178,6 +179,7 @@ function formatSummary(summary) {
     `sec=${summary.sec}`,
     `deploy=${summary.deploy}`,
     `released=${summary.released}`,
+    `to-clarify=${summary.toClarify}`,
     `human-decision-needed=${summary.humanDecisionNeeded}`,
     `human-input=${summary.humanInput}`,
     `blocked=${summary.blocked}`,
@@ -253,8 +255,8 @@ function planningQueueMap(runtime) {
     ["refinement", runtime.queues.refinement],
     ["backlog", runtime.queues.backlog],
     ["selected", runtime.queues.selected],
+    ["toClarify", runtime.queues.toClarify],
     ["humanInput", runtime.queues.humanInput],
-    ["humanDecisionNeeded", runtime.queues.humanDecisionNeeded || runtime.queues.toClarify],
     ["wontDo", runtime.queues.wontDo],
   ];
 }
@@ -355,6 +357,14 @@ function writeVisionClarification(runtime, reason) {
 }
 
 function selectIntakeSource(runtime) {
+  const toClarifyFile = getFirstFile(runtime.queues.toClarify);
+  if (toClarifyFile) {
+    return { path: toClarifyFile, queue: "toClarify" };
+  }
+  const humanInputFile = getFirstFile(runtime.queues.humanInput);
+  if (humanInputFile) {
+    return { path: humanInputFile, queue: "humanInput" };
+  }
   const backlogFile = getFirstFile(runtime.queues.backlog);
   if (backlogFile) {
     return { path: backlogFile, queue: "backlog" };
@@ -371,7 +381,11 @@ function normalizePoTarget(queueName) {
   if (
     normalized === "to-clarify" ||
     normalized === "to_clarify" ||
-    normalized === "toclarify" ||
+    normalized === "toclarify"
+  ) {
+    return "toClarify";
+  }
+  if (
     normalized === "human-decision-needed" ||
     normalized === "human decision needed" ||
     normalized === "decision-needed" ||
@@ -398,7 +412,7 @@ function normalizePoTarget(queueName) {
 function routeFromPo(runtime, filePath, status) {
   const routeMap = {
     pass: "selected",
-    clarify: "humanDecisionNeeded",
+    clarify: "toClarify",
     block: "humanDecisionNeeded",
   };
   return routeByStatus({
@@ -406,7 +420,7 @@ function routeFromPo(runtime, filePath, status) {
     filePath,
     status,
     routeMap,
-    fallbackQueue: "humanDecisionNeeded",
+    fallbackQueue: "toClarify",
   });
 }
 
@@ -426,12 +440,15 @@ function queueStatusByTarget(targetQueue) {
   if (targetQueue === "humanInput") {
     return "human-input";
   }
+  if (targetQueue === "toClarify") {
+    return "to-clarify";
+  }
   return "human-decision-needed";
 }
 
 function moveWithFallback(runtime, sourcePath, targetQueue, status, notes) {
   const fileName = path.basename(sourcePath);
-  const queueName = runtime.queues[targetQueue] ? targetQueue : "humanDecisionNeeded";
+  const queueName = runtime.queues[targetQueue] ? targetQueue : "toClarify";
   const targetPath = path.join(runtime.queues[queueName], fileName);
 
   if (Array.isArray(notes) && notes.length > 0) {
@@ -444,11 +461,11 @@ function moveWithFallback(runtime, sourcePath, targetQueue, status, notes) {
     return true;
   }
 
-  const fallbackPath = path.join(runtime.queues.humanDecisionNeeded || runtime.queues.toClarify, fileName);
-  setFrontMatterStatus(sourcePath, "human-decision-needed");
+  const fallbackPath = path.join(runtime.queues.toClarify, fileName);
+  setFrontMatterStatus(sourcePath, "to-clarify");
   appendQueueSection(sourcePath, [
     "PO runner routing fallback",
-    `- failed to move to ${queueName}, forced to human-decision-needed`,
+    `- failed to move to ${queueName}, forced to to-clarify`,
   ]);
   return moveRequirementFile(sourcePath, fallbackPath);
 }
@@ -476,7 +493,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls) {
     appendQueueSection(currentPath, [
       "PO runner: execution failure",
       `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
-      "- action: route to human-decision-needed",
+      "- action: route to to-clarify",
     ]);
   }
 
@@ -538,6 +555,18 @@ async function processHumanInput(runtime, controls) {
   return progressed;
 }
 
+async function processToClarify(runtime, controls) {
+  const filePath = getFirstFile(runtime.queues.toClarify);
+  if (!filePath) {
+    return false;
+  }
+  const progressed = await runPoIntakeOnFile(runtime, filePath, controls);
+  if (progressed) {
+    log(controls, `processed to-clarify ${path.basename(filePath)}`);
+  }
+  return progressed;
+}
+
 async function fillSelected(runtime, highWatermark, controls) {
   let progressed = false;
   while (!controls.stopRequested && countFiles(runtime.queues.selected) < highWatermark) {
@@ -563,10 +592,24 @@ function snapshotHash(runtime) {
   return parts.sort().join("\n");
 }
 
+function releasedSignature(runtime) {
+  const files = listQueueFiles(runtime.queues.released);
+  if (files.length === 0) {
+    return "";
+  }
+  const parts = [];
+  for (const file of files) {
+    const stat = fs.statSync(file);
+    parts.push(`${path.basename(file)}|${stat.size}|${Math.round(stat.mtimeMs)}`);
+  }
+  return parts.sort().join("\n");
+}
+
 async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, once) {
   while (!controls.stopRequested) {
     const before = snapshotHash(runtime);
 
+    await processToClarify(runtime, controls);
     await processHumanInput(runtime, controls);
 
     const selectedCount = countFiles(runtime.queues.selected);
@@ -593,18 +636,30 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
   const baseline = buildPlanningSnapshot(runtime);
   let previous = baseline;
   let stableCycles = 0;
-  let cycles = 0;
+  let planningCycles = 0;
   let visionComplete = false;
+  let lastReleased = releasedSignature(runtime);
 
   while (!controls.stopRequested) {
     const before = snapshotHash(runtime);
 
+    await processToClarify(runtime, controls);
     await processHumanInput(runtime, controls);
 
     const selectedCount = countFiles(runtime.queues.selected);
-    if (selectedCount < highWatermark && !visionComplete) {
+    const currentReleased = releasedSignature(runtime);
+    const releasedChanged = currentReleased !== lastReleased;
+    if (releasedChanged) {
+      lastReleased = currentReleased;
+      log(controls, "released changed: triggering PO vision reconciliation pass");
+    }
+
+    const planningFillNeeded = selectedCount < highWatermark && !visionComplete;
+    if (planningFillNeeded || releasedChanged) {
       const cycle = await runVisionCycle(runtime, controls);
-      cycles += 1;
+      if (planningFillNeeded) {
+        planningCycles += 1;
+      }
 
       const current = buildPlanningSnapshot(runtime);
       const changed = current.hash !== previous.hash;
@@ -634,18 +689,20 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
 
       if (cycle.decision.visionComplete && stableCycles >= stableTarget) {
         visionComplete = true;
-        log(controls, `vision complete reached after ${cycles} cycle(s)`);
+        log(controls, `vision complete reached after ${planningCycles} planning cycle(s)`);
+      } else if (!cycle.decision.visionComplete) {
+        visionComplete = false;
       }
 
-      if (cycles >= maxCycles && !visionComplete) {
-        writeVisionClarification(runtime, `PO vision reached max cycles (${maxCycles}) without convergence.`);
-        cycles = 0;
+      if (planningFillNeeded && planningCycles >= maxCycles && !visionComplete) {
+        writeVisionClarification(runtime, `PO vision reached max planning cycles (${maxCycles}) without convergence.`);
+        planningCycles = 0;
         stableCycles = 0;
       }
 
       log(
         controls,
-        `vision cycle=${cycles} changed=${changed} stable=${stableCycles} new_req_total=${newReqTotal}`
+        `vision cycle reason=${planningFillNeeded ? "planning-fill" : "released-reconcile"} planning_cycles=${planningCycles} changed=${changed} stable=${stableCycles} new_req_total=${newReqTotal}`
       );
     }
 

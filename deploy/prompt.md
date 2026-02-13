@@ -32,7 +32,7 @@ Batch mode (`Final pass: false`, `Batch mode: true`)
    - add/update concise `Deploy Results` with a short batch summary
    - set status to `released` and move to `released` when checks pass
 5) If a requirement is blocked by a hard deploy issue, move it to `blocked` with concise reason.
-6) If requirement-specific clarification is needed, move to `human-decision-needed` with concise questions.
+6) If requirement-specific clarification is needed, move to `to-clarify` with concise questions.
 
 Final mode (`Final pass: true`)
 - Perform global final deploy-readiness sanity pass.
@@ -48,5 +48,5 @@ Logging
 Print short progress lines, e.g.:
 - `DEPLOY: reading ...`
 - `DEPLOY: running batch deploy checks ...`
-- `DEPLOY: moving to released/blocked/human-decision-needed ...`
+- `DEPLOY: moving to released/blocked/to-clarify ...`
 - `DEPLOY: final pass summary ...`
