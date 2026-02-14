@@ -59,6 +59,7 @@ Bundle behavior:
 - Priority uses `business_score` in requirement front matter.
 - Default bundle range: 5-20 (configurable).
 - Agents run once per bundle in downstream phase.
+- DEV has a watchdog + recovery ladder (`same-thread retry -> fresh-thread retry -> route to to-clarify`) to prevent infinite loops on a single requirement.
 - QA/UAT are non-blocking advisory gates for deploy.
 - `P0/P1` findings are auto-routed to `selected` as hotfix requirements.
 - `P2/P3` findings are auto-routed to `backlog`.
@@ -131,6 +132,7 @@ Important sections:
 - `[loops]`: bundle sizes, polling, retry policy
 - `[po]`: vision defaults and limits
 - `[arch]`: trigger policy, risk/scope guards, docs digest behavior, retries
+- `[dev]`: watchdog timeout + recovery retries for stuck DEV runs
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)
 - `[deploy.pr]`: optional PR creation after deploy push (`enabled`, `provider`, `remote`, `base_branch`, `head_mode`, `head_branch`, templates). Template vars: `${type}` (`feat|fix|chore` inferred from branch), `${branch}`, `${base}`, `${remote}`
 - `[dev_routing]`, `[dev_agents]`

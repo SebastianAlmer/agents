@@ -506,6 +506,16 @@ function main() {
     ? baseArch.digest_max_headings_per_file
     : 20;
   const archMaxRetries = Number.isFinite(baseArch.max_retries) ? baseArch.max_retries : 0;
+  const baseDev = base.dev && typeof base.dev === "object" ? base.dev : {};
+  const devRunTimeoutSeconds = Number.isFinite(baseDev.run_timeout_seconds)
+    ? Math.max(0, baseDev.run_timeout_seconds)
+    : 900;
+  const devSameThreadRetries = Number.isFinite(baseDev.same_thread_retries)
+    ? Math.max(0, baseDev.same_thread_retries)
+    : 1;
+  const devFreshThreadRetries = Number.isFinite(baseDev.fresh_thread_retries)
+    ? Math.max(0, baseDev.fresh_thread_retries)
+    : 1;
 
   const qaChecks = args.qaChecks.length > 0
     ? args.qaChecks
@@ -648,6 +658,11 @@ function main() {
     `use_be = ${toTomlBool(useBe)}`,
     `use_fs = ${toTomlBool(useFs)}`,
     "",
+    "[dev]",
+    `run_timeout_seconds = ${toTomlInt(devRunTimeoutSeconds)}`,
+    `same_thread_retries = ${toTomlInt(devSameThreadRetries)}`,
+    `fresh_thread_retries = ${toTomlInt(devFreshThreadRetries)}`,
+    "",
     "[qa]",
     `mandatory_checks = ${toTomlArray(qaChecks)}`,
     "",
@@ -695,6 +710,7 @@ function main() {
   console.log(`- arch.routing_mode: ${archRoutingMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
+  console.log(`- dev watchdog: timeout=${devRunTimeoutSeconds}s same_thread_retries=${devSameThreadRetries} fresh_thread_retries=${devFreshThreadRetries}`);
   console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, uat=${models.uat}, maint=${models.maint}, ux=${models.ux}, deploy=${models.deploy}`);
   console.log(`- review: strategy=${reviewStrategy}, parallel=${reviewParallel}, default_risk=${reviewDefaultRisk}, medium_scope_policy=${reviewMediumScopePolicy}`);
   console.log("If you change dev_routing mode later, run setup-project again to realign defaults.");

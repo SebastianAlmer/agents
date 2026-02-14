@@ -108,6 +108,12 @@ use_fe = false
 use_be = false
 use_fs = true
 
+[dev]
+# DEV watchdog + recovery ladder.
+run_timeout_seconds = 900
+same_thread_retries = 1
+fresh_thread_retries = 1
+
 [qa]
 # Project-specific QA baseline checks. Add checks that exist in your target repository.
 mandatory_checks = []

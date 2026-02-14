@@ -345,7 +345,16 @@ function getActivePauseState(agentsRoot) {
   };
 }
 
-async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDelaySeconds, stopSignal }) {
+async function runNodeScript({
+  scriptPath,
+  args,
+  cwd,
+  env,
+  maxRetries,
+  retryDelaySeconds,
+  stopSignal,
+  timeoutSeconds,
+}) {
   const retries = Math.max(0, Number.parseInt(String(maxRetries || 0), 10));
   const attempts = retries + 1;
   let lastError = "";
@@ -388,6 +397,7 @@ async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDela
       env: { ...process.env, ...env },
       stdio: ["ignore", "inherit", "pipe"],
     });
+    const timeoutMs = Math.max(0, Number.parseInt(String(timeoutSeconds || 0), 10)) * 1000;
     let stopCleanup = null;
     const requestStop = () => {
       if (proc.exitCode !== null || proc.killed) {
@@ -431,6 +441,18 @@ async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDela
     }
 
     let stderrText = "";
+    let timedOut = false;
+    let timeoutTimer = null;
+    if (timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        requestStop();
+      }, timeoutMs);
+      if (typeof timeoutTimer.unref === "function") {
+        timeoutTimer.unref();
+      }
+    }
+
     proc.stderr.on("data", (chunk) => {
       stderrText += String(chunk);
       if (stderrText.length > 120000) {
@@ -439,12 +461,24 @@ async function runNodeScript({ scriptPath, args, cwd, env, maxRetries, retryDela
     });
 
     const exitCode = await new Promise((resolve) => proc.once("close", resolve));
+    if (timeoutTimer) {
+      clearTimeout(timeoutTimer);
+    }
     if (typeof stopCleanup === "function") {
       stopCleanup();
     }
 
     if (isStopped()) {
       return { ok: false, aborted: true, stderr: stderrText || "stopped", exitCode: exitCode || 130 };
+    }
+    if (timedOut) {
+      const timeoutText = `timeout after ${Math.max(0, Number.parseInt(String(timeoutSeconds || 0), 10))}s`;
+      return {
+        ok: false,
+        timedOut: true,
+        stderr: stderrText ? `${stderrText}\n${timeoutText}` : timeoutText,
+        exitCode: exitCode || 124,
+      };
     }
 
     if (exitCode === 0) {

@@ -18,6 +18,7 @@ const {
   getActivePauseState,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
+const { getThreadFilePath, readThreadId, clearThreadState } = require("../lib/agent");
 
 function parseArgs(argv) {
   const args = {
@@ -658,6 +659,80 @@ function pickDevScript(runtime, requirementPath) {
   return path.join(runtime.agentsRoot, "dev", "dev.js");
 }
 
+function devScopeFromScriptPath(scriptPath) {
+  const role = path.basename(path.dirname(String(scriptPath || ""))).toLowerCase();
+  if (role === "dev-fe") {
+    return "frontend";
+  }
+  if (role === "dev-be") {
+    return "backend";
+  }
+  return "fullstack";
+}
+
+function deriveDevThreadKey(requirementPath, scriptPath) {
+  const base = path.basename(String(requirementPath || ""), path.extname(String(requirementPath || "")));
+  if (!base) {
+    return "";
+  }
+  const scope = devScopeFromScriptPath(scriptPath);
+  return `${scope}-${base}`;
+}
+
+function resetDevThread(runtime, scriptPath, requirementPath, controls, reason) {
+  const agentRoot = path.dirname(String(scriptPath || ""));
+  const threadKey = deriveDevThreadKey(requirementPath, scriptPath);
+  const threadFile = getThreadFilePath({
+    agentsRoot: runtime.agentsRoot,
+    agentRoot,
+    auto: true,
+    threadKey,
+  });
+  const threadId = readThreadId(threadFile);
+  const hasThreadState = Boolean((threadId && threadId.trim()) || fs.existsSync(threadFile));
+  if (!hasThreadState) {
+    log(
+      controls,
+      `DEV recovery: no thread state to reset for ${path.basename(requirementPath || "")}`
+    );
+    return false;
+  }
+  clearThreadState({
+    threadFile,
+    threadId,
+    agentsRoot: runtime.agentsRoot,
+  });
+  log(
+    controls,
+    `DEV recovery: reset thread for ${path.basename(requirementPath || "")} key=${threadKey || "auto"} reason=${reason}`
+  );
+  return true;
+}
+
+function resolveDevHandoff(runtime, sourceFile, name, controls) {
+  const qaPath = path.join(runtime.queues.qa, name);
+  if (fs.existsSync(qaPath)) {
+    removeDuplicateSourceIfTargetExists(sourceFile, qaPath, controls, "DEV handoff");
+    return { progressed: true, routedTo: "qa" };
+  }
+  const clarifyPath = path.join(runtime.queues.toClarify, name);
+  if (fs.existsSync(clarifyPath)) {
+    removeDuplicateSourceIfTargetExists(sourceFile, clarifyPath, controls, "DEV handoff");
+    return { progressed: true, routedTo: "to-clarify" };
+  }
+  const humanDecisionPath = runtime.queues.humanDecisionNeeded
+    ? path.join(runtime.queues.humanDecisionNeeded, name)
+    : "";
+  if (humanDecisionPath && fs.existsSync(humanDecisionPath)) {
+    removeDuplicateSourceIfTargetExists(sourceFile, humanDecisionPath, controls, "DEV handoff");
+    return { progressed: true, routedTo: "human-decision-needed" };
+  }
+  if (recoverDevMisroute(runtime, name)) {
+    return { progressed: true, routedTo: "misroute-recovery" };
+  }
+  return { progressed: false, routedTo: "" };
+}
+
 function planningInProgress(runtime) {
   return countFiles(runtime.queues.arch) > 0 || countFiles(runtime.queues.dev) > 0;
 }
@@ -826,6 +901,9 @@ async function runArch(runtime, controls) {
 
 async function runDev(runtime, controls) {
   let progressed = false;
+  const devTimeoutSeconds = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.runTimeoutSeconds || 0), 10));
+  const sameThreadRetriesMax = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.sameThreadRetries || 0), 10));
+  const freshThreadRetriesMax = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.freshThreadRetries || 0), 10));
   while (true) {
     const file = listQueueFiles(runtime.queues.dev)[0];
     if (!file || controls.stopRequested) {
@@ -835,65 +913,98 @@ async function runDev(runtime, controls) {
     const sourceFile = resolveRequirementPath(runtime, file) || file;
     const name = path.basename(sourceFile);
     const scriptPath = pickDevScript(runtime, sourceFile);
-    log(controls, `DEV start ${name} (${path.basename(path.dirname(scriptPath))})`);
+    let sameThreadRetriesUsed = 0;
+    let freshThreadRetriesUsed = 0;
+    let done = false;
 
-    const result = await runNodeScript({
-      scriptPath,
-      args: ["--auto", "--requirement", sourceFile],
-      cwd: runtime.agentsRoot,
-      maxRetries: runtime.loops.maxRetries,
-      retryDelaySeconds: runtime.loops.retryDelaySeconds,
-      stopSignal: getStopSignal(controls),
-    });
+    while (!done && !controls.stopRequested) {
+      const activeSource = resolveRequirementPath(runtime, sourceFile) || sourceFile;
+      log(
+        controls,
+        `DEV start ${name} (${path.basename(path.dirname(scriptPath))}) attempt=${sameThreadRetriesUsed + freshThreadRetriesUsed + 1}`
+      );
 
-    if (!result.ok) {
-      if (result.aborted && controls.stopRequested) {
+      const result = await runNodeScript({
+        scriptPath,
+        args: ["--auto", "--requirement", activeSource],
+        cwd: runtime.agentsRoot,
+        maxRetries: 0,
+        retryDelaySeconds: runtime.loops.retryDelaySeconds,
+        stopSignal: getStopSignal(controls),
+        timeoutSeconds: devTimeoutSeconds,
+      });
+
+      if (!result.ok && result.aborted && controls.stopRequested) {
+        done = true;
         break;
       }
-      if (result.paused) {
+      if (!result.ok && result.paused) {
         log(controls, `DEV paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+        done = true;
         break;
       }
-      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
-        "Delivery runner: DEV failed",
-        `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
-      ]);
-      progressed = true;
-      continue;
+
+      const handoff = resolveDevHandoff(runtime, activeSource, name, controls);
+      if (handoff.progressed) {
+        progressed = true;
+        done = true;
+        break;
+      }
+
+      const reason = !result.ok
+        ? (result.timedOut
+          ? `timeout after ${devTimeoutSeconds}s`
+          : (result.stderr || "execution failed").slice(0, 700))
+        : "agent returned success but did not route requirement to qa/to-clarify";
+
+      if (sameThreadRetriesUsed < sameThreadRetriesMax) {
+        sameThreadRetriesUsed += 1;
+        log(
+          controls,
+          `DEV recovery retry same-thread ${sameThreadRetriesUsed}/${sameThreadRetriesMax} req=${name} reason=${reason}`
+        );
+        continue;
+      }
+
+      if (freshThreadRetriesUsed < freshThreadRetriesMax) {
+        freshThreadRetriesUsed += 1;
+        sameThreadRetriesUsed = 0;
+        resetDevThread(runtime, scriptPath, activeSource, controls, reason);
+        log(
+          controls,
+          `DEV recovery retry fresh-thread ${freshThreadRetriesUsed}/${freshThreadRetriesMax} req=${name}`
+        );
+        continue;
+      }
+
+      if (fs.existsSync(activeSource)) {
+        const moved = moveToQueue(runtime, activeSource, "toClarify", "to-clarify", [
+          "Delivery runner: DEV watchdog escalation",
+          `- retries exhausted (same-thread=${sameThreadRetriesMax}, fresh-thread=${freshThreadRetriesMax})`,
+          `- last reason: ${reason}`,
+          "- moved to to-clarify so remaining bundle can continue",
+        ]);
+        if (!moved) {
+          const fallbackTarget = path.join(runtime.queues.toClarify, path.basename(activeSource));
+          moveRequirementFile(activeSource, fallbackTarget);
+          appendQueueSection(fallbackTarget, [
+            "Delivery runner: DEV watchdog forced move",
+            `- last reason: ${reason}`,
+          ]);
+        }
+        progressed = true;
+      } else {
+        log(
+          controls,
+          `DEV watchdog: requirement source disappeared without handoff req=${name}; skipping to keep flow unblocked`
+        );
+      }
+      done = true;
     }
 
-    const qaPath = path.join(runtime.queues.qa, name);
-    if (fs.existsSync(qaPath)) {
-      removeDuplicateSourceIfTargetExists(sourceFile, qaPath, controls, "DEV handoff");
-      progressed = true;
-      continue;
+    if (controls.stopRequested) {
+      break;
     }
-    const clarifyPath = path.join(runtime.queues.toClarify, name);
-    if (fs.existsSync(clarifyPath)) {
-      removeDuplicateSourceIfTargetExists(sourceFile, clarifyPath, controls, "DEV handoff");
-      progressed = true;
-      continue;
-    }
-    const humanDecisionPath = runtime.queues.humanDecisionNeeded
-      ? path.join(runtime.queues.humanDecisionNeeded, name)
-      : "";
-    if (humanDecisionPath && fs.existsSync(humanDecisionPath)) {
-      removeDuplicateSourceIfTargetExists(sourceFile, humanDecisionPath, controls, "DEV handoff");
-      progressed = true;
-      continue;
-    }
-    if (recoverDevMisroute(runtime, name)) {
-      progressed = true;
-      continue;
-    }
-
-    if (fs.existsSync(sourceFile)) {
-      moveToQueue(runtime, sourceFile, "toClarify", "to-clarify", [
-        "Delivery runner: DEV output fallback",
-        "- requirement not routed by agent; moved to to-clarify",
-      ]);
-    }
-    progressed = true;
   }
   return progressed;
 }
