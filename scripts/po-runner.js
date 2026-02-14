@@ -25,6 +25,8 @@ const {
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
+const PO_IDLE_WAIT_MS = 5 * 60 * 1000;
+
 function normalizePoMode(value, fallback = "vision") {
   const normalized = String(value || fallback || "").trim().toLowerCase();
   if (["vision", "product-vision", "pos"].includes(normalized)) {
@@ -327,6 +329,100 @@ function logWaitCheck(runtime, state, controls, highWatermark) {
     controls,
     `wait-check reason=${reason} selected=${selectedCount} arch=${archCount} dev=${devCount} next-check<=${Math.max(1, runtime.loops.poPollSeconds)}s`
   );
+}
+
+function findVisionOpenDecisionHint(runtime) {
+  const files = Array.isArray(runtime.productVisionFiles) ? runtime.productVisionFiles : [];
+  const candidates = files.filter((filePath) => {
+    const base = path.basename(String(filePath || "")).toLowerCase();
+    return /^09[._-]/.test(base) || /open[ _-]?decisions?/.test(base);
+  });
+
+  let best = { file: "", count: 0 };
+  for (const filePath of candidates) {
+    if (!filePath || !fs.existsSync(filePath)) {
+      continue;
+    }
+    try {
+      const raw = fs.readFileSync(filePath, "utf8");
+      const unchecked = (raw.match(/^\s*[-*]\s*\[\s\]\s+/gm) || []).length;
+      const openQuestionBullets = (raw.match(/^\s*[-*]\s+.*\?\s*$/gm) || []).length;
+      const unresolvedTagged = (raw.match(/^\s*[-*]\s+.*\b(open|todo|tbd|pending)\b.*$/gim) || []).length;
+      const unresolved = Math.max(unchecked, openQuestionBullets, unresolvedTagged);
+      if (unresolved > best.count) {
+        best = { file: path.basename(filePath), count: unresolved };
+      } else if (!best.file) {
+        best = { file: path.basename(filePath), count: unresolved };
+      }
+    } catch {
+      // ignore unreadable file and continue
+    }
+  }
+  return best;
+}
+
+function waitReason(runtime, state, highWatermark, mode) {
+  const selected = countFiles(runtime.queues.selected);
+  const arch = countFiles(runtime.queues.arch);
+  const dev = countFiles(runtime.queues.dev);
+  const planningBusy = arch > 0 || dev > 0;
+  const toClarify = countFiles(runtime.queues.toClarify);
+  const humanInput = countFiles(runtime.queues.humanInput);
+  const backlog = countFiles(runtime.queues.backlog);
+  const refinement = countFiles(runtime.queues.refinement);
+  const humanDecisionNeeded = countFiles(runtime.queues.humanDecisionNeeded);
+  const intakeCandidates = listIntakeCandidates(runtime).length;
+
+  let reason = "no actionable intake work right now";
+  if (planningBusy) {
+    reason = `planning busy (arch=${arch}, dev=${dev})`;
+  } else if (state && state.bundleLocked) {
+    reason = `bundle locked while delivery drains (selected=${selected})`;
+  } else if (selected >= highWatermark) {
+    reason = `selected buffer at target (${selected}/${highWatermark})`;
+  } else if (mode === "vision") {
+    const visionHint = findVisionOpenDecisionHint(runtime);
+    if (visionHint.count > 0) {
+      reason = `vision has open decisions (${visionHint.file}: ${visionHint.count})`;
+    } else if (intakeCandidates > 0) {
+      reason = `intake candidates present but guarded/cooling down (${intakeCandidates})`;
+    } else {
+      reason = "waiting for new planning input or released changes";
+    }
+  } else if (intakeCandidates > 0) {
+    reason = `intake candidates present but guarded/cooling down (${intakeCandidates})`;
+  } else {
+    reason = "waiting for new intake input";
+  }
+
+  const extras = [];
+  if (toClarify > 0) {
+    extras.push(`to-clarify=${toClarify}`);
+  }
+  if (humanInput > 0) {
+    extras.push(`human-input=${humanInput}`);
+  }
+  if (backlog > 0) {
+    extras.push(`backlog=${backlog}`);
+  }
+  if (refinement > 0) {
+    extras.push(`refinement=${refinement}`);
+  }
+  if (humanDecisionNeeded > 0) {
+    extras.push(`human-decision-needed=${humanDecisionNeeded}`);
+  }
+  return {
+    reason,
+    extras,
+  };
+}
+
+async function sleepWithWaitInfo(runtime, controls, state, highWatermark, mode) {
+  const info = waitReason(runtime, state, highWatermark, mode);
+  const minutes = Math.max(1, Math.round(PO_IDLE_WAIT_MS / 60000));
+  const suffix = info.extras.length > 0 ? ` | ${info.extras.join(" ")}` : "";
+  process.stdout.write(`PO-RUNNER: waiting ${minutes}m - ${info.reason}${suffix}\n`);
+  await sleep(PO_IDLE_WAIT_MS);
 }
 
 function buildBundleId() {
@@ -1320,7 +1416,7 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
 
     const after = snapshotHash(runtime);
     if (before === after) {
-      await sleep(Math.max(1, runtime.loops.poPollSeconds) * 1000);
+      await sleepWithWaitInfo(runtime, controls, state, highWatermark, "intake");
     }
   }
 }
@@ -1448,7 +1544,7 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
 
     const after = snapshotHash(runtime);
     if (before === after) {
-      await sleep(Math.max(1, runtime.loops.poPollSeconds) * 1000);
+      await sleepWithWaitInfo(runtime, controls, state, highWatermark, "vision");
     }
   }
 }

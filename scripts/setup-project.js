@@ -545,6 +545,7 @@ function main() {
     dev_fs: "gpt-5.3-codex-spark",
     qa: "gpt-5.3-codex-spark",
     uat: "gpt-5.3-codex-spark",
+    maint: "gpt-5.3-codex-spark",
     ux: "gpt-5.3-codex-spark",
     deploy: "gpt-5.3-codex-spark",
   };
@@ -667,6 +668,7 @@ function main() {
     `dev_fs = ${toTomlString(models.dev_fs)}`,
     `qa = ${toTomlString(models.qa)}`,
     `uat = ${toTomlString(models.uat)}`,
+    `maint = ${toTomlString(models.maint)}`,
     `ux = ${toTomlString(models.ux)}`,
     `deploy = ${toTomlString(models.deploy)}`,
     "",
@@ -693,7 +695,7 @@ function main() {
   console.log(`- arch.routing_mode: ${archRoutingMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
-  console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, uat=${models.uat}, ux=${models.ux}, deploy=${models.deploy}`);
+  console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, uat=${models.uat}, maint=${models.maint}, ux=${models.ux}, deploy=${models.deploy}`);
   console.log(`- review: strategy=${reviewStrategy}, parallel=${reviewParallel}, default_risk=${reviewDefaultRisk}, medium_scope_policy=${reviewMediumScopePolicy}`);
   console.log("If you change dev_routing mode later, run setup-project again to realign defaults.");
 }

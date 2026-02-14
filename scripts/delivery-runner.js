@@ -1017,6 +1017,12 @@ function uatFinalGatePath(runtime) {
   return path.join(dir, "uat-full-regression-gate.json");
 }
 
+function maintDecisionPath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "maint");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "post-deploy-decision.json");
+}
+
 function parseGate(filePath) {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -1493,6 +1499,22 @@ function createUatExecutionFailureGate() {
   };
 }
 
+function createMaintExecutionFailureGate() {
+  return {
+    status: "fail",
+    summary: "MAINT hygiene scan execution failed. Inspect logs and rerun.",
+    blocking_findings: ["P2: MAINT hygiene scan execution failed. Inspect logs and rerun."],
+    findings: [
+      {
+        severity: "P2",
+        title: "MAINT hygiene scan execution failed",
+        details: "Runner could not complete repository hygiene analysis.",
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
 function gateTemplateJson() {
   return JSON.stringify(qaGateTemplate(), null, 2);
 }
@@ -1641,6 +1663,69 @@ async function runUatFullRegression(runtime, controls) {
   applyGateOutcomes(runtime, controls, "uat-regression", gate);
   return {
     progressed: true,
+    gate,
+  };
+}
+
+async function runMaintPostDeploy(runtime, controls, lastSignature) {
+  if (countFiles(runtime.queues.released) === 0) {
+    return {
+      progressed: false,
+      signature: "",
+      gate: null,
+    };
+  }
+
+  const signature = releasedSignature(runtime);
+  if (signature && signature === lastSignature) {
+    return {
+      progressed: false,
+      signature,
+      gate: null,
+    };
+  }
+
+  const decisionPath = maintDecisionPath(runtime);
+  fs.writeFileSync(decisionPath, gateTemplateJson(), "utf8");
+
+  log(controls, "MAINT post-deploy hygiene scan start");
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "maint", "maint.js"),
+    args: ["--auto", "--post-deploy", "--decision-file", decisionPath],
+    cwd: runtime.agentsRoot,
+    maxRetries: runtime.loops.maxRetries,
+    retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
+  });
+
+  if (result.aborted && controls.stopRequested) {
+    return {
+      progressed: false,
+      signature: lastSignature,
+      gate: null,
+    };
+  }
+  if (result.paused) {
+    log(controls, `MAINT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return {
+      progressed: false,
+      signature: lastSignature,
+      gate: null,
+    };
+  }
+
+  const parsed = parseGate(decisionPath);
+  const gate = result.ok ? parsed : createMaintExecutionFailureGate();
+  applyGateOutcomes(runtime, controls, "maint", gate);
+
+  const summary = String(gate.summary || "").trim();
+  if (summary) {
+    log(controls, `MAINT summary: ${summary.slice(0, 250)}`);
+  }
+
+  return {
+    progressed: true,
+    signature: releasedSignature(runtime),
     gate,
   };
 }
@@ -1963,7 +2048,7 @@ function snapshotHash(runtime) {
   return parts.sort().join("\n");
 }
 
-async function runFullDownstream(runtime, controls, lastReleasedSignature) {
+async function runFullDownstream(runtime, controls, lastReleasedSignature, lastMaintSignature) {
   let progressed = false;
 
   if (await runUxBatch(runtime, controls)) {
@@ -1987,10 +2072,19 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature) {
   if (qaPost.progressed) {
     progressed = true;
   }
+  const maint = await runMaintPostDeploy(
+    runtime,
+    controls,
+    lastMaintSignature
+  );
+  if (maint.progressed) {
+    progressed = true;
+  }
 
   return {
     progressed,
     releasedSignature: qaPost.signature,
+    maintSignature: maint.signature,
   };
 }
 
@@ -2039,6 +2133,7 @@ async function main() {
 
   let underfilledCycles = 0;
   let lastReleasedSignature = "";
+  let lastMaintSignature = releasedSignature(runtime);
 
   if (args.mode === "regression") {
     const regression = await runRegressionOnce(runtime, controls, lastReleasedSignature);
@@ -2074,9 +2169,17 @@ async function main() {
     await runDev(runtime, controls);
 
     if (args.mode === "full" && !planningInProgress(runtime)) {
-      const downstream = await runFullDownstream(runtime, controls, lastReleasedSignature);
+      const downstream = await runFullDownstream(
+        runtime,
+        controls,
+        lastReleasedSignature,
+        lastMaintSignature
+      );
       if (downstream.releasedSignature) {
         lastReleasedSignature = downstream.releasedSignature;
+      }
+      if (downstream.maintSignature) {
+        lastMaintSignature = downstream.maintSignature;
       }
     }
 

@@ -32,9 +32,10 @@ Queue intent:
 - PO resolves `to-clarify` whenever possible.
 - Only PO escalates hard unresolved conflicts to `human-decision-needed`.
 - UAT may create manual decision packages in `human-decision-needed` only for business-critical checks that are not automatable.
+- MAINT may create cleanup follow-up requirements after deploy.
 - `human-decision-needed` is human-owned: no autonomous runner moves files out of this queue.
 - After human evaluation, move those items to `human-input`; PO ingests `human-input` in the next iteration.
 - Hard blockers from review phases may go to `blocked`.
-- QA/UAT quality follow-ups are auto-routed:
+- QA/UAT/MAINT follow-ups are auto-routed:
   - `P0/P1` -> `selected` (hotfix)
   - `P2/P3` -> `backlog`
