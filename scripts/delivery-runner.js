@@ -667,7 +667,32 @@ function downstreamInProgress(runtime) {
     || countFiles(runtime.queues.deploy) > 0;
 }
 
-function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, controls) {
+function readPoVisionDecision(runtime) {
+  const filePath = path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      status: String(parsed.status || "").toLowerCase(),
+      visionComplete: Boolean(parsed.vision_complete),
+    };
+  } catch {
+    return {
+      status: "",
+      visionComplete: false,
+    };
+  }
+}
+
+function shouldForceUnderfilledFromVision(runtime) {
+  if (!runtime || !runtime.po || String(runtime.po.defaultMode || "").toLowerCase() !== "vision") {
+    return false;
+  }
+  const decision = readPoVisionDecision(runtime);
+  return decision.visionComplete && decision.status === "pass";
+}
+
+function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, controls, options = {}) {
   if (planningInProgress(runtime) || downstreamInProgress(runtime)) {
     return { started: false, underfilledCycles };
   }
@@ -677,10 +702,17 @@ function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, co
     return { started: false, underfilledCycles: 0 };
   }
 
+  const forceUnderfilled = Boolean(options.forceUnderfilled);
   const allowUnderfilled = underfilledCycles >= runtime.loops.forceUnderfilledAfterCycles;
-  if (selectedCount < minBundle && !allowUnderfilled) {
+  if (selectedCount < minBundle && !allowUnderfilled && !forceUnderfilled) {
     log(controls, `waiting for fuller bundle: selected=${selectedCount} min=${minBundle}`);
     return { started: false, underfilledCycles: underfilledCycles + 1 };
+  }
+  if (selectedCount < minBundle && forceUnderfilled && !allowUnderfilled) {
+    log(
+      controls,
+      `vision final-drain: start underfilled bundle selected=${selectedCount} min=${minBundle}`
+    );
   }
 
   const picked = chooseBundleByBusinessScore(runtime.queues.selected, maxBundle);
@@ -1454,8 +1486,16 @@ async function main() {
     }
 
     const before = snapshotHash(runtime);
+    const forceUnderfilledFromVision = shouldForceUnderfilledFromVision(runtime);
 
-    const bundle = startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, controls);
+    const bundle = startBundleIfReady(
+      runtime,
+      minBundle,
+      maxBundle,
+      underfilledCycles,
+      controls,
+      { forceUnderfilled: forceUnderfilledFromVision }
+    );
     underfilledCycles = bundle.underfilledCycles;
 
     await runArch(runtime, controls);
