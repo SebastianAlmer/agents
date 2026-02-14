@@ -279,14 +279,54 @@ function planningQueuesBusy(runtime) {
   return countFiles(runtime.queues.arch) > 0 || countFiles(runtime.queues.dev) > 0;
 }
 
-function shouldFillSelected(runtime, lowWatermark) {
-  if (countFiles(runtime.queues.selected) > lowWatermark) {
+function shouldFillSelected(runtime, highWatermark, state, controls) {
+  const selectedCount = countFiles(runtime.queues.selected);
+  const planningBusy = planningQueuesBusy(runtime);
+
+  if (state.bundleLocked) {
+    if (!planningBusy && selectedCount === 0) {
+      state.bundleLocked = false;
+      log(controls, "bundle lock released (selected=0 and planning queues empty)");
+    } else {
+      return false;
+    }
+  }
+
+  if (planningBusy) {
     return false;
   }
-  if (planningQueuesBusy(runtime)) {
+
+  if (selectedCount >= highWatermark) {
+    state.bundleLocked = true;
+    log(controls, `bundle lock engaged at selected=${selectedCount} (target=${highWatermark})`);
     return false;
   }
-  return true;
+
+  return selectedCount < highWatermark;
+}
+
+function logWaitCheck(runtime, state, controls, highWatermark) {
+  if (!controls.verbose) {
+    return;
+  }
+  const selectedCount = countFiles(runtime.queues.selected);
+  const archCount = countFiles(runtime.queues.arch);
+  const devCount = countFiles(runtime.queues.dev);
+  const planningBusy = archCount > 0 || devCount > 0;
+
+  let reason = "no-intake-needed";
+  if (state && state.bundleLocked) {
+    reason = "bundle-locked";
+  } else if (planningBusy) {
+    reason = "planning-busy";
+  } else if (selectedCount >= highWatermark) {
+    reason = "selected-at-target";
+  }
+
+  log(
+    controls,
+    `wait-check reason=${reason} selected=${selectedCount} arch=${archCount} dev=${devCount} next-check<=${Math.max(1, runtime.loops.poPollSeconds)}s`
+  );
 }
 
 function buildBundleId() {
@@ -377,20 +417,21 @@ function poRunnerStatePath(runtime) {
 function readPoRunnerState(runtime) {
   const filePath = poRunnerStatePath(runtime);
   if (!fs.existsSync(filePath)) {
-    return { version: 1, cycle: 0, items: {} };
+    return { version: 1, cycle: 0, bundleLocked: false, items: {} };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || typeof parsed !== "object") {
-      return { version: 1, cycle: 0, items: {} };
+      return { version: 1, cycle: 0, bundleLocked: false, items: {} };
     }
     return {
       version: 1,
       cycle: Number.isInteger(parsed.cycle) ? parsed.cycle : 0,
+      bundleLocked: parsed.bundleLocked === true,
       items: parsed.items && typeof parsed.items === "object" ? parsed.items : {},
     };
   } catch {
-    return { version: 1, cycle: 0, items: {} };
+    return { version: 1, cycle: 0, bundleLocked: false, items: {} };
   }
 }
 
@@ -1256,13 +1297,15 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
 
-    if (shouldFillSelected(runtime, lowWatermark)) {
+    if (shouldFillSelected(runtime, highWatermark, state, controls)) {
       const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
       if (filled && countFiles(runtime.queues.selected) > 0) {
         const bundleId = buildBundleId();
         const tagged = assignBundleIdToSelected(runtime, bundleId);
         log(controls, `bundle prepared id=${bundleId} selected_tagged=${tagged}`);
       }
+    } else {
+      logWaitCheck(runtime, state, controls, highWatermark);
     }
 
     if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
@@ -1317,7 +1360,10 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
       log(controls, "released changed: triggering PO vision reconciliation pass");
     }
 
-    const planningFillNeeded = shouldFillSelected(runtime, lowWatermark) && !visionComplete;
+    const planningFillNeeded = shouldFillSelected(runtime, highWatermark, state, controls) && !visionComplete;
+    if (!planningFillNeeded && !releasedChanged) {
+      logWaitCheck(runtime, state, controls, highWatermark);
+    }
     if (planningFillNeeded || releasedChanged) {
       const cycle = await runVisionCycle(runtime, controls);
       if (cycle.paused) {
@@ -1379,13 +1425,15 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
       );
     }
 
-    if (shouldFillSelected(runtime, lowWatermark)) {
+    if (shouldFillSelected(runtime, highWatermark, state, controls)) {
       const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
       if (filled && countFiles(runtime.queues.selected) > 0) {
         const bundleId = buildBundleId();
         const tagged = assignBundleIdToSelected(runtime, bundleId);
         log(controls, `bundle prepared id=${bundleId} selected_tagged=${tagged}`);
       }
+    } else {
+      logWaitCheck(runtime, state, controls, highWatermark);
     }
 
     if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
