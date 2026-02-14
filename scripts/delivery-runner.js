@@ -82,6 +82,8 @@ function parseArgs(argv) {
 
   if (["dev-only", "dev_only", "devonly"].includes(args.mode)) {
     args.mode = "dev-only";
+  } else if (["regression", "full-regression", "full_regression", "quality"].includes(args.mode)) {
+    args.mode = "regression";
   } else {
     args.mode = "full";
   }
@@ -91,7 +93,7 @@ function parseArgs(argv) {
 
 function usage() {
   console.log(
-    "Usage: node scripts/delivery-runner.js [--mode full|dev-only] [--once] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
+    "Usage: node scripts/delivery-runner.js [--mode full|dev-only|regression] [--once] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
   );
 }
 
@@ -997,10 +999,22 @@ function qaBatchGatePath(runtime) {
   return path.join(dir, "bundle-gate.json");
 }
 
+function uatBatchGatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "uat-bundle-gate.json");
+}
+
 function qaFinalGatePath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, "post-bundle-final-gate.json");
+}
+
+function uatFinalGatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "uat-full-regression-gate.json");
 }
 
 function parseGate(filePath) {
@@ -1011,48 +1025,242 @@ function parseGate(filePath) {
       status: "fail",
       summary: "invalid gate file",
       blocking_findings: ["invalid gate file"],
+      findings: [],
+      manual_uat: [],
     };
   }
 }
 
-function createQaFollowUp(runtime, gate) {
+function normalizeSeverity(value, fallback = "P2") {
+  const raw = String(value || "").trim().toUpperCase();
+  if (["P0", "P1", "P2", "P3"].includes(raw)) {
+    return raw;
+  }
+  const match = raw.match(/\b([0-3])\b/);
+  if (match) {
+    return `P${match[1]}`;
+  }
+  const fallbackRaw = String(fallback || "P2").trim().toUpperCase();
+  return ["P0", "P1", "P2", "P3"].includes(fallbackRaw) ? fallbackRaw : "P2";
+}
+
+function parseSeverityFromText(text, fallback = "P2") {
+  const match = String(text || "").toUpperCase().match(/\bP([0-3])\b/);
+  if (match) {
+    return `P${match[1]}`;
+  }
+  return normalizeSeverity(fallback, "P2");
+}
+
+function toStringArray(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry || "").trim()).filter(Boolean);
+  }
+  const single = String(value || "").trim();
+  return single ? [single] : [];
+}
+
+function normalizeFindingEntry(entry, sourceLabel, fallbackSeverity = "P2") {
+  if (!entry) {
+    return null;
+  }
+  if (typeof entry === "string") {
+    const text = entry.trim();
+    if (!text) {
+      return null;
+    }
+    return {
+      severity: parseSeverityFromText(text, fallbackSeverity),
+      title: text.replace(/^\s*P[0-3]\s*[:\-]\s*/i, "").trim() || text,
+      details: "",
+      source: sourceLabel,
+    };
+  }
+  if (typeof entry !== "object") {
+    return null;
+  }
+  const severity = normalizeSeverity(entry.severity || entry.priority, fallbackSeverity);
+  const title = String(entry.title || entry.summary || entry.name || "").trim();
+  const details = String(entry.details || entry.description || entry.reason || "").trim();
+  const resolvedTitle = title || details || "Unnamed finding";
+  return {
+    severity,
+    title: resolvedTitle,
+    details: details && details !== resolvedTitle ? details : "",
+    source: sourceLabel,
+  };
+}
+
+function collectGateFindings(gate, sourceLabel) {
+  const findings = [];
+  if (Array.isArray(gate && gate.findings)) {
+    for (const entry of gate.findings) {
+      const normalized = normalizeFindingEntry(entry, sourceLabel, "P2");
+      if (normalized) {
+        findings.push(normalized);
+      }
+    }
+  }
+  if (Array.isArray(gate && gate.blocking_findings)) {
+    for (const entry of gate.blocking_findings) {
+      const normalized = normalizeFindingEntry(entry, sourceLabel, "P1");
+      if (normalized) {
+        findings.push(normalized);
+      }
+    }
+  }
+  if (findings.length === 0 && String(gate && gate.status || "").toLowerCase() === "fail") {
+    findings.push({
+      severity: "P1",
+      title: String(gate && gate.summary || "Gate failed"),
+      details: "",
+      source: sourceLabel,
+    });
+  }
+  return findings;
+}
+
+function splitFindingsBySeverity(findings) {
+  const high = [];
+  const mediumLow = [];
+  for (const finding of findings || []) {
+    const severity = normalizeSeverity(finding.severity, "P2");
+    if (severity === "P0" || severity === "P1") {
+      high.push({ ...finding, severity });
+    } else {
+      mediumLow.push({ ...finding, severity });
+    }
+  }
+  return { high, mediumLow };
+}
+
+function stableHash(input) {
+  let hash = 2166136261;
+  const text = String(input || "");
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function findByFrontMatterFingerprint(runtime, key, fingerprint, queueNames) {
+  const target = String(fingerprint || "").trim();
+  if (!target) {
+    return "";
+  }
+  for (const queueName of queueNames) {
+    const dir = runtime.queues[queueName];
+    if (!dir) {
+      continue;
+    }
+    for (const file of listQueueFiles(dir)) {
+      const fm = parseFrontMatter(file);
+      if (String(fm[key] || "").trim() === target) {
+        return file;
+      }
+    }
+  }
+  return "";
+}
+
+function findingsFingerprint(sourceLabel, queueName, findings) {
+  const canonical = (findings || [])
+    .map((item) => `${normalizeSeverity(item.severity, "P2")}|${String(item.title || "").trim()}|${String(item.details || "").trim()}`)
+    .sort()
+    .join("\n");
+  return stableHash(`${sourceLabel}|${queueName}|${canonical}`);
+}
+
+function manualUatFingerprint(items) {
+  const canonical = (items || [])
+    .map((item) => `${item.severity}|${item.title}|${item.whyNotAutomatable}|${item.humanQuestion}`)
+    .sort()
+    .join("\n");
+  return stableHash(canonical);
+}
+
+function createQualityFollowUp(runtime, sourceLabel, queueName, findings, summary) {
+  if (!Array.isArray(findings) || findings.length === 0 || !runtime.queues[queueName]) {
+    return "";
+  }
+  const fingerprint = findingsFingerprint(sourceLabel, queueName, findings);
+  const existing = findByFrontMatterFingerprint(
+    runtime,
+    "followup_fingerprint",
+    fingerprint,
+    [
+      "selected",
+      "backlog",
+      "arch",
+      "dev",
+      "qa",
+      "sec",
+      "ux",
+      "deploy",
+      "toClarify",
+      "humanDecisionNeeded",
+      "humanInput",
+      "blocked",
+    ]
+  );
+  if (existing) {
+    return existing;
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const id = `REQ-QA-FOLLOWUP-${stamp}`;
-  const filePath = path.join(runtime.queues.selected, `${id}.md`);
-  const findings = Array.isArray(gate.blocking_findings)
-    ? gate.blocking_findings.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
+  const sourceKey = String(sourceLabel || "quality").toUpperCase().replace(/[^A-Z0-9]+/g, "-");
+  const targetIsSelected = queueName === "selected";
+  const id = targetIsSelected
+    ? `REQ-${sourceKey}-HOTFIX-${stamp}`
+    : `REQ-${sourceKey}-FOLLOWUP-${stamp}`;
+  const filePath = path.join(runtime.queues[queueName], `${id}.md`);
+  const title = targetIsSelected
+    ? `${sourceLabel.toUpperCase()} high-priority hotfix follow-up`
+    : `${sourceLabel.toUpperCase()} follow-up backlog`;
+  const status = targetIsSelected ? "selected" : "backlog";
+
+  const findingLines = findings.map((item) => {
+    const details = String(item.details || "").trim();
+    return details
+      ? `- [${item.severity}] ${item.title} - ${details}`
+      : `- [${item.severity}] ${item.title}`;
+  });
 
   const content = [
     "---",
     `id: ${id}`,
-    "title: QA follow-up after bundle gate",
-    "status: selected",
-    "source: qa-gate",
+    `title: ${title}`,
+    `status: ${status}`,
+    `source: ${sourceLabel}-gate`,
     "implementation_scope: fullstack",
-    "business_score: 90",
+    `business_score: ${targetIsSelected ? 100 : 60}`,
+    `review_risk: ${targetIsSelected ? "high" : "medium"}`,
+    `followup_fingerprint: ${fingerprint}`,
     "---",
     "",
     "# Goal",
-    "Resolve QA findings from bundle-level verification.",
+    targetIsSelected
+      ? "Stabilize critical quality issues detected during delivery gates."
+      : "Track non-critical quality improvements detected during delivery gates.",
     "",
     "## Scope",
-    "- Fix all blocking QA findings for this bundle.",
+    `- Address ${sourceLabel.toUpperCase()} findings routed by delivery runner.`,
     "",
     "## Task Outline",
-    "- Reproduce each finding.",
+    "- Reproduce findings from this file.",
     "- Implement focused fixes.",
-    "- Re-run relevant checks.",
+    "- Re-run relevant validation and confirm behavior.",
     "",
     "## Acceptance Criteria",
-    "- QA gate passes for the addressed findings.",
+    "- Findings in this requirement are resolved.",
+    "- No regression in related core flows.",
     "",
-    "## QA Findings",
-    ...(findings.length > 0 ? findings.map((item) => `- ${item}`) : ["- See QA gate summary in logs."]),
+    `## ${sourceLabel.toUpperCase()} Findings`,
+    ...findingLines,
     "",
-    "## PO Results",
-    "- Auto-created by delivery runner after QA gate failure.",
-    `- Changes: ${filePath}`,
+    "## Flow Routing Notes",
+    `- gate summary: ${String(summary || "n/a").trim() || "n/a"}`,
+    `- routed automatically to ${queueName}`,
     "",
   ].join("\n");
 
@@ -1060,15 +1268,255 @@ function createQaFollowUp(runtime, gate) {
   return filePath;
 }
 
+function normalizeManualUatItem(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const severity = normalizeSeverity(entry.severity, "P1");
+  if (!["P0", "P1"].includes(severity)) {
+    return null;
+  }
+
+  const businessCritical = Boolean(entry.business_critical);
+  const automationValue = String(
+    entry.automation_feasibility
+      || entry.automation
+      || entry.automatable
+      || ""
+  ).trim().toLowerCase();
+  const canAutoFix = typeof entry.can_auto_fix === "boolean" ? entry.can_auto_fix : null;
+  const nonAutomatable = ["none", "manual-only", "not-automatable", "no", "cannot-automate", "unavailable"]
+    .includes(automationValue)
+    || canAutoFix === false;
+  if (!businessCritical || !nonAutomatable) {
+    return null;
+  }
+
+  const title = String(entry.title || entry.summary || "Manual UAT decision required").trim();
+  return {
+    severity,
+    title,
+    whyNotAutomatable: String(entry.why_not_automatable || entry.reason || "").trim()
+      || "Not reliably automatable in current setup.",
+    preconditions: toStringArray(entry.preconditions),
+    steps: toStringArray(entry.steps),
+    expected: toStringArray(entry.expected),
+    failIf: toStringArray(entry.fail_if),
+    evidence: toStringArray(entry.evidence),
+    humanQuestion: String(entry.human_question || "").trim()
+      || `Should this business-critical behavior be accepted as specified for release (${title})?`,
+    recommendation: String(entry.recommendation || "").trim()
+      || "Run the manual check and decide PASS/FAIL with rationale.",
+  };
+}
+
+function collectManualUatItems(gate) {
+  if (!Array.isArray(gate && gate.manual_uat)) {
+    return [];
+  }
+  const items = [];
+  for (const entry of gate.manual_uat) {
+    const normalized = normalizeManualUatItem(entry);
+    if (normalized) {
+      items.push(normalized);
+    }
+  }
+  return items;
+}
+
+function createManualUatDecision(runtime, items, summary) {
+  if (!Array.isArray(items) || items.length === 0 || !runtime.queues.humanDecisionNeeded) {
+    return "";
+  }
+  const fingerprint = manualUatFingerprint(items);
+  const existing = findByFrontMatterFingerprint(
+    runtime,
+    "manual_uat_fingerprint",
+    fingerprint,
+    ["humanDecisionNeeded", "humanInput"]
+  );
+  if (existing) {
+    return existing;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const id = `REQ-MANUAL-UAT-${stamp}`;
+  const filePath = path.join(runtime.queues.humanDecisionNeeded, `${id}.md`);
+
+  const lines = [
+    "---",
+    `id: ${id}`,
+    "title: Manual UAT decision package",
+    "status: human-decision-needed",
+    "source: uat-manual",
+    "implementation_scope: fullstack",
+    "review_risk: high",
+    "business_score: 100",
+    `manual_uat_fingerprint: ${fingerprint}`,
+    "---",
+    "",
+    "# Goal",
+    "Capture critical non-automatable UAT checks for human decision.",
+    "",
+    "## Scope",
+    "- Only business-critical checks that are currently not automatable.",
+    "",
+    "## Manual UAT Checks",
+  ];
+
+  items.forEach((item, index) => {
+    lines.push("");
+    lines.push(`### Check ${index + 1}: ${item.title} (${item.severity})`);
+    lines.push(`Reason not automatable: ${item.whyNotAutomatable}`);
+    lines.push("");
+    lines.push("Preconditions");
+    for (const entry of (item.preconditions.length ? item.preconditions : ["-"])) {
+      lines.push(`- ${entry}`);
+    }
+    lines.push("");
+    lines.push("Steps");
+    const steps = item.steps.length ? item.steps : ["Perform the user flow manually from start to finish."];
+    steps.forEach((step, idx) => {
+      lines.push(`${idx + 1}. ${step}`);
+    });
+    lines.push("");
+    lines.push("Expected");
+    for (const entry of (item.expected.length ? item.expected : ["Behavior matches product intent and docs."])) {
+      lines.push(`- ${entry}`);
+    }
+    lines.push("");
+    lines.push("Fail if");
+    for (const entry of (item.failIf.length ? item.failIf : ["Observed behavior differs from Expected."])) {
+      lines.push(`- ${entry}`);
+    }
+    lines.push("");
+    lines.push("Evidence");
+    for (const entry of (item.evidence.length ? item.evidence : ["Attach screenshot and timestamp."])) {
+      lines.push(`- ${entry}`);
+    }
+    lines.push("");
+    lines.push("Human Decision");
+    lines.push(`- Question: ${item.humanQuestion}`);
+    lines.push(`- Recommendation: ${item.recommendation}`);
+  });
+
+  lines.push("");
+  lines.push("## Flow Routing Notes");
+  lines.push(`- gate summary: ${String(summary || "n/a").trim() || "n/a"}`);
+  lines.push("- This queue is human-owned. Autonomous runners must not move this file out.");
+  lines.push("- After decision, move to `human-input` and add decision notes.");
+  lines.push("");
+
+  fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+  return filePath;
+}
+
+function gatePass(gate) {
+  return String(gate && gate.status || "").toLowerCase() === "pass";
+}
+
+function applyGateOutcomes(runtime, controls, sourceLabel, gate) {
+  const findings = collectGateFindings(gate, sourceLabel);
+  const split = splitFindingsBySeverity(findings);
+  const summary = String(gate && gate.summary || "").trim();
+  const created = {
+    selected: "",
+    backlog: "",
+    humanDecision: "",
+  };
+
+  if (split.high.length > 0) {
+    created.selected = createQualityFollowUp(runtime, sourceLabel, "selected", split.high, summary);
+  }
+  if (split.mediumLow.length > 0) {
+    created.backlog = createQualityFollowUp(runtime, sourceLabel, "backlog", split.mediumLow, summary);
+  }
+  const manualItems = collectManualUatItems(gate);
+  if (manualItems.length > 0) {
+    created.humanDecision = createManualUatDecision(runtime, manualItems, summary);
+  }
+
+  log(
+    controls,
+    `${sourceLabel.toUpperCase()} findings routed high=${split.high.length} low=${split.mediumLow.length} manual=${manualItems.length}`
+  );
+  if (created.selected) {
+    log(controls, `${sourceLabel.toUpperCase()} follow-up selected: ${path.basename(created.selected)}`);
+  }
+  if (created.backlog) {
+    log(controls, `${sourceLabel.toUpperCase()} follow-up backlog: ${path.basename(created.backlog)}`);
+  }
+  if (created.humanDecision) {
+    log(controls, `${sourceLabel.toUpperCase()} manual decision package: ${path.basename(created.humanDecision)}`);
+  }
+  return created;
+}
+
+function qaGateTemplate() {
+  return {
+    status: "fail",
+    summary: "pending",
+    blocking_findings: [],
+    findings: [],
+    manual_uat: [],
+  };
+}
+
+function createQaExecutionFailureGate() {
+  return {
+    status: "fail",
+    summary: "QA gate execution failed. Inspect logs and rerun.",
+    blocking_findings: ["P1: QA gate execution failed. Inspect logs and rerun."],
+    findings: [
+      {
+        severity: "P1",
+        title: "QA gate execution failed. Inspect logs and rerun.",
+        details: "",
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
+function createUatExecutionFailureGate() {
+  return {
+    status: "fail",
+    summary: "UAT gate execution failed. Inspect logs and rerun.",
+    blocking_findings: ["P1: UAT gate execution failed. Inspect logs and rerun."],
+    findings: [
+      {
+        severity: "P1",
+        title: "UAT gate execution failed. Inspect logs and rerun.",
+        details: "",
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
+function gateTemplateJson() {
+  return JSON.stringify(qaGateTemplate(), null, 2);
+}
+
+function queueNote(prefix, gate) {
+  const summary = String(gate && gate.summary || "").trim();
+  if (!summary) {
+    return prefix;
+  }
+  return `${prefix} (summary: ${summary.slice(0, 250)})`;
+}
+
 async function runQaBundle(runtime, controls) {
   if (countFiles(runtime.queues.qa) === 0) {
-    return false;
+    return {
+      progressed: false,
+      gate: null,
+    };
   }
 
   const gatePath = qaBatchGatePath(runtime);
-  fs.writeFileSync(gatePath, JSON.stringify({ status: "fail", summary: "pending", blocking_findings: [] }, null, 2), "utf8");
+  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
 
-  log(controls, "QA bundle gate start");
+  log(controls, "QA bundle gate start (advisory)");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--batch-tests", "--batch-queue", "qa", "--gate-file", gatePath],
@@ -1078,31 +1526,123 @@ async function runQaBundle(runtime, controls) {
     stopSignal: getStopSignal(controls),
   });
   if (result.aborted && controls.stopRequested) {
-    return false;
+    return {
+      progressed: false,
+      gate: null,
+    };
   }
   if (result.paused) {
     log(controls, `QA paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-    return false;
+    return {
+      progressed: false,
+      gate: null,
+    };
   }
 
-  const gate = parseGate(gatePath);
-  const pass = result.ok && String(gate.status || "").toLowerCase() === "pass";
+  const parsed = parseGate(gatePath);
+  const gate = result.ok ? parsed : createQaExecutionFailureGate();
+  applyGateOutcomes(runtime, controls, "qa", gate);
 
-  if (pass) {
-    moveAll(runtime, "qa", "deploy", "deploy", "Delivery runner: QA bundle gate pass");
+  const note = gatePass(gate)
+    ? "Delivery runner: QA advisory pass -> continue to deploy"
+    : queueNote("Delivery runner: QA advisory fail -> continue to deploy", gate);
+  moveAll(runtime, "qa", "deploy", "deploy", note);
+  return {
+    progressed: true,
+    gate,
+  };
+}
+
+async function runUatBundle(runtime, controls) {
+  if (countFiles(runtime.queues.deploy) === 0) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const gatePath = uatBatchGatePath(runtime);
+  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
+
+  log(controls, "UAT bundle gate start (advisory)");
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
+    args: ["--auto", "--batch", "--source-queue", "deploy", "--gate-file", gatePath],
+    cwd: runtime.agentsRoot,
+    maxRetries: runtime.loops.maxRetries,
+    retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
+  });
+  if (result.aborted && controls.stopRequested) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+  if (result.paused) {
+    log(controls, `UAT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const parsed = parseGate(gatePath);
+  const gate = result.ok ? parsed : createUatExecutionFailureGate();
+  applyGateOutcomes(runtime, controls, "uat", gate);
+  if (!gatePass(gate)) {
+    log(controls, queueNote("UAT advisory fail -> continue to deploy", gate));
   } else {
-    const findings = Array.isArray(gate.blocking_findings)
-      ? gate.blocking_findings.map((item) => String(item || "").trim()).filter(Boolean)
-      : [];
-    const note = [
-      "Delivery runner: QA bundle gate failed",
-      `- summary: ${String(gate.summary || "qa gate failed")}`,
-      ...findings.map((item) => `- ${item}`),
-    ].join("\n");
-    moveAll(runtime, "qa", "selected", "selected", note);
+    log(controls, "UAT advisory pass");
   }
 
-  return true;
+  return {
+    progressed: true,
+    gate,
+  };
+}
+
+async function runUatFullRegression(runtime, controls) {
+  if (countFiles(runtime.queues.released) === 0) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const gatePath = uatFinalGatePath(runtime);
+  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
+
+  log(controls, "UAT full regression start");
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
+    args: ["--auto", "--full-regression", "--source-queue", "released", "--gate-file", gatePath],
+    cwd: runtime.agentsRoot,
+    maxRetries: runtime.loops.maxRetries,
+    retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
+  });
+  if (result.aborted && controls.stopRequested) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+  if (result.paused) {
+    log(controls, `UAT full regression paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const parsed = parseGate(gatePath);
+  const gate = result.ok ? parsed : createUatExecutionFailureGate();
+  applyGateOutcomes(runtime, controls, "uat-regression", gate);
+  return {
+    progressed: true,
+    gate,
+  };
 }
 
 function gitRoot(cwd) {
@@ -1353,24 +1893,26 @@ function releasedSignature(runtime) {
   return parts.sort().join("\n");
 }
 
-async function runQaPostBundle(runtime, controls, lastSignature) {
+async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
   if (countFiles(runtime.queues.released) === 0) {
     return {
       progressed: false,
       signature: "",
+      gate: null,
     };
   }
 
   const signature = releasedSignature(runtime);
-  if (signature && signature === lastSignature) {
+  if (!options.force && signature && signature === lastSignature) {
     return {
       progressed: false,
       signature,
+      gate: null,
     };
   }
 
   const gatePath = qaFinalGatePath(runtime);
-  fs.writeFileSync(gatePath, JSON.stringify({ status: "fail", summary: "pending", blocking_findings: [] }, null, 2), "utf8");
+  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
 
   log(controls, "QA post-bundle final pass start");
   const result = await runNodeScript({
@@ -1386,35 +1928,26 @@ async function runQaPostBundle(runtime, controls, lastSignature) {
     return {
       progressed: false,
       signature: lastSignature,
+      gate: null,
     };
   }
 
-  if (!result.ok) {
-    if (result.paused) {
-      log(controls, `QA post-bundle paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return {
-        progressed: false,
-        signature: lastSignature,
-      };
-    }
-    const filePath = createQaFollowUp(runtime, {
-      blocking_findings: ["QA final pass execution failed. Inspect logs and rerun."],
-    });
-    log(controls, `QA post-bundle follow-up created: ${path.basename(filePath)}`);
+  if (result.paused) {
+    log(controls, `QA post-bundle paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
     return {
-      progressed: true,
-      signature: releasedSignature(runtime),
+      progressed: false,
+      signature: lastSignature,
+      gate: null,
     };
   }
 
-  const gate = parseGate(gatePath);
-  if (String(gate.status || "").toLowerCase() !== "pass") {
-    const filePath = createQaFollowUp(runtime, gate);
-    log(controls, `QA post-bundle follow-up created: ${path.basename(filePath)}`);
-  }
+  const parsed = parseGate(gatePath);
+  const gate = result.ok ? parsed : createQaExecutionFailureGate();
+  applyGateOutcomes(runtime, controls, "qa-post", gate);
   return {
     progressed: true,
     signature: releasedSignature(runtime),
+    gate,
   };
 }
 
@@ -1439,7 +1972,12 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature) {
   if (await runSecBatch(runtime, controls)) {
     progressed = true;
   }
-  if (await runQaBundle(runtime, controls)) {
+  const qaBundle = await runQaBundle(runtime, controls);
+  if (qaBundle.progressed) {
+    progressed = true;
+  }
+  const uatBundle = await runUatBundle(runtime, controls);
+  if (uatBundle.progressed) {
     progressed = true;
   }
   if (await runDeployBundle(runtime, controls)) {
@@ -1453,6 +1991,31 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature) {
   return {
     progressed,
     releasedSignature: qaPost.signature,
+  };
+}
+
+async function runRegressionOnce(runtime, controls, lastReleasedSignature) {
+  const qaPost = await runQaPostBundle(runtime, controls, lastReleasedSignature, { force: true });
+  const uatRegression = await runUatFullRegression(runtime, controls);
+  if (!qaPost.progressed && !uatRegression.progressed) {
+    log(controls, "regression: no released requirements to validate");
+    return {
+      progressed: false,
+      releasedSignature: lastReleasedSignature,
+    };
+  }
+
+  const qaSummary = qaPost.gate
+    ? (gatePass(qaPost.gate) ? "pass" : `fail (${String(qaPost.gate.summary || "").slice(0, 140)})`)
+    : "n/a";
+  const uatSummary = uatRegression.gate
+    ? (gatePass(uatRegression.gate) ? "pass" : `fail (${String(uatRegression.gate.summary || "").slice(0, 140)})`)
+    : "n/a";
+  log(controls, `regression summary qa=${qaSummary} uat=${uatSummary}`);
+
+  return {
+    progressed: true,
+    releasedSignature: qaPost.signature || releasedSignature(runtime),
   };
 }
 
@@ -1476,6 +2039,15 @@ async function main() {
 
   let underfilledCycles = 0;
   let lastReleasedSignature = "";
+
+  if (args.mode === "regression") {
+    const regression = await runRegressionOnce(runtime, controls, lastReleasedSignature);
+    if (regression.releasedSignature) {
+      lastReleasedSignature = regression.releasedSignature;
+    }
+    controls.cleanup();
+    return;
+  }
 
   while (!controls.stopRequested) {
     if (await waitIfGloballyPaused(runtime, controls)) {

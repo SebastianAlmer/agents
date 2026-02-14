@@ -18,6 +18,12 @@ Rules
 - No commits.
 - Keep outputs concise.
 
+Severity policy
+- `P0`: critical broken core behavior (login/session/security/data integrity/app unusable).
+- `P1`: major user flow broken or semantically wrong in core paths.
+- `P2`: medium issue, workaround possible.
+- `P3`: minor issue.
+
 Output discipline
 - Do not restate full requirements/docs.
 - Summary max 2 sentences.
@@ -32,6 +38,8 @@ Batch mode (`Batch tests: true`)
 - `status`: `pass` or `fail`
 - `summary`: short text
 - `blocking_findings`: array (empty on pass)
+- `findings`: array of objects with `severity`, `title`, `details`
+- `manual_uat`: empty array `[]` (QA does not escalate manual UAT directly)
 
 Review-only mode
 - Do not move requirement files.
@@ -55,6 +63,8 @@ Final mode (`Final pass: true`)
 - `status`: `pass` or `fail`
 - `summary`: short text
 - `blocking_findings`: array (empty on pass)
+- `findings`: array of objects with `severity`, `title`, `details`
+- `manual_uat`: empty array `[]`
 
 Logging
 Print short progress lines, for example:

@@ -331,7 +331,7 @@ async function runCycle(mode, runtime, controls) {
     runNodeScript(path.join(root, "scripts", "delivery-runner.js"), devOnlyArgs, root);
     anyRun = true;
   } else if (downstreamPending(runtime)) {
-    log(controls, "cycle standard downstream: UX -> SEC -> QA -> DEPLOY");
+    log(controls, "cycle standard downstream: UX -> SEC -> QA -> UAT -> DEPLOY");
     runNodeScript(path.join(root, "scripts", "delivery-runner.js"), fullArgs, root);
     anyRun = true;
   } else {

@@ -130,6 +130,7 @@ dev_fe = "gpt-5.3-codex-spark"
 dev_be = "gpt-5.3-codex-spark"
 dev_fs = "gpt-5.3-codex-spark"
 qa = "gpt-5.3-codex-spark"
+uat = "gpt-5.3-codex-spark"
 ux = "gpt-5.3-codex-spark"
 deploy = "gpt-5.3-codex-spark"
 

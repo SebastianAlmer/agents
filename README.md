@@ -11,6 +11,7 @@ All runners use the same role agents:
 - `UX`
 - `SEC`
 - `QA`
+- `UAT`
 - `DEPLOY`
 
 Role intent:
@@ -19,6 +20,8 @@ Role intent:
 - `UX` actively improves frontend/pages in code (not only requirement text), guided by docs and git diff.
 - `SEC` actively hardens security in code/config.
 - `QA` validates bundle behavior and fixes defects until checks pass or a hard blocker remains.
+- `QA` is technical quality gate (build/test/runtime checks and code-level fixes).
+- `UAT` is functional/semantic user-behavior gate (flows, messages, button/process continuity).
 - `DEPLOY` runs once per bundle and delivery runner performs commit+push in target repo (config-driven).
 
 ## Runners
@@ -42,16 +45,22 @@ PO vision rules:
 ### 2) Delivery runner
 - `node scripts/delivery-runner.js --mode full`
 - `node scripts/delivery-runner.js --mode dev-only`
+- `node scripts/delivery-runner.js --mode regression`
 
 Modes:
-- `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> DEPLOY).
+- `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA(advisory) -> UAT(advisory) -> DEPLOY), followed by QA post-bundle sanity.
 - `dev-only`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream.
+- `regression`: manual one-shot quality regression on `released` (QA final pass + UAT full regression), auto-routing findings to queues.
 
 Bundle behavior:
 - Bundles start from `selected`.
 - Priority uses `business_score` in requirement front matter.
 - Default bundle range: 5-20 (configurable).
 - Agents run once per bundle in downstream phase.
+- QA/UAT are non-blocking advisory gates for deploy.
+- `P0/P1` findings are auto-routed to `selected` as hotfix requirements.
+- `P2/P3` findings are auto-routed to `backlog`.
+- Strict non-automatable critical UAT checks are auto-routed to `human-decision-needed` as manual check packages.
 
 ### 3) Legacy supervisor (`run.js`)
 - `node run.js --mode standard`
@@ -72,6 +81,7 @@ Removed legacy modes: `detailed`, `bulk`, `fast`.
 - `node dev-be/dev-be.js`
 - `node dev-fs/dev-fs.js`
 - `node qa/qa.js`
+- `node uat/uat.js`
 - `node sec/sec.js`
 - `node ux/ux.js`
 - `node deploy/deploy.js`
@@ -102,6 +112,9 @@ Global pause guard:
 - `node scripts/po-runner.js --mode vision`
 - `node scripts/delivery-runner.js --mode full`
 
+3) Optional manual full regression:
+- `node scripts/delivery-runner.js --mode regression`
+
 Optional legacy supervisor:
 - `node run.js --mode standard`
 
@@ -118,6 +131,7 @@ Important sections:
 - `[deploy.pr]`: optional PR creation after deploy push (`enabled`, `provider`, `remote`, `base_branch`, `head_mode`, `head_branch`, templates). Template vars: `${type}` (`feat|fix|chore` inferred from branch), `${branch}`, `${base}`, `${remote}`
 - `[dev_routing]`, `[dev_agents]`
 - `[models]`
+- Include optional `uat` model override (`[models].uat`).
 
 ## Queues
 
