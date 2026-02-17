@@ -199,13 +199,47 @@ function formatSummary(summary) {
 }
 
 function createControls(initialVerbose, runtime) {
+  const stopHooks = new Set();
   const controls = {
     verbose: Boolean(initialVerbose),
     stopRequested: false,
+    onStop(callback) {
+      if (typeof callback !== "function") {
+        return () => {};
+      }
+      stopHooks.add(callback);
+      return () => stopHooks.delete(callback);
+    },
+    requestStop(reason = "") {
+      if (controls.stopRequested) {
+        process.stdout.write("\nPO-RUNNER: force stop\n");
+        process.exit(130);
+        return;
+      }
+      controls.stopRequested = true;
+      if (reason) {
+        process.stdout.write(`\nPO-RUNNER: stop requested (${reason})\n`);
+      }
+      for (const hook of stopHooks) {
+        try {
+          hook();
+        } catch {
+          // ignore hook errors during shutdown
+        }
+      }
+    },
     cleanup() {},
   };
 
+  const onSignal = (signalName) => controls.requestStop(signalName);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+
   if (!process.stdin.isTTY) {
+    controls.cleanup = () => {
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+    };
     return controls;
   }
 
@@ -217,7 +251,7 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if (key.ctrl && key.name === "c") {
-      controls.stopRequested = true;
+      controls.requestStop("Ctrl+C");
       return;
     }
     if ((key.name || "").toLowerCase() === "v") {
@@ -230,13 +264,15 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if ((key.name || "").toLowerCase() === "q") {
-      controls.stopRequested = true;
+      controls.requestStop("q");
       return;
     }
   };
 
   process.stdin.on("keypress", onKeypress);
   controls.cleanup = () => {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
     process.stdin.removeListener("keypress", onKeypress);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
@@ -249,6 +285,19 @@ function createControls(initialVerbose, runtime) {
 function log(controls, message) {
   if (controls.verbose) {
     process.stdout.write(`PO-RUNNER: ${message}\n`);
+  }
+}
+
+async function sleepWithStopCheck(ms, controls) {
+  let remaining = Math.max(0, Number.parseInt(String(ms || 0), 10));
+  const step = 1000;
+  while (remaining > 0) {
+    if (controls && controls.stopRequested) {
+      break;
+    }
+    const chunk = Math.min(step, remaining);
+    await sleep(chunk);
+    remaining -= chunk;
   }
 }
 
@@ -273,7 +322,7 @@ async function waitIfGloballyPaused(runtime, controls) {
   const waitMs = Number.isFinite(pauseState.remainingMs)
     ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
     : fallbackMs;
-  await sleep(waitMs);
+  await sleepWithStopCheck(waitMs, controls);
   return true;
 }
 
@@ -345,10 +394,12 @@ function findVisionOpenDecisionHint(runtime) {
     }
     try {
       const raw = fs.readFileSync(filePath, "utf8");
-      const unchecked = (raw.match(/^\s*[-*]\s*\[\s\]\s+/gm) || []).length;
-      const openQuestionBullets = (raw.match(/^\s*[-*]\s+.*\?\s*$/gm) || []).length;
-      const unresolvedTagged = (raw.match(/^\s*[-*]\s+.*\b(open|todo|tbd|pending)\b.*$/gim) || []).length;
-      const unresolved = Math.max(unchecked, openQuestionBullets, unresolvedTagged);
+      // Strict signal only: explicit human-decision tags.
+      // Avoid false positives from historical notes or unchecked checklists in 09_* docs.
+      const explicitHumanDecision = (raw.match(
+        /^\s*[-*]\s+.*\b(human[-_ ]decision|needs[-_ ]human|hard[-_ ]vision[-_ ]conflict)\b.*$/gim
+      ) || []).length;
+      const unresolved = explicitHumanDecision;
       if (unresolved > best.count) {
         best = { file: path.basename(filePath), count: unresolved };
       } else if (!best.file) {
@@ -382,10 +433,10 @@ function waitReason(runtime, state, highWatermark, mode) {
     reason = `selected buffer at target (${selected}/${highWatermark})`;
   } else if (mode === "vision") {
     const visionHint = findVisionOpenDecisionHint(runtime);
-    if (visionHint.count > 0) {
-      reason = `vision has open decisions (${visionHint.file}: ${visionHint.count})`;
-    } else if (intakeCandidates > 0) {
+    if (intakeCandidates > 0) {
       reason = `intake candidates present but guarded/cooling down (${intakeCandidates})`;
+    } else if (visionHint.count > 0) {
+      reason = `vision has explicit unresolved decisions (${visionHint.file}: ${visionHint.count})`;
     } else {
       reason = "waiting for new planning input or released changes";
     }
@@ -422,7 +473,7 @@ async function sleepWithWaitInfo(runtime, controls, state, highWatermark, mode) 
   const minutes = Math.max(1, Math.round(PO_IDLE_WAIT_MS / 60000));
   const suffix = info.extras.length > 0 ? ` | ${info.extras.join(" ")}` : "";
   process.stdout.write(`PO-RUNNER: waiting ${minutes}m - ${info.reason}${suffix}\n`);
-  await sleep(PO_IDLE_WAIT_MS);
+  await sleepWithStopCheck(PO_IDLE_WAIT_MS, controls);
 }
 
 function buildBundleId() {
@@ -718,6 +769,54 @@ function listIntakeCandidates(runtime) {
     }
   }
   return out;
+}
+
+function listIntakeCandidatesFair(runtime, limit) {
+  const cap = Math.max(1, Number.parseInt(String(limit || 1), 10));
+  const queueOrder = [
+    "toClarify",
+    "humanInput",
+    "backlog",
+    "refinement",
+  ];
+  const buckets = {};
+  for (const queueName of queueOrder) {
+    buckets[queueName] = listQueueFiles(runtime.queues[queueName]).map((filePath) => ({
+      path: filePath,
+      queue: queueName,
+    }));
+  }
+
+  const picked = [];
+
+  // First pass: take at most one item per queue to prevent backlog starvation.
+  for (const queueName of queueOrder) {
+    if (picked.length >= cap) {
+      break;
+    }
+    if (buckets[queueName].length > 0) {
+      picked.push(buckets[queueName].shift());
+    }
+  }
+
+  // Second pass: continue in round-robin queue order until cap.
+  while (picked.length < cap) {
+    let advanced = false;
+    for (const queueName of queueOrder) {
+      if (picked.length >= cap) {
+        break;
+      }
+      if (buckets[queueName].length > 0) {
+        picked.push(buckets[queueName].shift());
+        advanced = true;
+      }
+    }
+    if (!advanced) {
+      break;
+    }
+  }
+
+  return picked;
 }
 
 function normalizePoTarget(queueName) {
@@ -1062,6 +1161,107 @@ function promoteBacklogForProgress(runtime, controls, state, cycle) {
   return true;
 }
 
+function parseBusinessScoreFromRequirement(filePath) {
+  const fm = parseFrontMatter(filePath);
+  const raw = fm.business_score || fm.priority_score || fm.score || "";
+  const parsed = Number.parseFloat(String(raw));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function shouldPromoteBacklogItem(runtime, state, filePath) {
+  if (!runtime.po.backlogPromoteEnabled) {
+    return { promote: false, reason: "" };
+  }
+  const score = parseBusinessScoreFromRequirement(filePath);
+  if (score >= runtime.po.backlogPromoteMinBusinessScore) {
+    return {
+      promote: true,
+      reason: `business_score ${score} >= ${runtime.po.backlogPromoteMinBusinessScore}`,
+    };
+  }
+
+  if (!state || !state.items) {
+    return { promote: false, reason: "" };
+  }
+  const key = requirementKey(filePath);
+  const itemState = state.items[key] || null;
+  if (!itemState) {
+    return { promote: false, reason: "" };
+  }
+
+  const repeatCount = Math.max(0, Number.parseInt(String(itemState.repeatCount || 0), 10));
+  const sameBacklogOutcome = itemState.lastSourceQueue === "backlog" && itemState.lastTargetQueue === "backlog";
+  if (sameBacklogOutcome && repeatCount >= runtime.po.backlogPromoteAfterCycles) {
+    return {
+      promote: true,
+      reason: `repeat_count ${repeatCount} >= ${runtime.po.backlogPromoteAfterCycles}`,
+    };
+  }
+  return { promote: false, reason: "" };
+}
+
+function promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark) {
+  if (!runtime.po.backlogPromoteEnabled) {
+    return 0;
+  }
+  if (planningQueuesBusy(runtime)) {
+    return 0;
+  }
+
+  let selectedCount = countFiles(runtime.queues.selected);
+  if (selectedCount >= highWatermark) {
+    return 0;
+  }
+
+  const maxPerCycle = Math.max(1, runtime.po.backlogPromoteMaxPerCycle || 1);
+  const backlogFiles = listQueueFiles(runtime.queues.backlog)
+    .sort((a, b) => {
+      const scoreDelta = parseBusinessScoreFromRequirement(b) - parseBusinessScoreFromRequirement(a);
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+      return path.basename(a).localeCompare(path.basename(b));
+    });
+
+  let promoted = 0;
+  for (const candidate of backlogFiles) {
+    if (promoted >= maxPerCycle || selectedCount >= highWatermark) {
+      break;
+    }
+    const verdict = shouldPromoteBacklogItem(runtime, state, candidate);
+    if (!verdict.promote) {
+      continue;
+    }
+    const moved = moveWithFallback(
+      runtime,
+      candidate,
+      "selected",
+      "selected",
+      [
+        "PO runner backlog auto-promotion",
+        `- trigger: ${verdict.reason}`,
+        "- action: moved backlog item to selected to avoid backlog stall",
+      ]
+    );
+    if (!moved) {
+      continue;
+    }
+    updatePoStateAfterDirectMove({
+      runtime,
+      state,
+      cycle,
+      sourcePath: candidate,
+      sourceQueue: "backlog",
+      targetQueue: "selected",
+    });
+    promoted += 1;
+    selectedCount += 1;
+    log(controls, `backlog auto-promoted ${path.basename(candidate)} (${verdict.reason})`);
+  }
+
+  return promoted;
+}
+
 async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", state = null, cycle = 0) {
   const sourceBefore = resolveSourcePath(runtime, filePath) || filePath;
   const originQueue = sourceHint || queueNameFromPath(sourceBefore, runtime.queues) || "";
@@ -1324,7 +1524,7 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
   let processed = 0;
   const perCycleCap = Math.max(1, runtime.po.intakeMaxPerCycle || 3);
   while (!controls.stopRequested && countFiles(runtime.queues.selected) < highWatermark && processed < perCycleCap) {
-    const candidates = listIntakeCandidates(runtime);
+    const candidates = listIntakeCandidatesFair(runtime, perCycleCap - processed);
     if (candidates.length === 0) {
       break;
     }
@@ -1406,6 +1606,10 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
 
     if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
       // keep cycle moving after direct promotion
+    }
+    const promoted = promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark);
+    if (promoted > 0) {
+      log(controls, `backlog auto-promotion moved ${promoted} item(s) to selected`);
     }
 
     writePoRunnerState(runtime, state);
@@ -1534,6 +1738,10 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
 
     if (promoteBacklogForProgress(runtime, controls, state, cycle)) {
       // keep cycle moving after direct promotion
+    }
+    const promoted = promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark);
+    if (promoted > 0) {
+      log(controls, `backlog auto-promotion moved ${promoted} item(s) to selected`);
     }
 
     writePoRunnerState(runtime, state);

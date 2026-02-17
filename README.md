@@ -131,6 +131,8 @@ Important sections:
 - `[paths]`: `repo_root`, `requirements_root`, `docs_dir`, `product_vision_dir`
 - `[loops]`: bundle sizes, polling, retry policy
 - `[po]`: vision defaults and limits
+- `loops.force_underfilled_after_cycles`: starts underfilled bundles after N idle cycles (default `3`)
+- `[po].backlog_promote_*`: auto-promote sticky/high-value backlog items to `selected`
 - `[arch]`: trigger policy, risk/scope guards, docs digest behavior, retries
 - `[dev]`: watchdog timeout + recovery retries for stuck DEV runs
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)

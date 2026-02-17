@@ -40,6 +40,10 @@ To-clarify resolution policy (mandatory)
 - Goal: autonomously break down Product Vision into executable requirements until vision is fully implemented.
 - Product Vision files are highest priority and can override generic docs.
 - You may edit docs and product artifacts to align implementation reality with vision.
+- `09_Open_Decisions_and_Risks.md` is not automatically blocking.
+  - Treat an item as human-blocking only if it is an explicit hard vision conflict (for example explicitly tagged as `human-decision` / `hard-vision-conflict`).
+  - Historical questions, TODO notes, or non-critical wording in that file are not valid escalation reasons.
+  - If a decision is possible within vision constraints, decide autonomously, document the decision minimally, and continue delivery.
 - Keep refining and generating requirements iteratively.
 - Reconcile delivered outcomes in `released` against Product Vision and existing requirements to detect gaps.
 - For detected delivery gaps:
@@ -47,6 +51,7 @@ To-clarify resolution policy (mandatory)
   - clear but not immediate -> `backlog`
   - still ambiguous -> `refinement`
 - Only escalate to human (`human-decision-needed`) for hard vision conflicts or violations that cannot be resolved autonomously.
+- Before escalating, perform one autonomous resolution pass: decide, update docs minimally, and create/update requirements.
 - Avoid duplicate gap requirements: prefer updating existing open requirements when they already cover the gap.
 
 Global rules

@@ -20,6 +20,8 @@ const {
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 const { getThreadFilePath, readThreadId, clearThreadState } = require("../lib/agent");
 
+const DELIVERY_IDLE_WAIT_MS = 5 * 60 * 1000;
+
 function parseArgs(argv) {
   const args = {
     help: false,
@@ -240,6 +242,19 @@ function log(controls, message) {
   }
 }
 
+async function sleepWithStopCheck(ms, controls) {
+  let remaining = Math.max(0, Number.parseInt(String(ms || 0), 10));
+  const step = 1000;
+  while (remaining > 0) {
+    if (controls && controls.stopRequested) {
+      break;
+    }
+    const chunk = Math.min(step, remaining);
+    await sleep(chunk);
+    remaining -= chunk;
+  }
+}
+
 function formatPauseLine(pauseState) {
   const reason = String((pauseState && pauseState.reason) || "limit").replace(/_/g, "-");
   const source = String((pauseState && pauseState.source) || "unknown");
@@ -261,7 +276,7 @@ async function waitIfGloballyPaused(runtime, controls) {
   const waitMs = Number.isFinite(pauseState.remainingMs)
     ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
     : fallbackMs;
-  await sleep(waitMs);
+  await sleepWithStopCheck(waitMs, controls);
   return true;
 }
 
@@ -744,6 +759,22 @@ function downstreamInProgress(runtime) {
     || countFiles(runtime.queues.deploy) > 0;
 }
 
+function upstreamQueuesIdle(runtime) {
+  return countFiles(runtime.queues.selected) === 0
+    && countFiles(runtime.queues.arch) === 0
+    && countFiles(runtime.queues.dev) === 0;
+}
+
+function shouldUseLongIdleWait(runtime, args) {
+  if (!upstreamQueuesIdle(runtime)) {
+    return false;
+  }
+  if (String((args && args.mode) || "").toLowerCase() === "dev-only") {
+    return true;
+  }
+  return !downstreamInProgress(runtime);
+}
+
 function readPoVisionDecision(runtime) {
   const filePath = path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
   try {
@@ -752,11 +783,19 @@ function readPoVisionDecision(runtime) {
     return {
       status: String(parsed.status || "").toLowerCase(),
       visionComplete: Boolean(parsed.vision_complete),
+      newRequirementsCount: Number.isFinite(Number(parsed.new_requirements_count))
+        ? Number(parsed.new_requirements_count)
+        : 0,
+      updatedRequirementsCount: Number.isFinite(Number(parsed.updated_requirements_count))
+        ? Number(parsed.updated_requirements_count)
+        : 0,
     };
   } catch {
     return {
       status: "",
       visionComplete: false,
+      newRequirementsCount: 0,
+      updatedRequirementsCount: 0,
     };
   }
 }
@@ -766,7 +805,17 @@ function shouldForceUnderfilledFromVision(runtime) {
     return false;
   }
   const decision = readPoVisionDecision(runtime);
-  return decision.visionComplete && decision.status === "pass";
+  if (decision.visionComplete && decision.status === "pass") {
+    return true;
+  }
+
+  // Vision final-drain rule: if PO reports no new/updated requirements in this
+  // cycle and selected has remaining work, do not block on bundle_min_size.
+  const selectedCount = countFiles(runtime.queues.selected);
+  const noNewPlanningOutput = decision.status === "pass"
+    && decision.newRequirementsCount === 0
+    && decision.updatedRequirementsCount === 0;
+  return selectedCount > 0 && noNewPlanningOutput;
 }
 
 function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, controls, options = {}) {
@@ -2304,7 +2353,15 @@ async function main() {
 
     const after = snapshotHash(runtime);
     if (before === after) {
-      await sleep(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000);
+      if (shouldUseLongIdleWait(runtime, args)) {
+        const minutes = Math.max(1, Math.round(DELIVERY_IDLE_WAIT_MS / 60000));
+        process.stdout.write(
+          `DELIVERY: waiting ${minutes}m - upstream idle (selected=0 arch=0 dev=0), checking again for new PO input\n`
+        );
+        await sleepWithStopCheck(DELIVERY_IDLE_WAIT_MS, controls);
+      } else {
+        await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
+      }
     }
   }
 

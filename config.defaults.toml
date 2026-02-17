@@ -1,86 +1,227 @@
 [paths]
-# Optional in defaults. Set in config.local.toml for your project.
+# Pflicht-Override in config.local.toml: JA
+# Absoluter Pfad zum Ziel-Repository. In diesem Repo arbeiten die Agenten an Code und Git-Aktionen.
 repo_root = ""
+
+# Pflicht-Override in config.local.toml: NEIN
+# Ordner fuer alle Requirements-Queues. Standard ist der requirements-Ordner in diesem agents-Repo.
 requirements_root = "./requirements"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Doku-Basisordner im Ziel-Repo. Wenn leer, wird automatisch <repo_root>/docs verwendet.
 docs_dir = ""
-# Optional. If empty, defaults to <docs_dir>/product-operating-system.
+
+# Pflicht-Override in config.local.toml: NEIN
+# Produktvision-Ordner. Wenn leer, wird automatisch <docs_dir>/product-operating-system verwendet.
+# Nur ueberschreiben, wenn dein Projekt die Vision an einem anderen Ort pflegt.
 product_vision_dir = ""
 
 [loops]
-# Bundle watermarks for autonomous runners.
+# Pflicht-Override in config.local.toml: NEIN
+# Mindestgroesse eines Bundles aus selected, bevor Delivery startet.
 bundle_min_size = 5
+
+# Pflicht-Override in config.local.toml: NEIN
+# Maximalgroesse eines Bundles pro Delivery-Start.
 bundle_max_size = 20
+
+# Pflicht-Override in config.local.toml: NEIN
+# Polling-Intervall des PO-Runners in Sekunden.
 po_poll_seconds = 20
+
+# Pflicht-Override in config.local.toml: NEIN
+# Polling-Intervall des Delivery-Runners in Sekunden.
 delivery_poll_seconds = 20
+
+# Pflicht-Override in config.local.toml: NEIN
+# Allgemeine Retry-Anzahl fuer runner-seitige Script-Aufrufe.
 max_retries = 3
+
+# Pflicht-Override in config.local.toml: NEIN
+# Basis-Wartezeit zwischen Retries (exponentiell ansteigend).
 retry_delay_seconds = 2
-# If selected stays below min this many cycles, delivery starts an underfilled bundle.
+
+# Pflicht-Override in config.local.toml: NEIN
+# Wenn selected laenger unter bundle_min_size bleibt, wird nach N Zyklen trotzdem ein unterfuelltes Bundle gestartet.
 force_underfilled_after_cycles = 3
 
 [flow]
-# run.js modes: standard | dev-only
-# additional alias used internally: auto -> standard
+# Pflicht-Override in config.local.toml: NEIN
+# Standardmodus fuer das Legacy-Script run.js: standard | dev-only.
 default_mode = "standard"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Idle-Polling fuer run.js in Sekunden.
 idle_poll_seconds = 300
+
+# Pflicht-Override in config.local.toml: NEIN
+# Retry-Anzahl fuer run.js-Aufrufe.
 max_retries = 3
+
+# Pflicht-Override in config.local.toml: NEIN
+# Retry-Wartezeit fuer run.js.
 retry_delay_seconds = 2
 
 [run_defaults]
-# standard | dev-only
+# Pflicht-Override in config.local.toml: NEIN
+# Default-Flow fuer run.js: standard | dev-only.
 flow = "standard"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Obergrenze pro run.js-Lauf (0 = keine Begrenzung).
 max_req = 0
+
+# Pflicht-Override in config.local.toml: NEIN
+# Verbose-Logging fuer run.js standardmaessig aktivieren/deaktivieren.
 verbose = false
+
+# Pflicht-Override in config.local.toml: NEIN
+# Detailmodus fuer run.js standardmaessig aktivieren/deaktivieren.
 detail = false
+
+# Pflicht-Override in config.local.toml: NEIN
+# Preflight-Modus: hard | soft | none | snapshot.
 preflight = "soft"
-# if true, standard flow waits for manual key (n) before downstream QA/SEC/UX/DEPLOY
+
+# Pflicht-Override in config.local.toml: NEIN
+# Wenn true, wartet run.js vor Downstream-Schritten auf manuelle Freigabe.
 manual_downstream = false
 
 [preflight]
+# Pflicht-Override in config.local.toml: NEIN
+# Commit-Prefix fuer Snapshot-Preflight.
 snapshot_commit_message_prefix = "chore(flow): preflight snapshot"
 
 [deploy]
-# check | commit | commit_push
+# Pflicht-Override in config.local.toml: NEIN
+# Deploy-Verhalten: check | commit | commit_push.
 mode = "commit_push"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Wenn true, wird bei Erfolg am Ende gepusht (sofern mode Push erlaubt).
 final_push_on_success = true
+
+# Pflicht-Override in config.local.toml: NEIN
+# Wenn true, muessen commit-faehige Deploys auf sauberem Git-Startzustand beginnen.
 require_clean_start_for_commits = true
 
 [deploy.pr]
+# Pflicht-Override in config.local.toml: NEIN
+# Automatische PR-Erstellung nach Deploy aktivieren/deaktivieren.
 enabled = false
-# github | gitlab
+
+# Pflicht-Override in config.local.toml: NEIN
+# PR-Provider: github | gitlab.
 provider = "github"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Git-Remote fuer PR-Bezug.
 remote = "origin"
-# Target branch for the PR (base)
+
+# Pflicht-Override in config.local.toml: NEIN
+# Ziel-Branch (Base) fuer PR.
 base_branch = "main"
-# current | fixed
+
+# Pflicht-Override in config.local.toml: NEIN
+# Quelle fuer Head-Branch: current | fixed.
 head_mode = "current"
-# Used only when head_mode = "fixed"
+
+# Pflicht-Override in config.local.toml: NEIN (JA, wenn head_mode = fixed)
+# Konkreter Head-Branch, wenn fixed verwendet wird.
 head_branch = ""
+
+# Pflicht-Override in config.local.toml: NEIN
+# PR als Draft erstellen.
 draft = false
+
+# Pflicht-Override in config.local.toml: NEIN
+# PR erst nach erfolgreichem Push erstellen.
 create_only_after_push = true
+
+# Pflicht-Override in config.local.toml: NEIN
+# Titel-Template. Verfuegbare Variablen: ${type}, ${branch}, ${base}.
 title_template = "${type}: ${branch} -> ${base}"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Body-Template. Verfuegbare Variablen: ${branch}, ${base}, ${remote}.
 body_template = "Automated PR from ${branch} to ${base} after deploy bundle."
 
 [po]
-# intake | vision
+# Pflicht-Override in config.local.toml: NEIN
+# Startmodus des PO: intake | vision.
 default_mode = "vision"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Sicherheitsgrenze fuer Vision-Planungszyklen.
 vision_max_cycles = 100
+
+# Pflicht-Override in config.local.toml: NEIN
+# Sicherheitsgrenze fuer Anzahl neuer/aktualisierter Requirements im Vision-Modus.
 vision_max_requirements = 1000
+
+# Pflicht-Override in config.local.toml: NEIN
+# Anzahl stabiler Vision-Zyklen mit vision_complete=true bis "fertig" akzeptiert wird.
 vision_stable_cycles = 2
-# Intake queue watermarks (how many items PO keeps ready in selected).
+
+# Pflicht-Override in config.local.toml: NEIN
+# Untere Wasserlinie fuer selected (PO-Fuellstrategie).
 selected_low_watermark = 1
+
+# Pflicht-Override in config.local.toml: NEIN
+# Obere Wasserlinie fuer selected (PO-Fuellstrategie).
 selected_high_watermark = 3
-# Intake token/loop controls
+
+# Pflicht-Override in config.local.toml: NEIN
+# Maximal verarbeitete Intake-Items pro PO-Zyklus.
 intake_max_per_cycle = 3
+
+# Pflicht-Override in config.local.toml: NEIN
+# Cooldown-Zyklen, wenn dieselbe Requirement immer wieder identisch endet.
 intake_loop_cooldown_cycles = 3
+
+# Pflicht-Override in config.local.toml: NEIN
+# Idempotenz-/Loop-Schutz fuer PO aktivieren.
 intake_idempotence_enabled = true
 
+# Pflicht-Override in config.local.toml: NEIN
+# Auto-Promotion aus backlog nach selected aktivieren.
+backlog_promote_enabled = true
+
+# Pflicht-Override in config.local.toml: NEIN
+# Promotion bei wiederholtem backlog->backlog nach N Wiederholungen.
+backlog_promote_after_cycles = 3
+
+# Pflicht-Override in config.local.toml: NEIN
+# Sofort-Promotion, wenn business_score mindestens diesen Wert hat.
+backlog_promote_min_business_score = 80
+
+# Pflicht-Override in config.local.toml: NEIN
+# Maximal automatisch promotete Backlog-Items pro PO-Zyklus.
+backlog_promote_max_per_cycle = 2
+
 [arch]
-# always | triggered | never
+# Pflicht-Override in config.local.toml: NEIN
+# Routing-Modus fuer ARCH: always | triggered | never.
 routing_mode = "triggered"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Scopes, die im triggered-Modus zwingend durch ARCH gehen.
 require_for_scopes = ["fullstack"]
+
+# Pflicht-Override in config.local.toml: NEIN
+# review_risk-Werte, die ARCH erzwingen.
 require_for_review_risks = ["high"]
+
+# Pflicht-Override in config.local.toml: NEIN
+# review_scope-Tokens, die ARCH erzwingen.
 require_for_review_scopes = ["qa_sec", "full"]
+
+# Pflicht-Override in config.local.toml: NEIN
+# Front-Matter-Flags, die bei true ARCH erzwingen.
 trigger_frontmatter_flags = ["arch_required", "needs_arch"]
+
+# Pflicht-Override in config.local.toml: NEIN
+# Schluesselwoerter im Requirement-Inhalt, die ARCH erzwingen.
 trigger_keywords = [
   "auth",
   "authorization",
@@ -108,64 +249,150 @@ trigger_keywords = [
   "sso",
   "destructive"
 ]
+
+# Pflicht-Override in config.local.toml: NEIN
+# Digest aus Doku fuer ARCH-Prompt aktivieren.
 digest_enabled = true
+
+# Pflicht-Override in config.local.toml: NEIN
+# Pfad fuer den ARCH-Digest (relativ zum agents-Root).
 digest_file = ".runtime/arch-docs-digest.md"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Maximal beruecksichtigte Dateien im ARCH-Digest.
 digest_max_files = 12
+
+# Pflicht-Override in config.local.toml: NEIN
+# Maximal beruecksichtigte Ueberschriften pro Datei im ARCH-Digest.
 digest_max_headings_per_file = 20
-# ARCH agent retries. keep 0 for one-shot.
+
+# Pflicht-Override in config.local.toml: NEIN
+# ARCH-Retries (0 = One-Shot).
 max_retries = 0
 
 [dev_routing]
-# fullstack_only | split
+# Pflicht-Override in config.local.toml: NEIN
+# Routing-Modus fuer DEV: fullstack_only | split.
 mode = "fullstack_only"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Default-Scope bei fehlendem implementation_scope.
 default_scope = "fullstack"
 
 [dev_agents]
+# Pflicht-Override in config.local.toml: NEIN
+# Frontend-Spezialist aktivieren/deaktivieren.
 use_fe = false
+
+# Pflicht-Override in config.local.toml: NEIN
+# Backend-Spezialist aktivieren/deaktivieren.
 use_be = false
+
+# Pflicht-Override in config.local.toml: NEIN
+# Fullstack-Entwickler aktivieren/deaktivieren.
 use_fs = true
 
 [dev]
-# Hard watchdog for one DEV agent execution per requirement.
+# Pflicht-Override in config.local.toml: NEIN
+# Harte Laufzeitgrenze pro DEV-Requirement in Sekunden (0 = kein Timeout).
 run_timeout_seconds = 900
-# Retries before escalating the requirement out of dev.
+
+# Pflicht-Override in config.local.toml: NEIN
+# Wiederholungen auf demselben Thread vor Fresh-Thread-Reset.
 same_thread_retries = 1
+
+# Pflicht-Override in config.local.toml: NEIN
+# Wiederholungen mit Fresh-Thread vor Eskalation nach to-clarify.
 fresh_thread_retries = 1
 
 [qa]
-# Project-specific QA baseline checks.
-# Keep empty for a generic reusable setup and configure per project in config.local.toml.
+# Pflicht-Override in config.local.toml: NEIN
+# Projektspezifische QA-Kommandos. Leer = generisches Verhalten ohne harte Projektkommandos.
 mandatory_checks = []
 
 [review]
-# Legacy review-bundle settings (kept for compatibility with run.js).
+# Pflicht-Override in config.local.toml: NEIN
+# Legacy-Review-Strategie: bundle | classic.
 strategy = "bundle"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Legacy-Parallelmodus fuer Spezialisten.
 parallel = false
-# low | medium | high
+
+# Pflicht-Override in config.local.toml: NEIN
+# Legacy-Default-Risiko: low | medium | high.
 default_risk = "low"
-# single_specialist | full
+
+# Pflicht-Override in config.local.toml: NEIN
+# Legacy-Policy fuer medium-Risiko: single_specialist | full.
 medium_scope_policy = "single_specialist"
 
 [models]
-# Per-agent model routing.
-# strong: gpt-5.3-codex | lean: gpt-5.3-codex-spark
+# Pflicht-Override in config.local.toml: NEIN
+# Fallback-Modell, wenn kein Agent-spezifischer Eintrag vorhanden ist.
 default = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer PO.
 po = "gpt-5.3-codex"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer ARCH.
 arch = "gpt-5.3-codex"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer ReqEng.
 reqeng = "gpt-5.3-codex"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer SEC.
 sec = "gpt-5.3-codex"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer DEV FE.
 dev_fe = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer DEV BE.
 dev_be = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer DEV FS.
 dev_fs = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer QA.
 qa = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer UAT.
 uat = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer MAINT.
 maint = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer UX.
 ux = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Modell fuer DEPLOY.
 deploy = "gpt-5.3-codex-spark"
 
 [codex]
-# Fallback model when a role has no explicit [models] entry.
+# Pflicht-Override in config.local.toml: NEIN
+# Basis-Modell fuer generierte Codex-Konfigurationen.
 model = "gpt-5.3-codex-spark"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Approval-Policy fuer Codex-Ausfuehrung.
 approval_policy = "never"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Sandbox-Modus fuer Codex-Ausfuehrung.
 sandbox_mode = "danger-full-access"
+
+# Pflicht-Override in config.local.toml: NEIN
+# Denkaufwand/Reasoning-Stufe des Codex-Modells.
 model_reasoning_effort = "xhigh"

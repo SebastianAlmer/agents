@@ -1,36 +1,40 @@
 [paths]
-# Absolute path to the project repository agents should work on.
+# Pflicht: JA
+# Absoluter Pfad zum Ziel-Repository, in dem die Agenten arbeiten sollen.
 repo_root = "/home/you/git/your-project"
 
-# Optional. If omitted, defaults to ./requirements in this agents repo.
+# Pflicht: NEIN
+# Requirements-Ordner. Standard passt fuer dieses agents-Repo.
 requirements_root = "./requirements"
 
-# Optional. If empty, defaults to <repo_root>/docs.
+# Pflicht: NEIN
+# Doku-Basisordner im Ziel-Repo. Leer = <repo_root>/docs.
 docs_dir = ""
 
-# Optional. If empty, defaults to <docs_dir>/product-operating-system.
+# Pflicht: NEIN
+# Produktvision-Ordner. Leer = <docs_dir>/product-operating-system.
 product_vision_dir = ""
 
 [loops]
-# Bundle watermarks for autonomous runners.
+# Optionales Tuning fuer Bundle-Groessen und Polling.
 bundle_min_size = 5
 bundle_max_size = 20
 po_poll_seconds = 20
 delivery_poll_seconds = 20
 max_retries = 3
 retry_delay_seconds = 2
+# Nach N Idle-Zyklen darf Delivery trotz zu kleinem Bundle starten.
 force_underfilled_after_cycles = 3
 
 [flow]
-# run.js modes: standard | dev-only
-# additional alias used internally: auto -> standard
+# Legacy run.js Default: standard | dev-only
 default_mode = "standard"
 idle_poll_seconds = 300
 max_retries = 3
 retry_delay_seconds = 2
 
 [run_defaults]
-# standard | dev-only
+# Legacy run.js Defaults
 flow = "standard"
 max_req = 0
 verbose = false
@@ -57,6 +61,11 @@ vision_stable_cycles = 2
 intake_max_per_cycle = 3
 intake_loop_cooldown_cycles = 3
 intake_idempotence_enabled = true
+# Backlog-Autopromotion gegen Stau.
+backlog_promote_enabled = true
+backlog_promote_after_cycles = 3
+backlog_promote_min_business_score = 80
+backlog_promote_max_per_cycle = 2
 
 [arch]
 # always | triggered | never
@@ -104,29 +113,30 @@ mode = "fullstack_only"
 default_scope = "fullstack"
 
 [dev_agents]
+# Mindestens ein Agent muss true sein.
 use_fe = false
 use_be = false
 use_fs = true
 
 [dev]
-# DEV watchdog + recovery ladder.
+# DEV Watchdog und Recovery-Leiter.
 run_timeout_seconds = 900
 same_thread_retries = 1
 fresh_thread_retries = 1
 
 [qa]
-# Project-specific QA baseline checks. Add checks that exist in your target repository.
+# Projektspezifische QA-Kommandos. Leer = generisch.
 mandatory_checks = []
 
 [review]
-# Legacy review-bundle settings (kept for compatibility with run.js).
+# Legacy-Optionen (vor allem fuer run.js Kompatibilitaet).
 strategy = "bundle"
 parallel = false
 default_risk = "low"
 medium_scope_policy = "single_specialist"
 
 [models]
-# Per-agent model routing.
+# Modellzuordnung pro Agent.
 default = "gpt-5.3-codex-spark"
 po = "gpt-5.3-codex"
 arch = "gpt-5.3-codex"
@@ -142,6 +152,7 @@ ux = "gpt-5.3-codex-spark"
 deploy = "gpt-5.3-codex-spark"
 
 [codex]
+# Basis-Codex-Ausfuehrungsprofil.
 model = "gpt-5.3-codex-spark"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

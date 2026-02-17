@@ -451,6 +451,19 @@ function main() {
     base.po && base.po.intake_idempotence_enabled,
     true
   );
+  const poBacklogPromoteEnabled = normalizeBool(
+    base.po && base.po.backlog_promote_enabled,
+    true
+  );
+  const poBacklogPromoteAfterCycles = Number.isFinite(base.po && base.po.backlog_promote_after_cycles)
+    ? Math.max(1, base.po.backlog_promote_after_cycles)
+    : 3;
+  const poBacklogPromoteMinBusinessScore = Number.isFinite(base.po && base.po.backlog_promote_min_business_score)
+    ? Math.max(0, base.po.backlog_promote_min_business_score)
+    : 80;
+  const poBacklogPromoteMaxPerCycle = Number.isFinite(base.po && base.po.backlog_promote_max_per_cycle)
+    ? Math.max(1, base.po.backlog_promote_max_per_cycle)
+    : 2;
 
   const baseArch = base.arch && typeof base.arch === "object" ? base.arch : {};
   const archRoutingMode = normalizeEnum(
@@ -635,6 +648,10 @@ function main() {
     `intake_max_per_cycle = ${toTomlInt(poIntakeMaxPerCycle)}`,
     `intake_loop_cooldown_cycles = ${toTomlInt(poIntakeLoopCooldownCycles)}`,
     `intake_idempotence_enabled = ${toTomlBool(poIntakeIdempotenceEnabled)}`,
+    `backlog_promote_enabled = ${toTomlBool(poBacklogPromoteEnabled)}`,
+    `backlog_promote_after_cycles = ${toTomlInt(poBacklogPromoteAfterCycles)}`,
+    `backlog_promote_min_business_score = ${toTomlInt(poBacklogPromoteMinBusinessScore)}`,
+    `backlog_promote_max_per_cycle = ${toTomlInt(poBacklogPromoteMaxPerCycle)}`,
     "",
     "[arch]",
     `routing_mode = ${toTomlString(archRoutingMode)}`,
@@ -706,7 +723,7 @@ function main() {
   console.log(`- run_defaults.preflight: ${preflight}`);
   console.log(`- run_defaults.manual_downstream: ${manualDownstream}`);
   console.log(`- deploy.mode: ${deployMode}`);
-  console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled})`);
+  console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled}, backlog_promote_enabled=${poBacklogPromoteEnabled}, backlog_promote_after_cycles=${poBacklogPromoteAfterCycles}, backlog_promote_min_business_score=${poBacklogPromoteMinBusinessScore}, backlog_promote_max_per_cycle=${poBacklogPromoteMaxPerCycle})`);
   console.log(`- arch.routing_mode: ${archRoutingMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
