@@ -17,8 +17,8 @@ const {
   normalizeStatus,
   getActivePauseState,
 } = require("./lib/flow-core");
-const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
-const { getThreadFilePath, readThreadId, clearThreadState } = require("../lib/agent");
+const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
+const { getThreadFilePath, readThreadId, clearThreadState } = require("./lib/agent");
 
 const DELIVERY_IDLE_WAIT_MS = 5 * 60 * 1000;
 
@@ -27,7 +27,7 @@ function parseArgs(argv) {
     help: false,
     once: false,
     verbose: false,
-    mode: "full",
+    mode: "",
     minBundle: NaN,
     maxBundle: NaN,
   };
@@ -83,21 +83,24 @@ function parseArgs(argv) {
     }
   }
 
-  if (["dev-only", "dev_only", "devonly"].includes(args.mode)) {
-    args.mode = "dev-only";
-  } else if (["regression", "full-regression", "full_regression", "quality"].includes(args.mode)) {
-    args.mode = "regression";
-  } else {
-    args.mode = "full";
-  }
-
   return args;
 }
 
 function usage() {
   console.log(
-    "Usage: node scripts/delivery-runner.js [--mode full|dev-only|regression] [--once] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
+    "Usage: node delivery-runner.js [--mode full|fast] [--once] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
   );
+}
+
+function normalizeDeliveryMode(value, fallback = "full") {
+  const normalized = String(value || fallback || "").toLowerCase().trim();
+  if (["dev-only", "dev_only", "devonly", "fast"].includes(normalized)) {
+    return "fast";
+  }
+  if (normalized === "full") {
+    return "full";
+  }
+  return fallback;
 }
 
 function normalizePositiveInt(value, fallback, min = 1) {
@@ -765,11 +768,11 @@ function upstreamQueuesIdle(runtime) {
     && countFiles(runtime.queues.dev) === 0;
 }
 
-function shouldUseLongIdleWait(runtime, args) {
+function shouldUseLongIdleWait(runtime, mode) {
   if (!upstreamQueuesIdle(runtime)) {
     return false;
   }
-  if (String((args && args.mode) || "").toLowerCase() === "dev-only") {
+  if (String(mode || "").toLowerCase() === "fast") {
     return true;
   }
   return !downstreamInProgress(runtime);
@@ -1169,12 +1172,6 @@ function qaFinalGatePath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, "post-bundle-final-gate.json");
-}
-
-function uatFinalGatePath(runtime) {
-  const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, "uat-full-regression-gate.json");
 }
 
 function maintDecisionPath(runtime) {
@@ -1784,49 +1781,6 @@ async function runUatBundle(runtime, controls) {
   };
 }
 
-async function runUatFullRegression(runtime, controls) {
-  if (countFiles(runtime.queues.released) === 0) {
-    return {
-      progressed: false,
-      gate: null,
-    };
-  }
-
-  const gatePath = uatFinalGatePath(runtime);
-  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
-
-  log(controls, "UAT full regression start");
-  const result = await runNodeScript({
-    scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
-    args: ["--auto", "--full-regression", "--source-queue", "released", "--gate-file", gatePath],
-    cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
-    retryDelaySeconds: runtime.loops.retryDelaySeconds,
-    stopSignal: getStopSignal(controls),
-  });
-  if (result.aborted && controls.stopRequested) {
-    return {
-      progressed: false,
-      gate: null,
-    };
-  }
-  if (result.paused) {
-    log(controls, `UAT full regression paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-    return {
-      progressed: false,
-      gate: null,
-    };
-  }
-
-  const parsed = parseGate(gatePath);
-  const gate = result.ok ? parsed : createUatExecutionFailureGate();
-  applyGateOutcomes(runtime, controls, "uat-regression", gate);
-  return {
-    progressed: true,
-    gate,
-  };
-}
-
 async function runMaintPostDeploy(runtime, controls, lastSignature) {
   if (countFiles(runtime.queues.released) === 0) {
     return {
@@ -2248,39 +2202,18 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
   };
 }
 
-async function runRegressionOnce(runtime, controls, lastReleasedSignature) {
-  const qaPost = await runQaPostBundle(runtime, controls, lastReleasedSignature, { force: true });
-  const uatRegression = await runUatFullRegression(runtime, controls);
-  if (!qaPost.progressed && !uatRegression.progressed) {
-    log(controls, "regression: no released requirements to validate");
-    return {
-      progressed: false,
-      releasedSignature: lastReleasedSignature,
-    };
-  }
-
-  const qaSummary = qaPost.gate
-    ? (gatePass(qaPost.gate) ? "pass" : `fail (${String(qaPost.gate.summary || "").slice(0, 140)})`)
-    : "n/a";
-  const uatSummary = uatRegression.gate
-    ? (gatePass(uatRegression.gate) ? "pass" : `fail (${String(uatRegression.gate.summary || "").slice(0, 140)})`)
-    : "n/a";
-  log(controls, `regression summary qa=${qaSummary} uat=${uatSummary}`);
-
-  return {
-    progressed: true,
-    releasedSignature: qaPost.signature || releasedSignature(runtime),
-  };
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     usage();
     process.exit(0);
   }
-  const runtime = loadRuntimeConfig(path.resolve(__dirname, ".."));
+  const runtime = loadRuntimeConfig(path.resolve(__dirname));
   ensureQueueDirs(runtime.queues);
+  const mode = normalizeDeliveryMode(
+    args.mode || (runtime.deliveryRunner && runtime.deliveryRunner.defaultMode) || "full",
+    "full"
+  );
 
   const minBundle = normalizePositiveInt(args.minBundle, runtime.loops.bundleMinSize);
   const maxBundle = Math.max(minBundle, normalizePositiveInt(args.maxBundle, runtime.loops.bundleMaxSize));
@@ -2288,21 +2221,12 @@ async function main() {
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
 
-  log(controls, `mode=${args.mode}`);
+  log(controls, `mode=${mode}`);
   log(controls, `bundle min=${minBundle} max=${maxBundle}`);
 
   let underfilledCycles = 0;
   let lastReleasedSignature = "";
   let lastMaintSignature = releasedSignature(runtime);
-
-  if (args.mode === "regression") {
-    const regression = await runRegressionOnce(runtime, controls, lastReleasedSignature);
-    if (regression.releasedSignature) {
-      lastReleasedSignature = regression.releasedSignature;
-    }
-    controls.cleanup();
-    return;
-  }
 
   while (!controls.stopRequested) {
     if (await waitIfGloballyPaused(runtime, controls)) {
@@ -2328,7 +2252,7 @@ async function main() {
     await runArch(runtime, controls);
     await runDev(runtime, controls);
 
-    if (args.mode === "full" && !planningInProgress(runtime)) {
+    if (mode === "full" && !planningInProgress(runtime)) {
       const downstream = await runFullDownstream(
         runtime,
         controls,
@@ -2353,7 +2277,7 @@ async function main() {
 
     const after = snapshotHash(runtime);
     if (before === after) {
-      if (shouldUseLongIdleWait(runtime, args)) {
+      if (shouldUseLongIdleWait(runtime, mode)) {
         const minutes = Math.max(1, Math.round(DELIVERY_IDLE_WAIT_MS / 60000));
         process.stdout.write(
           `DELIVERY: waiting ${minutes}m - upstream idle (selected=0 arch=0 dev=0), checking again for new PO input\n`

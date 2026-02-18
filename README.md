@@ -28,14 +28,24 @@ Role intent:
 
 ## Runners
 
-### 1) PO runner
-- `node scripts/po-runner.js --mode vision`
-- `node scripts/po-runner.js --mode intake`
+### 1) ReqEng (interactive human discussion)
+- `node reqeng-cli.js`
+
+Purpose:
+- Discusses with a human and routes requirement input to:
+- `refinement` (unclear/unstructured),
+- `backlog` (clear, later),
+- `selected` (clear, immediate),
+- or `human-input` (after a human decision cycle).
+
+### 2) PO runner (autonomous processing)
+- `node po-runner.js --mode vision`
+- `node po-runner.js --mode intake`
 - `node po/po.js --runner --mode vision`
 - `node po/po.js --runner --mode intake`
 
 Modes:
-- `intake`: classic PO intake (refine + backlog -> selected, selected -> arch when needed).
+- `intake`: consumes `to-clarify`, `human-input`, `refinement`, `backlog` and prepares executable bundles in `selected`.
 - `vision`: autonomous Product Vision breakdown until vision is implemented.
 
 PO vision rules:
@@ -44,15 +54,13 @@ PO vision rules:
 - PO reconciles `released` outcomes against vision/docs and creates follow-up requirements for detected gaps.
 - PO escalates to `human-decision-needed` only for hard vision conflicts/violations.
 
-### 2) Delivery runner
-- `node scripts/delivery-runner.js --mode full`
-- `node scripts/delivery-runner.js --mode dev-only`
-- `node scripts/delivery-runner.js --mode regression`
+### 3) Delivery runner
+- `node delivery-runner.js --mode full`
+- `node delivery-runner.js --mode fast`
 
 Modes:
 - `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA(advisory) -> UAT(advisory) -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan.
-- `dev-only`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream.
-- `regression`: manual one-shot quality regression on `released` (QA final pass + UAT full regression), auto-routing findings to queues.
+- `fast`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream gates.
 
 Bundle behavior:
 - Bundles start from `selected`.
@@ -65,16 +73,6 @@ Bundle behavior:
 - `P2/P3` findings are auto-routed to `backlog`.
 - Strict non-automatable critical UAT checks are auto-routed to `human-decision-needed` as manual check packages.
 - MAINT cleanup findings are auto-routed using the same severity routing (`P0/P1 -> selected`, `P2/P3 -> backlog`).
-
-### 3) Legacy supervisor (`run.js`)
-- `node run.js --mode standard`
-- `node run.js --mode dev-only`
-
-Only two modes are supported:
-- `standard`: upstream loop (PO + ARCH/DEV) until backlog/planning is empty, then downstream bundle gates.
-- `dev-only`: upstream only, no downstream.
-
-Removed legacy modes: `detailed`, `bulk`, `fast`.
 
 ## Direct agent start
 
@@ -90,7 +88,7 @@ Removed legacy modes: `detailed`, `bulk`, `fast`.
 - `node sec/sec.js`
 - `node ux/ux.js`
 - `node deploy/deploy.js`
-- `node reqeng/reqeng.js`
+- `node reqeng-cli.js`
 
 Direct start behavior:
 - Without runner/auto switch, the agent starts the normal Codex interactive CLI and resumes its local thread.
@@ -111,17 +109,19 @@ Global pause guard:
 ## Quick start
 
 1) Setup local config:
-- `node scripts/setup-project.js --repo-root /absolute/path/to/project`
+- `node setup-project.js --repo-root /absolute/path/to/project`
 
-2) Start PO and delivery in separate terminals:
-- `node scripts/po-runner.js --mode vision`
-- `node scripts/delivery-runner.js --mode full`
+2) Variant A (human-driven intake):
+- terminal 1: `node reqeng-cli.js`
+- terminal 2: `node po-runner.js --mode intake`
+- terminal 3: `node delivery-runner.js --mode full`
 
-3) Optional manual full regression:
-- `node scripts/delivery-runner.js --mode regression`
+3) Variant B (autonomous vision):
+- terminal 1: `node po-runner.js --mode vision`
+- terminal 2: `node delivery-runner.js --mode full`
 
-Optional legacy supervisor:
-- `node run.js --mode standard`
+4) Optional fast delivery (no downstream gates):
+- `node delivery-runner.js --mode fast`
 
 ## Config
 
@@ -130,6 +130,7 @@ Optional legacy supervisor:
 Important sections:
 - `[paths]`: `repo_root`, `requirements_root`, `docs_dir`, `product_vision_dir`
 - `[loops]`: bundle sizes, polling, retry policy
+- `[delivery_runner]`: `default_mode = full|fast`
 - `[po]`: vision defaults and limits
 - `loops.force_underfilled_after_cycles`: starts underfilled bundles after N idle cycles (default `3`)
 - `[po].backlog_promote_*`: auto-promote sticky/high-value backlog items to `selected`
@@ -185,7 +186,7 @@ Cloud-agent copies are possible, but limits are often consumed quickly.
 ## Windows
 
 Use same Node commands in PowerShell/CMD/Git Bash:
-- `node scripts/setup-project.js --repo-root "C:\\git\\my-project"`
-- `node scripts/po-runner.js --mode vision`
-- `node scripts/delivery-runner.js --mode full`
-- `node run.js --mode standard`
+- `node setup-project.js --repo-root "C:\\git\\my-project"`
+- `node po-runner.js --mode vision`
+- `node delivery-runner.js --mode full`
+- `node reqeng-cli.js`

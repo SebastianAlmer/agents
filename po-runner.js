@@ -23,7 +23,7 @@ const {
   listQueueFiles,
   getActivePauseState,
 } = require("./lib/flow-core");
-const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
+const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
 
 const PO_IDLE_WAIT_MS = 5 * 60 * 1000;
 
@@ -140,7 +140,7 @@ function parseArgs(argv) {
 
 function usage() {
   console.log(
-    "Usage: node scripts/po-runner.js [--mode vision|intake] [--once] [--verbose|--no-verbose] [--low-watermark N] [--high-watermark N]"
+    "Usage: node po-runner.js [--mode vision|intake] [--once] [--verbose|--no-verbose] [--low-watermark N] [--high-watermark N]"
   );
 }
 
@@ -743,13 +743,13 @@ function selectIntakeSource(runtime) {
   if (humanInputFile) {
     return { path: humanInputFile, queue: "humanInput" };
   }
-  const backlogFile = getFirstFile(runtime.queues.backlog);
-  if (backlogFile) {
-    return { path: backlogFile, queue: "backlog" };
-  }
   const refinementFile = getFirstFile(runtime.queues.refinement);
   if (refinementFile) {
     return { path: refinementFile, queue: "refinement" };
+  }
+  const backlogFile = getFirstFile(runtime.queues.backlog);
+  if (backlogFile) {
+    return { path: backlogFile, queue: "backlog" };
   }
   return { path: "", queue: "" };
 }
@@ -759,8 +759,8 @@ function listIntakeCandidates(runtime) {
   const order = [
     ["toClarify", runtime.queues.toClarify],
     ["humanInput", runtime.queues.humanInput],
-    ["backlog", runtime.queues.backlog],
     ["refinement", runtime.queues.refinement],
+    ["backlog", runtime.queues.backlog],
   ];
   for (const [queueName, queueDir] of order) {
     const files = listQueueFiles(queueDir);
@@ -776,8 +776,8 @@ function listIntakeCandidatesFair(runtime, limit) {
   const queueOrder = [
     "toClarify",
     "humanInput",
-    "backlog",
     "refinement",
+    "backlog",
   ];
   const buckets = {};
   for (const queueName of queueOrder) {
@@ -1763,7 +1763,7 @@ async function main() {
     usage();
     process.exit(0);
   }
-  const runtime = loadRuntimeConfig(path.resolve(__dirname, ".."));
+  const runtime = loadRuntimeConfig(path.resolve(__dirname));
   ensureQueueDirs(runtime.queues);
 
   const mode = normalizePoMode(args.mode || runtime.po.defaultMode, runtime.po.defaultMode);

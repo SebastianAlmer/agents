@@ -4,13 +4,15 @@
   "version": "0.0.0",
   "description": "Codex agent flow runner",
   "scripts": {
-    "start": "node run.js",
-    "flow": "node run.js",
-    "po-runner": "node scripts/po-runner.js",
-    "delivery-runner": "node scripts/delivery-runner.js",
-    "run-po": "node scripts/run-po.js",
-    "run-ops": "node scripts/run-ops.js",
-    "setup": "node scripts/setup-project.js",
-    "reqeng": "node reqeng/reqeng.js"
+    "start": "node delivery-runner.js --mode full",
+    "flow": "node delivery-runner.js --mode full",
+    "po-runner": "node po-runner.js",
+    "po-intake": "node po-runner.js --mode intake",
+    "po-vision": "node po-runner.js --mode vision",
+    "delivery-runner": "node delivery-runner.js",
+    "delivery-fast": "node delivery-runner.js --mode fast",
+    "setup": "node setup-project.js",
+    "reqeng": "node reqeng-cli.js",
+    "reqeng-cli": "node reqeng-cli.js"
   }
 }

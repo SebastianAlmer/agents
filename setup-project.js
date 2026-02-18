@@ -3,7 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { parseToml } = require("../lib/runtime");
+const { parseToml } = require("./lib/runtime");
 
 function parseArgs(argv) {
   const args = {
@@ -260,7 +260,7 @@ function deepMerge(base, override) {
 
 function usage() {
   console.log(
-    "Usage: node scripts/setup-project.js --repo-root /abs/path [--flow standard|dev-only] [--product-vision-dir /abs/path] [--po-mode vision|intake] [--bundle-min-size N --bundle-max-size N] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--preflight hard|soft|none|snapshot] [--manual-downstream|--no-manual-downstream] [--qa-check <cmd>]"
+    "Usage: node setup-project.js --repo-root /abs/path [--flow full|fast] [--product-vision-dir /abs/path] [--po-mode vision|intake] [--bundle-min-size N --bundle-max-size N] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--qa-check <cmd>]"
   );
 }
 
@@ -291,7 +291,7 @@ function toTomlArray(values) {
 }
 
 function main() {
-  const agentsRoot = path.resolve(__dirname, "..");
+  const agentsRoot = path.resolve(__dirname);
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) {
@@ -323,22 +323,12 @@ function main() {
     ? args.productVisionDir
     : ((base.paths && base.paths.product_vision_dir) || "");
 
-  const flow = normalizeEnum(
-    args.flow || (base.run_defaults && base.run_defaults.flow) || "standard",
-    ["standard", "dev-only"],
-    "standard"
-  );
-  const flowDefaultMode = normalizeEnum(
-    (base.flow && base.flow.default_mode) || "standard",
-    ["standard", "dev-only", "auto"],
-    "standard"
-  );
-
-  const preflight = normalizeEnum(
-    args.preflight || (base.run_defaults && base.run_defaults.preflight) || "soft",
-    ["hard", "soft", "none", "snapshot"],
-    "soft"
-  );
+  const deliveryRunnerDefaultRaw = String(
+    args.flow || (base.delivery_runner && base.delivery_runner.default_mode) || "full"
+  ).toLowerCase();
+  const deliveryRunnerDefault = ["dev-only", "dev_only", "devonly"].includes(deliveryRunnerDefaultRaw)
+    ? "fast"
+    : normalizeEnum(deliveryRunnerDefaultRaw, ["full", "fast"], "full");
 
   const deployMode = normalizeEnum(
     args.deployMode || (base.deploy && base.deploy.mode) || "commit_push",
@@ -350,19 +340,6 @@ function main() {
     args.devRoutingMode || (base.dev_routing && base.dev_routing.mode) || "fullstack_only",
     ["fullstack_only", "split"],
     "fullstack_only"
-  );
-
-  const maxReq = Number.isFinite(args.maxReq)
-    ? args.maxReq
-    : Number.isFinite(base.run_defaults && base.run_defaults.max_req)
-      ? base.run_defaults.max_req
-      : 0;
-
-  const verbose = normalizeBool(args.verbose, normalizeBool(base.run_defaults && base.run_defaults.verbose, false));
-  const detail = normalizeBool(args.detail, normalizeBool(base.run_defaults && base.run_defaults.detail, false));
-  const manualDownstream = normalizeBool(
-    args.manualDownstream,
-    normalizeBool(base.run_defaults && base.run_defaults.manual_downstream, false)
   );
 
   const finalPushOnSuccess = normalizeBool(
@@ -536,26 +513,6 @@ function main() {
       ? base.qa.mandatory_checks.map((x) => String(x))
       : [];
 
-  const reviewStrategy = normalizeEnum(
-    (base.review && base.review.strategy) || "bundle",
-    ["bundle", "classic"],
-    "bundle"
-  );
-  const reviewParallel = normalizeBool(
-    base.review && base.review.parallel,
-    false
-  );
-  const reviewDefaultRisk = normalizeEnum(
-    (base.review && base.review.default_risk) || "low",
-    ["low", "medium", "high"],
-    "low"
-  );
-  const reviewMediumScopePolicy = normalizeEnum(
-    (base.review && base.review.medium_scope_policy) || "single_specialist",
-    ["single_specialist", "full"],
-    "single_specialist"
-  );
-
   const baseModels = base.models && typeof base.models === "object" ? base.models : {};
   const modelDefaults = {
     default: "gpt-5.3-codex-spark",
@@ -586,10 +543,6 @@ function main() {
     model_reasoning_effort: (base.codex && base.codex.model_reasoning_effort) || "xhigh",
   };
 
-  const snapshotCommitMessagePrefix =
-    (base.preflight && base.preflight.snapshot_commit_message_prefix) ||
-    "chore(flow): preflight snapshot";
-
   const content = [
     "[paths]",
     `repo_root = ${toTomlString(repoRoot)}`,
@@ -606,22 +559,8 @@ function main() {
     `retry_delay_seconds = ${toTomlInt(Number.isFinite(baseLoops.retry_delay_seconds) ? baseLoops.retry_delay_seconds : 2)}`,
     `force_underfilled_after_cycles = ${toTomlInt(Number.isFinite(baseLoops.force_underfilled_after_cycles) ? baseLoops.force_underfilled_after_cycles : 3)}`,
     "",
-    "[flow]",
-    `default_mode = ${toTomlString(flowDefaultMode)}`,
-    `idle_poll_seconds = ${toTomlInt(Number.isFinite(base.flow && base.flow.idle_poll_seconds) ? base.flow.idle_poll_seconds : 300)}`,
-    `max_retries = ${toTomlInt(Number.isFinite(base.flow && base.flow.max_retries) ? base.flow.max_retries : 3)}`,
-    `retry_delay_seconds = ${toTomlInt(Number.isFinite(base.flow && base.flow.retry_delay_seconds) ? base.flow.retry_delay_seconds : 2)}`,
-    "",
-    "[run_defaults]",
-    `flow = ${toTomlString(flow)}`,
-    `max_req = ${toTomlInt(maxReq)}`,
-    `verbose = ${toTomlBool(verbose)}`,
-    `detail = ${toTomlBool(detail)}`,
-    `preflight = ${toTomlString(preflight)}`,
-    `manual_downstream = ${toTomlBool(manualDownstream)}`,
-    "",
-    "[preflight]",
-    `snapshot_commit_message_prefix = ${toTomlString(snapshotCommitMessagePrefix)}`,
+    "[delivery_runner]",
+    `default_mode = ${toTomlString(deliveryRunnerDefault)}`,
     "",
     "[deploy]",
     `mode = ${toTomlString(deployMode)}`,
@@ -683,12 +622,6 @@ function main() {
     "[qa]",
     `mandatory_checks = ${toTomlArray(qaChecks)}`,
     "",
-    "[review]",
-    `strategy = ${toTomlString(reviewStrategy)}`,
-    `parallel = ${toTomlBool(reviewParallel)}`,
-    `default_risk = ${toTomlString(reviewDefaultRisk)}`,
-    `medium_scope_policy = ${toTomlString(reviewMediumScopePolicy)}`,
-    "",
     "[models]",
     `default = ${toTomlString(models.default)}`,
     `po = ${toTomlString(models.po)}`,
@@ -719,9 +652,7 @@ function main() {
   console.log(`- product_vision_dir: ${productVisionDir || "<default>"}`);
   console.log(`- loops.bundle_min_size: ${bundleMinSize}`);
   console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
-  console.log(`- run_defaults.flow: ${flow}`);
-  console.log(`- run_defaults.preflight: ${preflight}`);
-  console.log(`- run_defaults.manual_downstream: ${manualDownstream}`);
+  console.log(`- delivery_runner.default_mode: ${deliveryRunnerDefault}`);
   console.log(`- deploy.mode: ${deployMode}`);
   console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled}, backlog_promote_enabled=${poBacklogPromoteEnabled}, backlog_promote_after_cycles=${poBacklogPromoteAfterCycles}, backlog_promote_min_business_score=${poBacklogPromoteMinBusinessScore}, backlog_promote_max_per_cycle=${poBacklogPromoteMaxPerCycle})`);
   console.log(`- arch.routing_mode: ${archRoutingMode}`);
@@ -729,7 +660,6 @@ function main() {
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
   console.log(`- dev watchdog: timeout=${devRunTimeoutSeconds}s same_thread_retries=${devSameThreadRetries} fresh_thread_retries=${devFreshThreadRetries}`);
   console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, uat=${models.uat}, maint=${models.maint}, ux=${models.ux}, deploy=${models.deploy}`);
-  console.log(`- review: strategy=${reviewStrategy}, parallel=${reviewParallel}, default_risk=${reviewDefaultRisk}, medium_scope_policy=${reviewMediumScopePolicy}`);
   console.log("If you change dev_routing mode later, run setup-project again to realign defaults.");
 }
 

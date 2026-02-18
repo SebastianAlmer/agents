@@ -81,7 +81,7 @@ function forwardRunnerArgs(argv) {
 
 function runRunnerScript(args, agentsRoot) {
   return new Promise((resolve) => {
-    const scriptPath = path.join(agentsRoot, "scripts", "po-runner.js");
+    const scriptPath = path.join(agentsRoot, "po-runner.js");
     const proc = spawn(process.execPath, [scriptPath, ...args], {
       cwd: agentsRoot,
       stdio: "inherit",

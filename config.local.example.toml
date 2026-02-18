@@ -1,142 +1,83 @@
+# ============================================================================
+# Beispiel: config.local.toml (projektspezifisch)
+# ============================================================================
+# Diese Datei ist dein Startpunkt pro Projekt.
+# Kopiere sie nach config.local.toml und passe mindestens [paths].repo_root an.
+#
+# Hinweis:
+# - Alles, was hier fehlt, faellt auf config.defaults.toml zurueck.
+# - Halte local moeglichst klein: nur echte Projekt-Overrides eintragen.
+#
+# Startkommandos laufen aus dem Repo-Root:
+# - node setup-project.js --repo-root /abs/path
+# - node po-runner.js --mode vision|intake
+# - node delivery-runner.js --mode full|fast
+# - node reqeng-cli.js
+
 [paths]
-# Pflicht: JA
-# Absoluter Pfad zum Ziel-Repository, in dem die Agenten arbeiten sollen.
+# PFLICHT: Absoluter Pfad zu deinem Ziel-Repo.
 repo_root = "/home/you/git/your-project"
 
-# Pflicht: NEIN
-# Requirements-Ordner. Standard passt fuer dieses agents-Repo.
-requirements_root = "./requirements"
-
-# Pflicht: NEIN
-# Doku-Basisordner im Ziel-Repo. Leer = <repo_root>/docs.
+# OPTIONAL: Wenn leer, wird <repo_root>/docs verwendet.
 docs_dir = ""
 
-# Pflicht: NEIN
-# Produktvision-Ordner. Leer = <docs_dir>/product-operating-system.
+# OPTIONAL: Wenn leer, wird <docs_dir>/product-operating-system verwendet.
 product_vision_dir = ""
 
+# OPTIONAL: Nur aendern, wenn du die Requirements bewusst woanders verwalten willst.
+requirements_root = "./requirements"
+
 [loops]
-# Optionales Tuning fuer Bundle-Groessen und Polling.
-bundle_min_size = 5
-bundle_max_size = 20
-po_poll_seconds = 20
-delivery_poll_seconds = 20
-max_retries = 3
-retry_delay_seconds = 2
-# Nach N Idle-Zyklen darf Delivery trotz zu kleinem Bundle starten.
-force_underfilled_after_cycles = 3
+# Typischer Startwert fuer produktive Batches.
+bundle_min_size = 10
+bundle_max_size = 10
 
-[flow]
-# Legacy run.js Default: standard | dev-only
-default_mode = "standard"
-idle_poll_seconds = 300
-max_retries = 3
-retry_delay_seconds = 2
+[delivery_runner]
+# full = kompletter Flow mit UX/SEC/QA/UAT/DEPLOY
+# fast = nur arch+dev (ohne Downstream-Gates)
+default_mode = "full"
 
-[run_defaults]
-# Legacy run.js Defaults
-flow = "standard"
-max_req = 0
-verbose = false
-detail = false
-# hard | soft | none | snapshot
-preflight = "soft"
-manual_downstream = false
+[po]
+# Intake-Buffer fuer PO im Vision-/Intake-Betrieb.
+selected_high_watermark = 10
+selected_low_watermark = 0
+intake_max_per_cycle = 10
 
-[preflight]
-snapshot_commit_message_prefix = "chore(flow): preflight snapshot"
+[dev_routing]
+# split = FE/BE/FS Routing aktiv
+mode = "split"
+
+[dev_agents]
+# Welche Dev-Agenten aktiv sind.
+use_fe = true
+use_be = true
+use_fs = true
 
 [deploy]
 # check | commit | commit_push
 mode = "commit_push"
-final_push_on_success = true
-require_clean_start_for_commits = true
 
-[po]
-# intake | vision
-default_mode = "vision"
-vision_max_cycles = 100
-vision_max_requirements = 1000
-vision_stable_cycles = 2
-intake_max_per_cycle = 3
-intake_loop_cooldown_cycles = 3
-intake_idempotence_enabled = true
-# Backlog-Autopromotion gegen Stau.
-backlog_promote_enabled = true
-backlog_promote_after_cycles = 3
-backlog_promote_min_business_score = 80
-backlog_promote_max_per_cycle = 2
-
-[arch]
-# always | triggered | never
-routing_mode = "triggered"
-require_for_scopes = ["fullstack"]
-require_for_review_risks = ["high"]
-require_for_review_scopes = ["qa_sec", "full"]
-trigger_frontmatter_flags = ["arch_required", "needs_arch"]
-trigger_keywords = [
-  "auth",
-  "authorization",
-  "permission",
-  "security",
-  "secret",
-  "token",
-  "login",
-  "password",
-  "encryption",
-  "privacy",
-  "compliance",
-  "gdpr",
-  "pii",
-  "payment",
-  "billing",
-  "migration",
-  "schema",
-  "database",
-  "prisma",
-  "webhook",
-  "oauth",
-  "rbac",
-  "acl",
-  "sso",
-  "destructive"
-]
-digest_enabled = true
-digest_file = ".runtime/arch-docs-digest.md"
-digest_max_files = 12
-digest_max_headings_per_file = 20
-max_retries = 0
-
-[dev_routing]
-# fullstack_only | split
-mode = "fullstack_only"
-default_scope = "fullstack"
-
-[dev_agents]
-# Mindestens ein Agent muss true sein.
-use_fe = false
-use_be = false
-use_fs = true
-
-[dev]
-# DEV Watchdog und Recovery-Leiter.
-run_timeout_seconds = 900
-same_thread_retries = 1
-fresh_thread_retries = 1
+[deploy.pr]
+# PR-Erstellung standardmaessig aus.
+enabled = false
+provider = "github"
+remote = "origin"
+base_branch = "main"
+head_mode = "current"
 
 [qa]
-# Projektspezifische QA-Kommandos. Leer = generisch.
+# WICHTIG: Hier projektspezifische Pflichtchecks hinterlegen, sonst kann QA
+# kritische Laufzeit-/Migrationsfehler spaeter erkennen.
+# Beispiel:
+# mandatory_checks = [
+#   "npm --prefix app run db:migrate",
+#   "npm --prefix app run test",
+#   "npm --prefix web run lint"
+# ]
 mandatory_checks = []
 
-[review]
-# Legacy-Optionen (vor allem fuer run.js Kompatibilitaet).
-strategy = "bundle"
-parallel = false
-default_risk = "low"
-medium_scope_policy = "single_specialist"
-
 [models]
-# Modellzuordnung pro Agent.
+# Modellzuordnung pro Agent (Beispielprofil).
 default = "gpt-5.3-codex-spark"
 po = "gpt-5.3-codex"
 arch = "gpt-5.3-codex"
@@ -152,7 +93,7 @@ ux = "gpt-5.3-codex-spark"
 deploy = "gpt-5.3-codex-spark"
 
 [codex]
-# Basis-Codex-Ausfuehrungsprofil.
+# Basisprofil fuer alle generierten Agent-Configs.
 model = "gpt-5.3-codex-spark"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
