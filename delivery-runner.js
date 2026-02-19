@@ -26,6 +26,7 @@ function parseArgs(argv) {
   const args = {
     help: false,
     once: false,
+    force: false,
     verbose: false,
     mode: "",
     minBundle: NaN,
@@ -38,6 +39,10 @@ function parseArgs(argv) {
 
     if (arg === "--once" || arg === "-once") {
       args.once = true;
+      continue;
+    }
+    if (arg === "--force") {
+      args.force = true;
       continue;
     }
     if (arg === "--help" || arg === "-h") {
@@ -88,7 +93,7 @@ function parseArgs(argv) {
 
 function usage() {
   console.log(
-    "Usage: node delivery-runner.js [--mode full|fast|test] [--once] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
+    "Usage: node delivery-runner.js [--mode full|fast|test] [--once] [--force] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
   );
 }
 
@@ -1189,6 +1194,12 @@ function uatFullRegressionGatePath(runtime) {
   return path.join(dir, "uat-full-regression-gate.json");
 }
 
+function e2eFullGatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "e2e-full-gate.json");
+}
+
 function qaFinalGatePath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
   fs.mkdirSync(dir, { recursive: true });
@@ -1709,6 +1720,28 @@ function createUatExecutionFailureGate() {
   };
 }
 
+function createE2eExecutionFailureGate(details) {
+  const stage = String((details && details.stage) || "execution").trim() || "execution";
+  const command = String((details && details.command) || "").trim();
+  const output = truncateForQueueNote(String((details && details.output) || "no output"), 700);
+  const timeout = Boolean(details && details.timedOut);
+  const summarySuffix = command ? `: ${command}` : "";
+  const timeoutSuffix = timeout ? " (timeout)" : "";
+  return {
+    status: "fail",
+    summary: `Deterministic E2E ${stage} failed${timeoutSuffix}${summarySuffix}`,
+    blocking_findings: [`P1: Deterministic E2E ${stage} failed${summarySuffix}`],
+    findings: [
+      {
+        severity: "P1",
+        title: `Deterministic E2E ${stage} failed`,
+        details: output,
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
 function createMaintExecutionFailureGate() {
   return {
     status: "fail",
@@ -1836,18 +1869,51 @@ function truncateForQueueNote(text, max = 260) {
   return `${raw.slice(0, Math.max(1, max - 3))}...`;
 }
 
-function runShellCheckCommand(runtime, command) {
+function runShellCheckCommand(runtime, command, options = {}) {
+  const timeoutSeconds = Math.max(0, Number.parseInt(String(options.timeoutSeconds || 0), 10));
+  const cwd = String(options.cwd || runtime.repoRoot || "").trim() || runtime.repoRoot;
+  const env = options.env && typeof options.env === "object"
+    ? { ...process.env, ...options.env }
+    : process.env;
   const result = spawnSync("bash", ["-lc", command], {
-    cwd: runtime.repoRoot,
+    cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined,
   });
   const output = `${String(result.stdout || "").trim()}\n${String(result.stderr || "").trim()}`.trim();
+  const timedOut = Boolean(result.error && result.error.code === "ETIMEDOUT");
+  const errorText = result.error ? String(result.error.message || result.error) : "";
   return {
-    ok: result.status === 0,
-    status: result.status,
-    output,
+    ok: result.status === 0 && !timedOut,
+    status: Number.isInteger(result.status) ? result.status : 1,
+    signal: String(result.signal || ""),
+    timedOut,
+    output: `${output}\n${errorText}`.trim(),
   };
+}
+
+function parseEnvPairs(value) {
+  const entries = Array.isArray(value) ? value : [];
+  const env = {};
+  for (const item of entries) {
+    const pair = String(item || "").trim();
+    if (!pair) {
+      continue;
+    }
+    const idx = pair.indexOf("=");
+    if (idx <= 0) {
+      continue;
+    }
+    const key = pair.slice(0, idx).trim();
+    const val = pair.slice(idx + 1);
+    if (!key) {
+      continue;
+    }
+    env[key] = val;
+  }
+  return env;
 }
 
 function runRunnerMandatoryChecks(runtime, controls) {
@@ -2233,6 +2299,192 @@ async function runUatFullRegression(runtime, controls) {
   };
 }
 
+function writeGateFile(filePath, gate) {
+  if (!filePath) {
+    return;
+  }
+  const payload = gate && typeof gate === "object" ? gate : qaGateTemplate();
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function runE2eCommandList(runtime, controls, stage, commands, options) {
+  const list = Array.isArray(commands) ? commands : [];
+  const timeoutSeconds = options && options.timeoutSeconds ? options.timeoutSeconds : 0;
+  const cwd = options && options.cwd ? options.cwd : runtime.repoRoot;
+  const env = options && options.env ? options.env : {};
+  let executed = 0;
+  for (let i = 0; i < list.length; i++) {
+    const command = String(list[i] || "").trim();
+    if (!command) {
+      continue;
+    }
+    executed += 1;
+    log(controls, `E2E ${stage} command ${i + 1}/${list.length}: ${command}`);
+    const result = runShellCheckCommand(runtime, command, {
+      cwd,
+      timeoutSeconds,
+      env,
+    });
+    if (!result.ok) {
+      return {
+        ok: false,
+        executed,
+        gate: createE2eExecutionFailureGate({
+          stage,
+          command,
+          output: result.output,
+          timedOut: result.timedOut,
+        }),
+      };
+    }
+  }
+  return {
+    ok: true,
+    executed,
+  };
+}
+
+async function runDeterministicE2eFull(runtime, controls, options = {}) {
+  const e2e = runtime.e2e || {};
+  const required = Boolean(options.required);
+  const enabled = Boolean(e2e.enabled);
+  const gatePath = e2eFullGatePath(runtime);
+  writeGateFile(gatePath, qaGateTemplate());
+
+  if (!enabled) {
+    if (!required) {
+      return {
+        progressed: false,
+        gate: null,
+        skipped: true,
+        reason: "disabled",
+      };
+    }
+    const gate = createE2eExecutionFailureGate({
+      stage: "config",
+      command: "[e2e].enabled=true",
+      output: "Deterministic E2E required but [e2e].enabled is false.",
+    });
+    writeGateFile(gatePath, gate);
+    return {
+      progressed: true,
+      gate,
+      skipped: false,
+    };
+  }
+
+  const testCommand = String(e2e.testCommand || "").trim();
+  if (!testCommand) {
+    const gate = createE2eExecutionFailureGate({
+      stage: "config",
+      command: "[e2e].test_command",
+      output: "Deterministic E2E is enabled but [e2e].test_command is empty.",
+    });
+    writeGateFile(gatePath, gate);
+    return {
+      progressed: true,
+      gate,
+      skipped: false,
+    };
+  }
+
+  const cwd = String(e2e.workingDir || runtime.repoRoot || "").trim() || runtime.repoRoot;
+  const timeoutRaw = Number.parseInt(String(e2e.timeoutSeconds || 1800), 10);
+  const timeoutSeconds = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 1800;
+  const env = parseEnvPairs(e2e.env);
+  let executedCommands = 0;
+  let failureGate = null;
+
+  log(controls, `E2E deterministic full run start cwd=${cwd}`);
+
+  const setupResult = runE2eCommandList(runtime, controls, "setup", e2e.setupCommands, {
+    cwd,
+    timeoutSeconds,
+    env,
+  });
+  executedCommands += setupResult.executed || 0;
+  if (!setupResult.ok) {
+    failureGate = setupResult.gate;
+  }
+
+  if (!failureGate) {
+    const healthResult = runE2eCommandList(runtime, controls, "healthcheck", e2e.healthcheckCommands, {
+      cwd,
+      timeoutSeconds,
+      env,
+    });
+    executedCommands += healthResult.executed || 0;
+    if (!healthResult.ok) {
+      failureGate = healthResult.gate;
+    }
+  }
+
+  if (!failureGate) {
+    log(controls, `E2E test command: ${testCommand}`);
+    const testResult = runShellCheckCommand(runtime, testCommand, {
+      cwd,
+      timeoutSeconds,
+      env,
+    });
+    executedCommands += 1;
+    if (!testResult.ok) {
+      failureGate = createE2eExecutionFailureGate({
+        stage: "test",
+        command: testCommand,
+        output: testResult.output,
+        timedOut: testResult.timedOut,
+      });
+    }
+  }
+
+  const teardownCommand = String(e2e.teardownCommand || "").trim();
+  if (teardownCommand) {
+    log(controls, `E2E teardown command: ${teardownCommand}`);
+    const teardownResult = runShellCheckCommand(runtime, teardownCommand, {
+      cwd,
+      timeoutSeconds,
+      env,
+    });
+    executedCommands += 1;
+    if (!teardownResult.ok) {
+      const teardownGate = createE2eExecutionFailureGate({
+        stage: "teardown",
+        command: teardownCommand,
+        output: teardownResult.output,
+        timedOut: teardownResult.timedOut,
+      });
+      if (!failureGate) {
+        failureGate = teardownGate;
+      } else {
+        log(controls, `E2E teardown also failed: ${truncateForQueueNote(teardownResult.output, 220)}`);
+      }
+    }
+  }
+
+  if (failureGate) {
+    writeGateFile(gatePath, failureGate);
+    return {
+      progressed: true,
+      gate: failureGate,
+      skipped: false,
+    };
+  }
+
+  const passGate = {
+    status: "pass",
+    summary: `Deterministic E2E full regression passed (${executedCommands} command(s)).`,
+    blocking_findings: [],
+    findings: [],
+    manual_uat: [],
+  };
+  writeGateFile(gatePath, passGate);
+  return {
+    progressed: true,
+    gate: passGate,
+    skipped: false,
+  };
+}
+
 function comprehensiveSystemTestStatePath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "delivery-quality");
   fs.mkdirSync(dir, { recursive: true });
@@ -2320,6 +2572,12 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
 
   const strict = options.strict !== undefined ? Boolean(options.strict) : strictGateEnabled(runtime);
   const reason = String(options.reason || "manual").trim() || "manual";
+  const runDeterministicE2e = options.runDeterministicE2e !== undefined
+    ? Boolean(options.runDeterministicE2e)
+    : Boolean(runtime.e2e && runtime.e2e.enabled);
+  const requireDeterministicE2e = options.requireDeterministicE2e !== undefined
+    ? Boolean(options.requireDeterministicE2e)
+    : false;
   const releasedBundleKey = queueBundleKey(runtime, "released");
 
   log(controls, `comprehensive test start reason=${reason} strict=${strict}`);
@@ -2405,6 +2663,28 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
       };
     }
     resetGateAttempt(runtime, "qa-final", releasedBundleKey);
+  }
+
+  if (runDeterministicE2e) {
+    const e2eFull = await runDeterministicE2eFull(runtime, controls, {
+      required: requireDeterministicE2e,
+    });
+    if (!e2eFull.progressed && !e2eFull.gate) {
+      log(controls, "E2E deterministic full run skipped");
+    }
+    if (e2eFull.progressed && e2eFull.gate) {
+      const e2eGate = e2eFull.gate;
+      applyGateByPolicy(runtime, controls, "e2e-full", e2eGate, strict);
+      if (strict && !gatePass(e2eGate)) {
+        await strictGateFailRoute(runtime, controls, "e2e-full", e2eGate);
+        return {
+          progressed: true,
+          passed: false,
+          reason: "e2e-full-failed",
+        };
+      }
+      resetGateAttempt(runtime, "e2e-full", releasedBundleKey);
+    }
   }
 
   const uatFull = await runUatFullRegression(runtime, controls);
@@ -2948,6 +3228,7 @@ async function main() {
   let underfilledCycles = 0;
   let lastReleasedSignature = "";
   let lastMaintSignature = releasedSignature(runtime);
+  let forceComprehensiveOnce = Boolean(args.force);
 
   while (!controls.stopRequested) {
     if (await waitIfGloballyPaused(runtime, controls)) {
@@ -2992,11 +3273,27 @@ async function main() {
     }
 
     if (mode === "test" && !planningInProgress(runtime) && !downstreamInProgress(runtime)) {
-      await maybeRunComprehensiveSystemTest(runtime, controls, { reason: "test-mode" });
+      const result = await maybeRunComprehensiveSystemTest(runtime, controls, {
+        reason: "test-mode",
+        force: forceComprehensiveOnce,
+        runDeterministicE2e: true,
+        requireDeterministicE2e: Boolean(runtime.e2e && runtime.e2e.requiredInTestMode),
+      });
+      if (forceComprehensiveOnce && result.reason !== "no-signature") {
+        forceComprehensiveOnce = false;
+      }
     }
 
     if (mode === "full" && shouldTriggerVisionFinalComprehensiveTest(runtime)) {
-      await maybeRunComprehensiveSystemTest(runtime, controls, { reason: "vision-complete" });
+      const result = await maybeRunComprehensiveSystemTest(runtime, controls, {
+        reason: "vision-complete",
+        force: forceComprehensiveOnce,
+        runDeterministicE2e: Boolean(runtime.e2e && runtime.e2e.runOnFullCompletion),
+        requireDeterministicE2e: false,
+      });
+      if (forceComprehensiveOnce && result.reason !== "no-signature") {
+        forceComprehensiveOnce = false;
+      }
     }
 
     if (args.once) {

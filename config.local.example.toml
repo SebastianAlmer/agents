@@ -47,6 +47,33 @@ route_to_dev_on_fail = true
 max_fix_cycles = 3
 emit_followups_on_fail = false
 
+[e2e]
+# Deterministischer Volltest:
+# - mode=test: wird (je nach required_in_test_mode) als Pflicht-Gate genutzt
+# - mode=full: optional am Vision-Ende (run_on_full_completion)
+enabled = false
+required_in_test_mode = true
+run_on_full_completion = true
+working_dir = ""
+timeout_seconds = 1800
+
+# Beispiel: vor Test DB sauber machen / Dienste bereitstellen.
+setup_commands = []
+
+# Beispiel: Healthchecks auf laufende Dienste.
+healthcheck_commands = []
+
+# PFLICHT bei enabled=true:
+# Hier den echten deterministischen Volltest eintragen, z. B.
+# test_command = "npm --prefix web exec playwright test --config=playwright.config.ts --workers=1 --retries=0"
+test_command = ""
+
+# Optionales Cleanup.
+teardown_command = ""
+
+# Optionales Test-Env.
+env = ["CI=1", "TZ=UTC"]
+
 [po]
 # Intake-Buffer fuer PO im Vision-/Intake-Betrieb.
 selected_high_watermark = 10

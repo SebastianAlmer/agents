@@ -79,6 +79,43 @@ max_fix_cycles = 3
 # Empfohlen: false, damit DEV erst das aktuelle Bundle sauber stabilisiert.
 emit_followups_on_fail = false
 
+[e2e]
+# OPTIONAL: Deterministischer Full-E2E-Gate (z. B. Playwright/Cypress).
+# Dieser Lauf ist shell-basiert und damit technologieneutral.
+enabled = false
+
+# OPTIONAL: Wenn true, dann gilt in delivery-runner --mode test:
+# E2E MUSS laufen. Ist e2e deaktiviert/fehlerhaft konfiguriert, wird der Gate-Lauf als FAIL gewertet.
+# Hinweis: Mit enabled=false und required_in_test_mode=true ist mode=test absichtlich nicht gruen.
+required_in_test_mode = true
+
+# OPTIONAL: Wenn true, wird beim finalen Vision-Abschluss in mode=full
+# der deterministische E2E-Lauf zusaetzlich zur Agent-Regression ausgefuehrt.
+run_on_full_completion = true
+
+# OPTIONAL: Arbeitsverzeichnis fuer E2E-Kommandos.
+# Leer = automatisch <repo_root>.
+working_dir = ""
+
+# OPTIONAL: Timeout pro E2E-Kommando (Sekunden).
+timeout_seconds = 1800
+
+# OPTIONAL: Vorbereitung vor dem eigentlichen Test (z. B. DB reset/migrate/seed, Build).
+setup_commands = []
+
+# OPTIONAL: Verfuegbarkeits-/Health-Pruefungen vor test_command.
+healthcheck_commands = []
+
+# OPTIONAL: Pflicht bei enabled=true.
+# Hier muss der deterministische Volltest stehen (z. B. Playwright CI Command).
+test_command = ""
+
+# OPTIONAL: Aufraeumen nach dem Testlauf (wird auch nach FAIL versucht).
+teardown_command = ""
+
+# OPTIONAL: Environment-Variablen als KEY=VALUE Liste fuer alle E2E-Kommandos.
+env = []
+
 [deploy]
 # OPTIONAL: check | commit | commit_push
 mode = "commit_push"

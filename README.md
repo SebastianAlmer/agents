@@ -60,9 +60,9 @@ PO vision rules:
 - `node delivery-runner.js --mode test`
 
 Modes:
-- `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> UAT -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan. When Product Vision is marked complete and queues are drained, runner auto-triggers one comprehensive final test over `released` (UX final + SEC final + QA final + UAT full regression).
+- `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> UAT -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan. When Product Vision is marked complete and queues are drained, runner auto-triggers one comprehensive final test over `released` (UX final + SEC final + QA final + optional deterministic E2E + UAT full regression).
 - `fast`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream gates.
-- `test`: quality/regression mode. Runs delivery quality gates without deploy git actions and then performs a comprehensive full-system test over `released`.
+- `test`: quality/regression mode. Runs delivery quality gates without deploy git actions and then performs a comprehensive full-system test over `released`. If `[e2e].required_in_test_mode=true`, deterministic E2E is a mandatory gate.
 
 Bundle behavior:
 - Bundles start from `selected`.
@@ -77,6 +77,14 @@ Bundle behavior:
 - `P2/P3` findings are auto-routed to `backlog`.
 - Strict non-automatable critical UAT checks are auto-routed to `human-decision-needed` as manual check packages.
 - MAINT cleanup findings are auto-routed using the same severity routing (`P0/P1 -> selected`, `P2/P3 -> backlog`).
+
+Deterministic E2E:
+- Controlled via `[e2e]` config.
+- Recommended runner: Playwright (Selenium still possible via shell command).
+- Runner executes shell commands in this order: `setup_commands` -> `healthcheck_commands` -> `test_command` -> `teardown_command`.
+- In `mode=test`, deterministic E2E can be enforced as a hard gate.
+- If `required_in_test_mode=true` and E2E is not configured (`enabled=false` or missing `test_command`), `mode=test` fails by design.
+- Recommended for deterministic runs: `workers=1`, `retries=0`, fixed fixtures/environment.
 
 ## Direct agent start
 
@@ -139,6 +147,7 @@ Important sections:
 - `[loops]`: bundle sizes, polling, retry policy
 - `[delivery_runner]`: `default_mode = full|fast|test`
 - `[delivery_quality]`: strict QA/UAT gate behavior and bounded fix loop
+- `[e2e]`: deterministic full E2E configuration (`enabled`, `required_in_test_mode`, `run_on_full_completion`, commands, timeout, env)
 - `[po]`: vision defaults and limits
 - `loops.force_underfilled_after_cycles`: starts underfilled bundles after N idle cycles (default `3`)
 - `[po].backlog_promote_*`: auto-promote sticky/high-value backlog items to `selected`

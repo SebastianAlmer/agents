@@ -536,6 +536,26 @@ function main() {
     true
   );
 
+  const baseE2e = base.e2e && typeof base.e2e === "object" ? base.e2e : {};
+  const e2eEnabled = normalizeBool(baseE2e.enabled, false);
+  const e2eRequiredInTestMode = normalizeBool(baseE2e.required_in_test_mode, true);
+  const e2eRunOnFullCompletion = normalizeBool(baseE2e.run_on_full_completion, true);
+  const e2eWorkingDir = String(baseE2e.working_dir || "").trim();
+  const e2eTimeoutSeconds = Number.isFinite(baseE2e.timeout_seconds)
+    ? Math.max(30, baseE2e.timeout_seconds)
+    : 1800;
+  const e2eSetupCommands = Array.isArray(baseE2e.setup_commands)
+    ? baseE2e.setup_commands.map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+  const e2eHealthcheckCommands = Array.isArray(baseE2e.healthcheck_commands)
+    ? baseE2e.healthcheck_commands.map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+  const e2eTestCommand = String(baseE2e.test_command || "").trim();
+  const e2eTeardownCommand = String(baseE2e.teardown_command || "").trim();
+  const e2eEnv = Array.isArray(baseE2e.env)
+    ? baseE2e.env.map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+
   const baseModels = base.models && typeof base.models === "object" ? base.models : {};
   const modelDefaults = {
     default: "gpt-5.3-codex-spark",
@@ -592,6 +612,18 @@ function main() {
     `route_to_dev_on_fail = ${toTomlBool(deliveryQualityRouteToDevOnFail)}`,
     `max_fix_cycles = ${toTomlInt(deliveryQualityMaxFixCycles)}`,
     `emit_followups_on_fail = ${toTomlBool(deliveryQualityEmitFollowupsOnFail)}`,
+    "",
+    "[e2e]",
+    `enabled = ${toTomlBool(e2eEnabled)}`,
+    `required_in_test_mode = ${toTomlBool(e2eRequiredInTestMode)}`,
+    `run_on_full_completion = ${toTomlBool(e2eRunOnFullCompletion)}`,
+    `working_dir = ${toTomlString(e2eWorkingDir)}`,
+    `timeout_seconds = ${toTomlInt(e2eTimeoutSeconds)}`,
+    `setup_commands = ${toTomlArray(e2eSetupCommands)}`,
+    `healthcheck_commands = ${toTomlArray(e2eHealthcheckCommands)}`,
+    `test_command = ${toTomlString(e2eTestCommand)}`,
+    `teardown_command = ${toTomlString(e2eTeardownCommand)}`,
+    `env = ${toTomlArray(e2eEnv)}`,
     "",
     "[deploy]",
     `mode = ${toTomlString(deployMode)}`,
@@ -686,6 +718,7 @@ function main() {
   console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
   console.log(`- delivery_runner.default_mode: ${deliveryRunnerDefault}`);
   console.log(`- delivery_quality: strict=${deliveryQualityStrictGate} qa_pass=${deliveryQualityRequireQaPass} uat_pass=${deliveryQualityRequireUatPass} route_to_dev=${deliveryQualityRouteToDevOnFail} max_fix_cycles=${deliveryQualityMaxFixCycles} emit_followups_on_fail=${deliveryQualityEmitFollowupsOnFail}`);
+  console.log(`- e2e: enabled=${e2eEnabled} required_in_test_mode=${e2eRequiredInTestMode} run_on_full_completion=${e2eRunOnFullCompletion} timeout=${e2eTimeoutSeconds}s`);
   console.log(`- deploy.mode: ${deployMode}`);
   console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled}, backlog_promote_enabled=${poBacklogPromoteEnabled}, backlog_promote_after_cycles=${poBacklogPromoteAfterCycles}, backlog_promote_min_business_score=${poBacklogPromoteMinBusinessScore}, backlog_promote_max_per_cycle=${poBacklogPromoteMaxPerCycle})`);
   console.log(`- arch.routing_mode: ${archRoutingMode}`);
