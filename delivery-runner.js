@@ -442,6 +442,35 @@ function hasArchHardBlockEvidence(filePath) {
   return hasBlockerType && hasRequiredInput;
 }
 
+function hasBusinessClarificationEvidence(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+
+  const fm = parseFrontMatter(filePath);
+  if (
+    frontMatterTruthy(fm.needs_human_decision)
+    || frontMatterTruthy(fm.business_decision_needed)
+    || frontMatterTruthy(fm.product_decision_needed)
+    || frontMatterTruthy(fm.needs_po_decision)
+  ) {
+    return true;
+  }
+
+  const clarifyTypes = parseDelimitedLower(
+    fm.clarification_type || fm.clarify_type || fm.decision_type || ""
+  );
+  if (clarifyTypes.some((token) => ["business", "product", "domain", "stakeholder"].includes(token))) {
+    return true;
+  }
+
+  const raw = fs.readFileSync(filePath, "utf8");
+  const hasBusinessCue = /(^|\n)##\s*(open questions?|questions? for (human|po|product)|human decision needed)\b/i.test(raw)
+    || /\b(question for (human|po|product|stakeholder)|business decision|product decision|required stakeholder decision)\b/i.test(raw);
+  const hasQuestionShape = /\?\s*(\n|$)/.test(raw);
+  return hasBusinessCue && hasQuestionShape;
+}
+
 function parseDelimitedLower(value) {
   return String(value || "")
     .toLowerCase()
@@ -607,13 +636,13 @@ function recoverArchMisroute(runtime, fileName) {
   const fm = parseFrontMatter(misplaced);
   const normalized = normalizeStatus(fm.status || "");
   const wantsClarify = normalized === "clarify";
-  const clarifyAllowed = wantsClarify && hasArchHardBlockEvidence(misplaced);
+  const clarifyAllowed = wantsClarify && hasBusinessClarificationEvidence(misplaced);
   const targetQueue = clarifyAllowed ? "toClarify" : "dev";
   const targetStatus = targetQueue === "dev" ? "dev" : "to-clarify";
   const recoveryReason = wantsClarify
     ? (clarifyAllowed
-      ? "- clarify guard passed: hard blocker evidence present"
-      : "- clarify request ignored: missing hard blocker evidence")
+      ? "- clarify guard passed: explicit business clarification evidence present"
+      : "- clarify request ignored: no explicit business clarification evidence")
     : "- status is not clarify; routed to dev";
   return moveToQueue(runtime, misplaced, targetQueue, targetStatus, [
     "Delivery runner: ARCH misroute recovery",
@@ -635,11 +664,22 @@ function recoverDevMisroute(runtime, fileName) {
 
   const fm = parseFrontMatter(misplaced);
   const normalized = normalizeStatus(fm.status || "");
-  const targetQueue = normalized === "clarify" ? "toClarify" : "qa";
-  const targetStatus = targetQueue === "qa" ? "qa" : "to-clarify";
+  const wantsClarify = normalized === "clarify";
+  const targetQueue = wantsClarify
+    ? (hasBusinessClarificationEvidence(misplaced) ? "toClarify" : "blocked")
+    : "qa";
+  const targetStatus = targetQueue === "qa"
+    ? "qa"
+    : (targetQueue === "blocked" ? "blocked" : "to-clarify");
+  const reason = wantsClarify
+    ? (targetQueue === "toClarify"
+      ? "- clarify guard passed: explicit business clarification evidence present"
+      : "- clarify request rejected: no explicit business clarification evidence; routed to blocked")
+    : "- status is not clarify; routed to qa";
   return moveToQueue(runtime, misplaced, targetQueue, targetStatus, [
     "Delivery runner: DEV misroute recovery",
     `- moved from unexpected queue to ${targetQueue}`,
+    reason,
   ]);
 }
 
@@ -748,7 +788,15 @@ function resolveDevHandoff(runtime, sourceFile, name, controls) {
   const clarifyPath = path.join(runtime.queues.toClarify, name);
   if (fs.existsSync(clarifyPath)) {
     removeDuplicateSourceIfTargetExists(sourceFile, clarifyPath, controls, "DEV handoff");
-    return { progressed: true, routedTo: "to-clarify" };
+    if (hasBusinessClarificationEvidence(clarifyPath)) {
+      return { progressed: true, routedTo: "to-clarify" };
+    }
+    moveToQueue(runtime, clarifyPath, "blocked", "blocked", [
+      "Delivery runner: clarify policy guard",
+      "- to-clarify accepted only for explicit business clarification questions",
+      "- no explicit business clarification evidence found; routed to blocked",
+    ]);
+    return { progressed: true, routedTo: "blocked" };
   }
   const humanDecisionPath = runtime.queues.humanDecisionNeeded
     ? path.join(runtime.queues.humanDecisionNeeded, name)
@@ -788,6 +836,31 @@ function shouldUseLongIdleWait(runtime, mode) {
     return true;
   }
   return !downstreamInProgress(runtime);
+}
+
+function enforceClarifyQueuePolicy(runtime, controls) {
+  const clarifyFiles = listQueueFiles(runtime.queues.toClarify);
+  let rerouted = 0;
+  for (const file of clarifyFiles) {
+    if (hasBusinessClarificationEvidence(file)) {
+      continue;
+    }
+    if (moveToQueue(runtime, file, "blocked", "blocked", [
+      "Delivery runner: clarify policy enforcement",
+      "- to-clarify is reserved for explicit business clarification questions",
+      "- requirement lacks explicit business clarification evidence",
+      "- rerouted to blocked",
+    ])) {
+      rerouted += 1;
+    }
+  }
+  if (rerouted > 0) {
+    log(
+      controls,
+      `clarify policy: moved ${rerouted} non-business item(s) from to-clarify to blocked`
+    );
+  }
+  return rerouted > 0;
 }
 
 function readPoVisionDecision(runtime) {
@@ -930,10 +1003,10 @@ async function runArch(runtime, controls) {
     const clarifyPath = path.join(runtime.queues.toClarify, name);
     if (fs.existsSync(clarifyPath)) {
       removeDuplicateSourceIfTargetExists(sourceFile, clarifyPath, controls, "ARCH handoff");
-      if (!hasArchHardBlockEvidence(clarifyPath)) {
+      if (!hasBusinessClarificationEvidence(clarifyPath)) {
         moveToQueue(runtime, clarifyPath, "dev", "dev", [
           "Delivery runner: ARCH clarify guard",
-          "- clarify rejected: no hard blocker evidence; routed to dev",
+          "- clarify rejected: no explicit business clarification evidence; routed to dev",
         ]);
       }
       progressed = true;
@@ -1042,14 +1115,14 @@ async function runDev(runtime, controls) {
       }
 
       if (fs.existsSync(activeSource)) {
-        const moved = moveToQueue(runtime, activeSource, "toClarify", "to-clarify", [
+        const moved = moveToQueue(runtime, activeSource, "blocked", "blocked", [
           "Delivery runner: DEV watchdog escalation",
           `- retries exhausted (same-thread=${sameThreadRetriesMax}, fresh-thread=${freshThreadRetriesMax})`,
           `- last reason: ${reason}`,
-          "- moved to to-clarify so remaining bundle can continue",
+          "- technical execution failure; moved to blocked (not to-clarify)",
         ]);
         if (!moved) {
-          const fallbackTarget = path.join(runtime.queues.toClarify, path.basename(activeSource));
+          const fallbackTarget = path.join(runtime.queues.blocked, path.basename(activeSource));
           moveRequirementFile(activeSource, fallbackTarget);
           appendQueueSection(fallbackTarget, [
             "Delivery runner: DEV watchdog forced move",
@@ -1110,7 +1183,7 @@ async function runUxBatch(runtime, controls) {
       log(controls, `UX paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
       return false;
     }
-    moveAll(runtime, "ux", "toClarify", "to-clarify", "Delivery runner: UX batch failed");
+    moveAll(runtime, "ux", "blocked", "blocked", "Delivery runner: UX batch failed (technical) -> blocked");
     return true;
   }
 
@@ -1150,7 +1223,7 @@ async function runSecBatch(runtime, controls) {
       log(controls, `SEC paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
       return false;
     }
-    moveAll(runtime, "sec", "toClarify", "to-clarify", "Delivery runner: SEC batch failed");
+    moveAll(runtime, "sec", "blocked", "blocked", "Delivery runner: SEC batch failed (technical) -> blocked");
     return true;
   }
 
@@ -1316,7 +1389,21 @@ function collectGateFindings(gate, sourceLabel) {
       source: sourceLabel,
     });
   }
-  return findings;
+  const deduped = [];
+  const seen = new Set();
+  for (const entry of findings) {
+    const key = [
+      normalizeSeverity(entry && entry.severity, "P2"),
+      String(entry && entry.title || "").trim().toLowerCase(),
+      String(entry && entry.details || "").trim().toLowerCase(),
+    ].join("|");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(entry);
+  }
+  return deduped;
 }
 
 function splitFindingsBySeverity(findings) {
@@ -1660,68 +1747,153 @@ function qaGateTemplate() {
   };
 }
 
-function createQaExecutionFailureGate() {
+function compactLogText(value, maxLen = 700) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return truncateForQueueNote(normalized, maxLen);
+}
+
+function createGenericExecutionFailureGate({
+  label,
+  severity = "P1",
+  command = "",
+  exitCode = null,
+  stderr = "",
+  timedOut = false,
+  fallbackDetails = "",
+}) {
+  const parts = [];
+  const commandText = String(command || "").trim();
+  if (commandText) {
+    parts.push(`command=${commandText}`);
+  }
+  if (Number.isInteger(exitCode)) {
+    parts.push(`exit_code=${exitCode}`);
+  }
+  if (timedOut) {
+    parts.push("timed_out=true");
+  }
+  const stderrText = compactLogText(stderr, 500);
+  if (stderrText) {
+    parts.push(`stderr=${stderrText}`);
+  }
+  const fallbackText = compactLogText(fallbackDetails, 300);
+  if (fallbackText) {
+    parts.push(`details=${fallbackText}`);
+  }
+  const detailText = parts.join(" | ");
+  const summary = detailText
+    ? `${label} execution failed: ${truncateForQueueNote(detailText, 240)}`
+    : `${label} execution failed. Inspect logs and rerun.`;
+  const findingTitle = `${label} execution failed`;
   return {
     status: "fail",
-    summary: "QA gate execution failed. Inspect logs and rerun.",
-    blocking_findings: ["P1: QA gate execution failed. Inspect logs and rerun."],
+    summary,
+    blocking_findings: [
+      `${normalizeSeverity(severity, "P1")}: ${findingTitle}${detailText ? ` - ${detailText}` : ""}`,
+    ],
     findings: [
       {
-        severity: "P1",
-        title: "QA gate execution failed. Inspect logs and rerun.",
-        details: "",
+        severity: normalizeSeverity(severity, "P1"),
+        title: findingTitle,
+        details: detailText,
       },
     ],
     manual_uat: [],
   };
 }
 
-function createUxExecutionFailureGate() {
-  return {
-    status: "fail",
-    summary: "UX final gate execution failed. Inspect logs and rerun.",
-    blocking_findings: ["P1: UX final gate execution failed. Inspect logs and rerun."],
-    findings: [
-      {
-        severity: "P1",
-        title: "UX final gate execution failed. Inspect logs and rerun.",
-        details: "",
-      },
-    ],
-    manual_uat: [],
-  };
+function createQaExecutionFailureGate(context = {}) {
+  return createGenericExecutionFailureGate({
+    label: "QA gate",
+    severity: "P1",
+    command: context.command,
+    exitCode: context.exitCode,
+    stderr: context.stderr,
+    timedOut: context.timedOut,
+    fallbackDetails: context.fallbackDetails,
+  });
 }
 
-function createSecExecutionFailureGate() {
-  return {
-    status: "fail",
-    summary: "SEC final gate execution failed. Inspect logs and rerun.",
-    blocking_findings: ["P1: SEC final gate execution failed. Inspect logs and rerun."],
-    findings: [
-      {
-        severity: "P1",
-        title: "SEC final gate execution failed. Inspect logs and rerun.",
-        details: "",
-      },
-    ],
-    manual_uat: [],
-  };
+function createUxExecutionFailureGate(context = {}) {
+  return createGenericExecutionFailureGate({
+    label: "UX final gate",
+    severity: "P1",
+    command: context.command,
+    exitCode: context.exitCode,
+    stderr: context.stderr,
+    timedOut: context.timedOut,
+    fallbackDetails: context.fallbackDetails,
+  });
 }
 
-function createUatExecutionFailureGate() {
-  return {
-    status: "fail",
-    summary: "UAT gate execution failed. Inspect logs and rerun.",
-    blocking_findings: ["P1: UAT gate execution failed. Inspect logs and rerun."],
-    findings: [
-      {
-        severity: "P1",
-        title: "UAT gate execution failed. Inspect logs and rerun.",
-        details: "",
-      },
-    ],
-    manual_uat: [],
-  };
+function createSecExecutionFailureGate(context = {}) {
+  return createGenericExecutionFailureGate({
+    label: "SEC final gate",
+    severity: "P1",
+    command: context.command,
+    exitCode: context.exitCode,
+    stderr: context.stderr,
+    timedOut: context.timedOut,
+    fallbackDetails: context.fallbackDetails,
+  });
+}
+
+function createUatExecutionFailureGate(context = {}) {
+  return createGenericExecutionFailureGate({
+    label: "UAT gate",
+    severity: "P1",
+    command: context.command,
+    exitCode: context.exitCode,
+    stderr: context.stderr,
+    timedOut: context.timedOut,
+    fallbackDetails: context.fallbackDetails,
+  });
+}
+
+function createMaintExecutionFailureGate(context = {}) {
+  return createGenericExecutionFailureGate({
+    label: "MAINT hygiene scan",
+    severity: "P2",
+    command: context.command,
+    exitCode: context.exitCode,
+    stderr: context.stderr,
+    timedOut: context.timedOut,
+    fallbackDetails: context.fallbackDetails || "Runner could not complete repository hygiene analysis.",
+  });
+}
+
+function gatePending(gate) {
+  return String(gate && gate.status || "").toLowerCase() === "fail"
+    && String(gate && gate.summary || "").trim().toLowerCase() === "pending"
+    && Array.isArray(gate && gate.findings)
+    && gate.findings.length === 0
+    && Array.isArray(gate && gate.blocking_findings)
+    && gate.blocking_findings.length === 0;
+}
+
+function gateFromAgentResult({ result, parsedGate, createFailureGate, command, gateLabel }) {
+  if (!result || !result.ok) {
+    return createFailureGate({
+      command,
+      exitCode: result && result.exitCode,
+      stderr: result && result.stderr,
+      timedOut: Boolean(result && result.timedOut),
+    });
+  }
+
+  if (gatePending(parsedGate)) {
+    return createFailureGate({
+      command,
+      exitCode: result.exitCode,
+      stderr: result.stderr,
+      fallbackDetails: `${gateLabel} completed without writing a definitive gate result.`,
+    });
+  }
+
+  return parsedGate;
 }
 
 function createE2eExecutionFailureGate(details) {
@@ -1740,22 +1912,6 @@ function createE2eExecutionFailureGate(details) {
         severity: "P1",
         title: `Deterministic E2E ${stage} failed`,
         details: output,
-      },
-    ],
-    manual_uat: [],
-  };
-}
-
-function createMaintExecutionFailureGate() {
-  return {
-    status: "fail",
-    summary: "MAINT hygiene scan execution failed. Inspect logs and rerun.",
-    blocking_findings: ["P2: MAINT hygiene scan execution failed. Inspect logs and rerun."],
-    findings: [
-      {
-        severity: "P2",
-        title: "MAINT hygiene scan execution failed",
-        details: "Runner could not complete repository hygiene analysis.",
       },
     ],
     manual_uat: [],
@@ -1996,16 +2152,16 @@ function handleStrictGateFailure(runtime, controls, options) {
   moveAll(
     runtime,
     sourceQueue,
-    "toClarify",
-    "to-clarify",
-    `Delivery runner: ${String(gateName || "").toUpperCase()} strict fail max attempts reached -> to-clarify (summary: ${summary})`
+    "blocked",
+    "blocked",
+    `Delivery runner: ${String(gateName || "").toUpperCase()} strict fail max attempts reached -> blocked (summary: ${summary})`
   );
-  log(controls, `${String(gateName || "").toUpperCase()} strict fail escalated to to-clarify after attempt=${attempt}`);
+  log(controls, `${String(gateName || "").toUpperCase()} strict fail escalated to blocked after attempt=${attempt}`);
   return {
     progressed: true,
     gate,
     attempt,
-    routedTo: "to-clarify",
+    routedTo: "blocked",
   };
 }
 
@@ -2066,7 +2222,13 @@ async function runQaBundle(runtime, controls) {
   }
 
   const parsed = parseGate(gatePath);
-  const gate = result.ok ? parsed : createQaExecutionFailureGate();
+  const gate = gateFromAgentResult({
+    result,
+    parsedGate: parsed,
+    createFailureGate: createQaExecutionFailureGate,
+    command: "node qa/qa.js --auto --batch-tests --batch-queue qa --gate-file <path>",
+    gateLabel: "QA bundle gate",
+  });
   if (strictQa) {
     if (gatePass(gate)) {
       resetGateAttempt(runtime, "qa", bundleKey);
@@ -2140,7 +2302,13 @@ async function runUatBundle(runtime, controls) {
   }
 
   const parsed = parseGate(gatePath);
-  const gate = result.ok ? parsed : createUatExecutionFailureGate();
+  const gate = gateFromAgentResult({
+    result,
+    parsedGate: parsed,
+    createFailureGate: createUatExecutionFailureGate,
+    command: "node uat/uat.js --auto --batch --source-queue deploy --gate-file <path>",
+    gateLabel: "UAT bundle gate",
+  });
   if (strictUat) {
     if (gatePass(gate)) {
       resetGateAttempt(runtime, "uat", bundleKey);
@@ -2210,7 +2378,13 @@ async function runUxFinalPass(runtime, controls) {
   }
 
   const parsed = parseGate(gatePath);
-  const gate = result.ok ? parsed : createUxExecutionFailureGate();
+  const gate = gateFromAgentResult({
+    result,
+    parsedGate: parsed,
+    createFailureGate: createUxExecutionFailureGate,
+    command: "node ux/ux.js --auto --final-pass --gate-file <path>",
+    gateLabel: "UX final gate",
+  });
   return {
     progressed: true,
     gate,
@@ -2253,7 +2427,13 @@ async function runSecFinalPass(runtime, controls) {
   }
 
   const parsed = parseGate(gatePath);
-  const gate = result.ok ? parsed : createSecExecutionFailureGate();
+  const gate = gateFromAgentResult({
+    result,
+    parsedGate: parsed,
+    createFailureGate: createSecExecutionFailureGate,
+    command: "node sec/sec.js --auto --final-pass --gate-file <path>",
+    gateLabel: "SEC final gate",
+  });
   return {
     progressed: true,
     gate,
@@ -2296,7 +2476,13 @@ async function runUatFullRegression(runtime, controls) {
   }
 
   const parsed = parseGate(gatePath);
-  const gate = result.ok ? parsed : createUatExecutionFailureGate();
+  const gate = gateFromAgentResult({
+    result,
+    parsedGate: parsed,
+    createFailureGate: createUatExecutionFailureGate,
+    command: "node uat/uat.js --auto --full-regression --gate-file <path>",
+    gateLabel: "UAT full regression gate",
+  });
   return {
     progressed: true,
     gate,
@@ -2854,7 +3040,13 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
   }
 
   const parsed = parseGate(decisionPath);
-  const gate = result.ok ? parsed : createMaintExecutionFailureGate();
+  const gate = gateFromAgentResult({
+    result,
+    parsedGate: parsed,
+    createFailureGate: createMaintExecutionFailureGate,
+    command: "node maint/maint.js --auto --post-deploy --decision-file <path>",
+    gateLabel: "MAINT post-deploy decision",
+  });
   applyGateOutcomes(runtime, controls, "maint", gate);
 
   const summary = String(gate.summary || "").trim();
@@ -3099,7 +3291,7 @@ async function runDeployBundle(runtime, controls) {
       log(controls, `DEPLOY paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
       return false;
     }
-    moveAll(runtime, "deploy", "toClarify", "to-clarify", "Delivery runner: deploy bundle failed");
+    moveAll(runtime, "deploy", "blocked", "blocked", "Delivery runner: deploy bundle failed (technical) -> blocked");
     return true;
   }
 
@@ -3175,7 +3367,13 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
   }
 
   const parsed = parseGate(gatePath);
-  const gate = result.ok ? parsed : createQaExecutionFailureGate();
+  const gate = gateFromAgentResult({
+    result,
+    parsedGate: parsed,
+    createFailureGate: createQaExecutionFailureGate,
+    command: "node qa/qa.js --auto --final-pass --gate-file <path>",
+    gateLabel: "QA post-bundle final gate",
+  });
   const shouldApplyOutcomes = options.applyOutcomes !== false;
   if (shouldApplyOutcomes) {
     applyGateOutcomes(runtime, controls, "qa-post", gate);
@@ -3297,6 +3495,8 @@ async function main() {
       }
       continue;
     }
+
+    enforceClarifyQueuePolicy(runtime, controls);
 
     const before = snapshotHash(runtime);
     const forceUnderfilledFromVision = shouldForceUnderfilledFromVision(runtime);
