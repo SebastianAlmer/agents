@@ -62,7 +62,7 @@ PO vision rules:
 Modes:
 - `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> UAT -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan. When Product Vision is marked complete and queues are drained, runner auto-triggers one comprehensive final test over `released` (UX final + SEC final + QA final + optional deterministic E2E + UAT full regression).
 - `fast`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream gates.
-- `test`: quality/regression mode. Runs delivery quality gates without deploy git actions and then performs a comprehensive full-system test over `released`. If `[e2e].required_in_test_mode=true`, deterministic E2E is a mandatory gate.
+- `test`: quality/regression mode. Runs delivery quality gates without deploy git actions and then performs a comprehensive full-system test over `released`. If `[e2e].required_in_test_mode=true`, deterministic E2E is a mandatory gate. This mode is non-mutating for `released` (no automatic `released -> dev` reroute on fails); findings are emitted as follow-up requirements.
 
 Bundle behavior:
 - Bundles start from `selected`.

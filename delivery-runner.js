@@ -236,6 +236,10 @@ function createControls(initialVerbose, runtime) {
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
+    // Ensure stdin no longer keeps the event loop alive after `--once`.
+    if (typeof process.stdin.pause === "function") {
+      process.stdin.pause();
+    }
   };
   return controls;
 }
@@ -2571,6 +2575,9 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   }
 
   const strict = options.strict !== undefined ? Boolean(options.strict) : strictGateEnabled(runtime);
+  const nonMutating = Boolean(options.nonMutating);
+  const enforceStrictRouting = strict && !nonMutating;
+  const trackFailuresWithoutRouting = nonMutating;
   const reason = String(options.reason || "manual").trim() || "manual";
   const runDeterministicE2e = options.runDeterministicE2e !== undefined
     ? Boolean(options.runDeterministicE2e)
@@ -2579,16 +2586,24 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
     ? Boolean(options.requireDeterministicE2e)
     : false;
   const releasedBundleKey = queueBundleKey(runtime, "released");
+  let hasNonMutatingFailure = false;
+  let firstFailureReason = "";
 
-  log(controls, `comprehensive test start reason=${reason} strict=${strict}`);
+  log(
+    controls,
+    `comprehensive test start reason=${reason} strict=${strict} non_mutating=${nonMutating}`
+  );
 
   if (runtime.qa && runtime.qa.runChecksInRunner) {
     const checks = runRunnerMandatoryChecks(runtime, controls);
     if (!checks.ok) {
       const gate = createMandatoryCheckFailureGate(checks);
-      applyGateByPolicy(runtime, controls, "qa-full", gate, strict);
-      if (strict) {
+      applyGateByPolicy(runtime, controls, "qa-full", gate, enforceStrictRouting);
+      if (enforceStrictRouting) {
         await strictGateFailRoute(runtime, controls, "qa-full", gate);
+      } else if (trackFailuresWithoutRouting) {
+        hasNonMutatingFailure = true;
+        firstFailureReason = firstFailureReason || "mandatory-checks-failed";
       }
       return {
         progressed: true,
@@ -2609,8 +2624,8 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   }
   if (uxFinal.progressed && uxFinal.gate) {
     const uxGate = uxFinal.gate;
-    applyGateByPolicy(runtime, controls, "ux-final", uxGate, strict);
-    if (strict && !gatePass(uxGate)) {
+    applyGateByPolicy(runtime, controls, "ux-final", uxGate, enforceStrictRouting);
+    if (enforceStrictRouting && !gatePass(uxGate)) {
       await strictGateFailRoute(runtime, controls, "ux-final", uxGate);
       return {
         progressed: true,
@@ -2618,7 +2633,13 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
         reason: "ux-final-failed",
       };
     }
-    resetGateAttempt(runtime, "ux-final", releasedBundleKey);
+    if (!gatePass(uxGate) && trackFailuresWithoutRouting) {
+      hasNonMutatingFailure = true;
+      firstFailureReason = firstFailureReason || "ux-final-failed";
+    }
+    if (gatePass(uxGate)) {
+      resetGateAttempt(runtime, "ux-final", releasedBundleKey);
+    }
   }
 
   const secFinal = await runSecFinalPass(runtime, controls);
@@ -2631,8 +2652,8 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   }
   if (secFinal.progressed && secFinal.gate) {
     const secGate = secFinal.gate;
-    applyGateByPolicy(runtime, controls, "sec-final", secGate, strict);
-    if (strict && !gatePass(secGate)) {
+    applyGateByPolicy(runtime, controls, "sec-final", secGate, enforceStrictRouting);
+    if (enforceStrictRouting && !gatePass(secGate)) {
       await strictGateFailRoute(runtime, controls, "sec-final", secGate);
       return {
         progressed: true,
@@ -2640,7 +2661,13 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
         reason: "sec-final-failed",
       };
     }
-    resetGateAttempt(runtime, "sec-final", releasedBundleKey);
+    if (!gatePass(secGate) && trackFailuresWithoutRouting) {
+      hasNonMutatingFailure = true;
+      firstFailureReason = firstFailureReason || "sec-final-failed";
+    }
+    if (gatePass(secGate)) {
+      resetGateAttempt(runtime, "sec-final", releasedBundleKey);
+    }
   }
 
   const qaFinal = await runQaPostBundle(runtime, controls, "", { force: true, applyOutcomes: false });
@@ -2653,8 +2680,8 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   }
   if (qaFinal.progressed && qaFinal.gate) {
     const qaGate = qaFinal.gate;
-    applyGateByPolicy(runtime, controls, "qa-final", qaGate, strict);
-    if (strict && !gatePass(qaGate)) {
+    applyGateByPolicy(runtime, controls, "qa-final", qaGate, enforceStrictRouting);
+    if (enforceStrictRouting && !gatePass(qaGate)) {
       await strictGateFailRoute(runtime, controls, "qa-final", qaGate);
       return {
         progressed: true,
@@ -2662,7 +2689,13 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
         reason: "qa-final-failed",
       };
     }
-    resetGateAttempt(runtime, "qa-final", releasedBundleKey);
+    if (!gatePass(qaGate) && trackFailuresWithoutRouting) {
+      hasNonMutatingFailure = true;
+      firstFailureReason = firstFailureReason || "qa-final-failed";
+    }
+    if (gatePass(qaGate)) {
+      resetGateAttempt(runtime, "qa-final", releasedBundleKey);
+    }
   }
 
   if (runDeterministicE2e) {
@@ -2674,8 +2707,8 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
     }
     if (e2eFull.progressed && e2eFull.gate) {
       const e2eGate = e2eFull.gate;
-      applyGateByPolicy(runtime, controls, "e2e-full", e2eGate, strict);
-      if (strict && !gatePass(e2eGate)) {
+      applyGateByPolicy(runtime, controls, "e2e-full", e2eGate, enforceStrictRouting);
+      if (enforceStrictRouting && !gatePass(e2eGate)) {
         await strictGateFailRoute(runtime, controls, "e2e-full", e2eGate);
         return {
           progressed: true,
@@ -2683,7 +2716,13 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
           reason: "e2e-full-failed",
         };
       }
-      resetGateAttempt(runtime, "e2e-full", releasedBundleKey);
+      if (!gatePass(e2eGate) && trackFailuresWithoutRouting) {
+        hasNonMutatingFailure = true;
+        firstFailureReason = firstFailureReason || "e2e-full-failed";
+      }
+      if (gatePass(e2eGate)) {
+        resetGateAttempt(runtime, "e2e-full", releasedBundleKey);
+      }
     }
   }
 
@@ -2697,8 +2736,8 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   }
   if (uatFull.progressed && uatFull.gate) {
     const uatGate = uatFull.gate;
-    applyGateByPolicy(runtime, controls, "uat-full", uatGate, strict);
-    if (strict && !gatePass(uatGate)) {
+    applyGateByPolicy(runtime, controls, "uat-full", uatGate, enforceStrictRouting);
+    if (enforceStrictRouting && !gatePass(uatGate)) {
       await strictGateFailRoute(runtime, controls, "uat-full", uatGate);
       return {
         progressed: true,
@@ -2706,13 +2745,34 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
         reason: "uat-full-failed",
       };
     }
-    resetGateAttempt(runtime, "uat-full", releasedBundleKey);
+    if (!gatePass(uatGate) && trackFailuresWithoutRouting) {
+      hasNonMutatingFailure = true;
+      firstFailureReason = firstFailureReason || "uat-full-failed";
+    }
+    if (gatePass(uatGate)) {
+      resetGateAttempt(runtime, "uat-full", releasedBundleKey);
+    }
   }
 
   const state = readComprehensiveSystemTestState(runtime);
   state.lastRunAt = new Date().toISOString();
   state.lastReason = reason;
-  state.lastPassSignature = releasedSignature(runtime);
+  const signature = releasedSignature(runtime);
+  if (hasNonMutatingFailure) {
+    state.lastFailureSignature = signature;
+    state.lastFailureReason = firstFailureReason || "comprehensive-gate-failed";
+    writeComprehensiveSystemTestState(runtime, state);
+    log(controls, `comprehensive test failed reason=${state.lastFailureReason}`);
+    return {
+      progressed: true,
+      passed: false,
+      reason: state.lastFailureReason,
+    };
+  }
+
+  state.lastFailureSignature = "";
+  state.lastFailureReason = "";
+  state.lastPassSignature = signature;
   writeComprehensiveSystemTestState(runtime, state);
 
   log(controls, `comprehensive test passed reason=${reason}`);
@@ -3276,6 +3336,7 @@ async function main() {
       const result = await maybeRunComprehensiveSystemTest(runtime, controls, {
         reason: "test-mode",
         force: forceComprehensiveOnce,
+        nonMutating: true,
         runDeterministicE2e: true,
         requireDeterministicE2e: Boolean(runtime.e2e && runtime.e2e.requiredInTestMode),
       });
