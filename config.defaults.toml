@@ -58,6 +58,26 @@ force_underfilled_after_cycles = 3
 # fast = nur selected -> arch -> dev
 default_mode = "full"
 
+[delivery_quality]
+# OPTIONAL: true = QA/UAT sind harte Gates vor Deploy.
+strict_gate = true
+
+# OPTIONAL: Wenn true, muss QA gate PASS sein, sonst geht Bundle zurueck an DEV.
+require_qa_pass = true
+
+# OPTIONAL: Wenn true, muss UAT gate PASS sein, sonst geht Bundle zurueck an DEV.
+require_uat_pass = true
+
+# OPTIONAL: Bei Gate-Fail Bundle nach DEV routen (statt nur Follow-up Req erzeugen).
+route_to_dev_on_fail = true
+
+# OPTIONAL: Max. Anzahl QA/UAT Nachbesserungszyklen pro Bundle.
+max_fix_cycles = 3
+
+# OPTIONAL: Bei Gate-Fail trotzdem automatische Follow-up-Reqs erzeugen.
+# Empfohlen: false, damit DEV erst das aktuelle Bundle sauber stabilisiert.
+emit_followups_on_fail = false
+
 [deploy]
 # OPTIONAL: check | commit | commit_push
 mode = "commit_push"
@@ -190,6 +210,10 @@ fresh_thread_retries = 1
 # OPTIONAL: Projektspezifische QA-Kommandos.
 # Leer = QA entscheidet generisch ohne harte Kommandopflicht.
 mandatory_checks = []
+
+# OPTIONAL: true = Delivery-Runner fuehrt mandatory_checks deterministisch aus,
+# bevor der QA-Agent gestartet wird (spart Tokens und ist reproduzierbar).
+run_checks_in_runner = true
 
 [models]
 # OPTIONAL: Modellzuordnung pro Agent.

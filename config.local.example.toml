@@ -37,6 +37,15 @@ bundle_max_size = 10
 # fast = nur arch+dev (ohne Downstream-Gates)
 default_mode = "full"
 
+[delivery_quality]
+# Strenger Qualitaetsmodus: QA/UAT muessen gruen sein vor Deploy.
+strict_gate = true
+require_qa_pass = true
+require_uat_pass = true
+route_to_dev_on_fail = true
+max_fix_cycles = 3
+emit_followups_on_fail = false
+
 [po]
 # Intake-Buffer fuer PO im Vision-/Intake-Betrieb.
 selected_high_watermark = 10
@@ -68,13 +77,10 @@ head_mode = "current"
 [qa]
 # WICHTIG: Hier projektspezifische Pflichtchecks hinterlegen, sonst kann QA
 # kritische Laufzeit-/Migrationsfehler spaeter erkennen.
-# Beispiel:
-# mandatory_checks = [
-#   "npm --prefix app run db:migrate",
-#   "npm --prefix app run test",
-#   "npm --prefix web run lint"
-# ]
+# Beispiel (einzeilig, da der einfache TOML-Parser hier keine mehrzeiligen Arrays nutzt):
+# mandatory_checks = ["npm --prefix app run db:migrate", "npm --prefix app run test", "npm --prefix web run lint"]
 mandatory_checks = []
+run_checks_in_runner = true
 
 [models]
 # Modellzuordnung pro Agent (Beispielprofil).

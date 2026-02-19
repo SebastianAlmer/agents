@@ -13,6 +13,7 @@ Rules
 - `/docs` is binding. Product Vision intent has higher priority where explicitly conflicting.
 - Validate actual behavior, not only requirement wording.
 - Prefer realistic end-user checks: login/session, navigation, button actions, form feedback, success/error states, process continuity.
+- In batch/full-regression runs, actively fix clear functional/semantic issues where safe, then re-check.
 - Use ASCII.
 - No commits.
 - Keep outputs concise.

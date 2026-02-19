@@ -14,6 +14,8 @@ Rules
 - `/docs` is binding.
 - Use git diff + changed files as primary review surface in bundle mode.
 - Actively fix issues where possible.
+- Treat this as a release gate, not only a reviewer pass.
+- Explicitly check for: missing i18n keys/translations, broken button/action wiring, process continuity across FE+BE boundaries.
 - Use ASCII.
 - No commits.
 - Keep outputs concise.
@@ -33,8 +35,10 @@ Batch mode (`Batch tests: true`)
 1) Evaluate the current bundle (`Batch queue` from context) over changed files and full app behavior.
 2) Run FE/BE validation once per bundle using mandatory checks from context.
 3) If checks fail, fix issues and rerun inside the same run until pass or true hard blocker.
-4) Do not move requirement files in this mode.
-5) Write gate JSON to `Final gate file`:
+4) If UI actions are semantically broken (buttons/links/forms), fix implementation directly in code (not just findings text).
+5) If i18n keys/locales are inconsistent, fix key usage or locale files directly.
+6) Do not move requirement files in this mode.
+7) Write gate JSON to `Final gate file`:
 - `status`: `pass` or `fail`
 - `summary`: short text
 - `blocking_findings`: array (empty on pass)

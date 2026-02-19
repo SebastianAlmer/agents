@@ -329,6 +329,20 @@ function main() {
   const deliveryRunnerDefault = ["dev-only", "dev_only", "devonly"].includes(deliveryRunnerDefaultRaw)
     ? "fast"
     : normalizeEnum(deliveryRunnerDefaultRaw, ["full", "fast"], "full");
+  const deliveryQualityBase = base.delivery_quality && typeof base.delivery_quality === "object"
+    ? base.delivery_quality
+    : {};
+  const deliveryQualityStrictGate = normalizeBool(deliveryQualityBase.strict_gate, true);
+  const deliveryQualityRequireQaPass = normalizeBool(deliveryQualityBase.require_qa_pass, true);
+  const deliveryQualityRequireUatPass = normalizeBool(deliveryQualityBase.require_uat_pass, true);
+  const deliveryQualityRouteToDevOnFail = normalizeBool(deliveryQualityBase.route_to_dev_on_fail, true);
+  const deliveryQualityMaxFixCycles = Number.isFinite(deliveryQualityBase.max_fix_cycles)
+    ? Math.max(1, deliveryQualityBase.max_fix_cycles)
+    : 3;
+  const deliveryQualityEmitFollowupsOnFail = normalizeBool(
+    deliveryQualityBase.emit_followups_on_fail,
+    false
+  );
 
   const deployMode = normalizeEnum(
     args.deployMode || (base.deploy && base.deploy.mode) || "commit_push",
@@ -512,6 +526,10 @@ function main() {
     : Array.isArray(base.qa && base.qa.mandatory_checks) && base.qa.mandatory_checks.length > 0
       ? base.qa.mandatory_checks.map((x) => String(x))
       : [];
+  const qaRunChecksInRunner = normalizeBool(
+    base.qa && base.qa.run_checks_in_runner,
+    true
+  );
 
   const baseModels = base.models && typeof base.models === "object" ? base.models : {};
   const modelDefaults = {
@@ -561,6 +579,14 @@ function main() {
     "",
     "[delivery_runner]",
     `default_mode = ${toTomlString(deliveryRunnerDefault)}`,
+    "",
+    "[delivery_quality]",
+    `strict_gate = ${toTomlBool(deliveryQualityStrictGate)}`,
+    `require_qa_pass = ${toTomlBool(deliveryQualityRequireQaPass)}`,
+    `require_uat_pass = ${toTomlBool(deliveryQualityRequireUatPass)}`,
+    `route_to_dev_on_fail = ${toTomlBool(deliveryQualityRouteToDevOnFail)}`,
+    `max_fix_cycles = ${toTomlInt(deliveryQualityMaxFixCycles)}`,
+    `emit_followups_on_fail = ${toTomlBool(deliveryQualityEmitFollowupsOnFail)}`,
     "",
     "[deploy]",
     `mode = ${toTomlString(deployMode)}`,
@@ -621,6 +647,7 @@ function main() {
     "",
     "[qa]",
     `mandatory_checks = ${toTomlArray(qaChecks)}`,
+    `run_checks_in_runner = ${toTomlBool(qaRunChecksInRunner)}`,
     "",
     "[models]",
     `default = ${toTomlString(models.default)}`,
@@ -653,6 +680,7 @@ function main() {
   console.log(`- loops.bundle_min_size: ${bundleMinSize}`);
   console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
   console.log(`- delivery_runner.default_mode: ${deliveryRunnerDefault}`);
+  console.log(`- delivery_quality: strict=${deliveryQualityStrictGate} qa_pass=${deliveryQualityRequireQaPass} uat_pass=${deliveryQualityRequireUatPass} route_to_dev=${deliveryQualityRouteToDevOnFail} max_fix_cycles=${deliveryQualityMaxFixCycles} emit_followups_on_fail=${deliveryQualityEmitFollowupsOnFail}`);
   console.log(`- deploy.mode: ${deployMode}`);
   console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled}, backlog_promote_enabled=${poBacklogPromoteEnabled}, backlog_promote_after_cycles=${poBacklogPromoteAfterCycles}, backlog_promote_min_business_score=${poBacklogPromoteMinBusinessScore}, backlog_promote_max_per_cycle=${poBacklogPromoteMaxPerCycle})`);
   console.log(`- arch.routing_mode: ${archRoutingMode}`);

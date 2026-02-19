@@ -1684,6 +1684,208 @@ function queueNote(prefix, gate) {
   return `${prefix} (summary: ${summary.slice(0, 250)})`;
 }
 
+function deliveryQualityStatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "delivery-quality");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "state.json");
+}
+
+function readDeliveryQualityState(runtime) {
+  const filePath = deliveryQualityStatePath(runtime);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object") {
+      return { attempts: {} };
+    }
+    if (!parsed.attempts || typeof parsed.attempts !== "object") {
+      return { attempts: {} };
+    }
+    return { attempts: parsed.attempts };
+  } catch {
+    return { attempts: {} };
+  }
+}
+
+function writeDeliveryQualityState(runtime, state) {
+  const filePath = deliveryQualityStatePath(runtime);
+  const normalized = state && typeof state === "object" ? state : { attempts: {} };
+  if (!normalized.attempts || typeof normalized.attempts !== "object") {
+    normalized.attempts = {};
+  }
+  fs.writeFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+}
+
+function queueBundleIds(runtime, queueName) {
+  const dir = runtime.queues[queueName];
+  if (!dir) {
+    return [];
+  }
+  const ids = new Set();
+  for (const filePath of listQueueFiles(dir)) {
+    const fm = parseFrontMatter(filePath);
+    const id = String(fm.bundle_id || "").trim();
+    if (id) {
+      ids.add(id);
+    }
+  }
+  return Array.from(ids).sort();
+}
+
+function queueBundleKey(runtime, queueName) {
+  const ids = queueBundleIds(runtime, queueName);
+  if (ids.length === 0) {
+    return `${queueName}:no-bundle`;
+  }
+  if (ids.length === 1) {
+    return ids[0];
+  }
+  return `mixed:${ids.join("+")}`;
+}
+
+function gateAttemptKey(gateName, bundleKey) {
+  return `${String(gateName || "").toLowerCase()}:${String(bundleKey || "unknown")}`;
+}
+
+function incrementGateAttempt(runtime, gateName, bundleKey) {
+  const state = readDeliveryQualityState(runtime);
+  const key = gateAttemptKey(gateName, bundleKey);
+  const next = Math.max(
+    1,
+    Number.parseInt(String((state.attempts && state.attempts[key]) || 0), 10) + 1
+  );
+  state.attempts[key] = next;
+  writeDeliveryQualityState(runtime, state);
+  return next;
+}
+
+function resetGateAttempt(runtime, gateName, bundleKey) {
+  const state = readDeliveryQualityState(runtime);
+  const key = gateAttemptKey(gateName, bundleKey);
+  if (Object.prototype.hasOwnProperty.call(state.attempts, key)) {
+    delete state.attempts[key];
+    writeDeliveryQualityState(runtime, state);
+  }
+}
+
+function resetBundleAttempts(runtime, bundleKey) {
+  if (!bundleKey) {
+    return;
+  }
+  resetGateAttempt(runtime, "qa", bundleKey);
+  resetGateAttempt(runtime, "uat", bundleKey);
+}
+
+function truncateForQueueNote(text, max = 260) {
+  const raw = String(text || "").trim().replace(/\s+/g, " ");
+  if (raw.length <= max) {
+    return raw;
+  }
+  return `${raw.slice(0, Math.max(1, max - 3))}...`;
+}
+
+function runShellCheckCommand(runtime, command) {
+  const result = spawnSync("bash", ["-lc", command], {
+    cwd: runtime.repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const output = `${String(result.stdout || "").trim()}\n${String(result.stderr || "").trim()}`.trim();
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    output,
+  };
+}
+
+function runRunnerMandatoryChecks(runtime, controls) {
+  const checks = Array.isArray(runtime.qa && runtime.qa.mandatoryChecks)
+    ? runtime.qa.mandatoryChecks
+    : [];
+  if (checks.length === 0) {
+    return { ok: true, skipped: true };
+  }
+  for (const check of checks) {
+    const cmd = String(check || "").trim();
+    if (!cmd) {
+      continue;
+    }
+    log(controls, `QA precheck: ${cmd}`);
+    const result = runShellCheckCommand(runtime, cmd);
+    if (!result.ok) {
+      return {
+        ok: false,
+        command: cmd,
+        output: result.output,
+        status: result.status,
+      };
+    }
+  }
+  return { ok: true, skipped: false };
+}
+
+function createMandatoryCheckFailureGate(checkResult) {
+  const command = String((checkResult && checkResult.command) || "unknown command");
+  const output = truncateForQueueNote(String((checkResult && checkResult.output) || "no output"), 500);
+  return {
+    status: "fail",
+    summary: `mandatory check failed: ${command}`,
+    blocking_findings: [`P1: Mandatory check failed: ${command}`],
+    findings: [
+      {
+        severity: "P1",
+        title: "Mandatory QA check failed",
+        details: `${command} :: ${output}`,
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
+function handleStrictGateFailure(runtime, controls, options) {
+  const {
+    gateName,
+    sourceQueue,
+    gate,
+  } = options;
+  const bundleKey = queueBundleKey(runtime, sourceQueue);
+  const attempt = incrementGateAttempt(runtime, gateName, bundleKey);
+  const maxFixCycles = Math.max(1, Number(runtime.deliveryQuality && runtime.deliveryQuality.maxFixCycles || 1));
+  const summary = truncateForQueueNote(String(gate && gate.summary || `${gateName} gate failed`), 240);
+  const allowRouteToDev = Boolean(runtime.deliveryQuality && runtime.deliveryQuality.routeToDevOnFail);
+
+  if (allowRouteToDev && attempt <= maxFixCycles) {
+    moveAll(
+      runtime,
+      sourceQueue,
+      "dev",
+      "dev",
+      `Delivery runner: ${String(gateName || "").toUpperCase()} strict fail attempt ${attempt}/${maxFixCycles} -> dev (summary: ${summary})`
+    );
+    log(controls, `${String(gateName || "").toUpperCase()} strict fail routed to DEV attempt=${attempt}/${maxFixCycles}`);
+    return {
+      progressed: true,
+      gate,
+      attempt,
+      routedTo: "dev",
+    };
+  }
+
+  moveAll(
+    runtime,
+    sourceQueue,
+    "toClarify",
+    "to-clarify",
+    `Delivery runner: ${String(gateName || "").toUpperCase()} strict fail max attempts reached -> to-clarify (summary: ${summary})`
+  );
+  log(controls, `${String(gateName || "").toUpperCase()} strict fail escalated to to-clarify after attempt=${attempt}`);
+  return {
+    progressed: true,
+    gate,
+    attempt,
+    routedTo: "to-clarify",
+  };
+}
+
 async function runQaBundle(runtime, controls) {
   if (countFiles(runtime.queues.qa) === 0) {
     return {
@@ -1692,10 +1894,32 @@ async function runQaBundle(runtime, controls) {
     };
   }
 
+  const strictQa = Boolean(
+    runtime.deliveryQuality
+    && runtime.deliveryQuality.strictGate
+    && runtime.deliveryQuality.requireQaPass
+  );
+  const bundleKey = queueBundleKey(runtime, "qa");
+
+  if (strictQa && runtime.qa && runtime.qa.runChecksInRunner) {
+    const checks = runRunnerMandatoryChecks(runtime, controls);
+    if (!checks.ok) {
+      const gate = createMandatoryCheckFailureGate(checks);
+      if (runtime.deliveryQuality.emitFollowupsOnFail) {
+        applyGateOutcomes(runtime, controls, "qa", gate);
+      }
+      return handleStrictGateFailure(runtime, controls, {
+        gateName: "qa",
+        sourceQueue: "qa",
+        gate,
+      });
+    }
+  }
+
   const gatePath = qaBatchGatePath(runtime);
   fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
 
-  log(controls, "QA bundle gate start (advisory)");
+  log(controls, strictQa ? "QA bundle gate start (strict)" : "QA bundle gate start (advisory)");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--batch-tests", "--batch-queue", "qa", "--gate-file", gatePath],
@@ -1720,8 +1944,27 @@ async function runQaBundle(runtime, controls) {
 
   const parsed = parseGate(gatePath);
   const gate = result.ok ? parsed : createQaExecutionFailureGate();
-  applyGateOutcomes(runtime, controls, "qa", gate);
+  if (strictQa) {
+    if (gatePass(gate)) {
+      resetGateAttempt(runtime, "qa", bundleKey);
+      applyGateOutcomes(runtime, controls, "qa", gate);
+      moveAll(runtime, "qa", "deploy", "deploy", "Delivery runner: QA strict pass -> deploy");
+      return {
+        progressed: true,
+        gate,
+      };
+    }
+    if (runtime.deliveryQuality.emitFollowupsOnFail) {
+      applyGateOutcomes(runtime, controls, "qa", gate);
+    }
+    return handleStrictGateFailure(runtime, controls, {
+      gateName: "qa",
+      sourceQueue: "qa",
+      gate,
+    });
+  }
 
+  applyGateOutcomes(runtime, controls, "qa", gate);
   const note = gatePass(gate)
     ? "Delivery runner: QA advisory pass -> continue to deploy"
     : queueNote("Delivery runner: QA advisory fail -> continue to deploy", gate);
@@ -1740,10 +1983,17 @@ async function runUatBundle(runtime, controls) {
     };
   }
 
+  const strictUat = Boolean(
+    runtime.deliveryQuality
+    && runtime.deliveryQuality.strictGate
+    && runtime.deliveryQuality.requireUatPass
+  );
+  const bundleKey = queueBundleKey(runtime, "deploy");
+
   const gatePath = uatBatchGatePath(runtime);
   fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
 
-  log(controls, "UAT bundle gate start (advisory)");
+  log(controls, strictUat ? "UAT bundle gate start (strict)" : "UAT bundle gate start (advisory)");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
     args: ["--auto", "--batch", "--source-queue", "deploy", "--gate-file", gatePath],
@@ -1768,6 +2018,26 @@ async function runUatBundle(runtime, controls) {
 
   const parsed = parseGate(gatePath);
   const gate = result.ok ? parsed : createUatExecutionFailureGate();
+  if (strictUat) {
+    if (gatePass(gate)) {
+      resetGateAttempt(runtime, "uat", bundleKey);
+      applyGateOutcomes(runtime, controls, "uat", gate);
+      log(controls, "UAT strict pass");
+      return {
+        progressed: true,
+        gate,
+      };
+    }
+    if (runtime.deliveryQuality.emitFollowupsOnFail) {
+      applyGateOutcomes(runtime, controls, "uat", gate);
+    }
+    return handleStrictGateFailure(runtime, controls, {
+      gateName: "uat",
+      sourceQueue: "deploy",
+      gate,
+    });
+  }
+
   applyGateOutcomes(runtime, controls, "uat", gate);
   if (!gatePass(gate)) {
     log(controls, queueNote("UAT advisory fail -> continue to deploy", gate));
@@ -2054,6 +2324,8 @@ async function runDeployBundle(runtime, controls) {
   if (countFiles(runtime.queues.deploy) === 0) {
     return false;
   }
+  const deployBundleIds = queueBundleIds(runtime, "deploy");
+  const deployBundleKey = queueBundleKey(runtime, "deploy");
   log(controls, "DEPLOY bundle start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "deploy", "deploy.js"),
@@ -2077,6 +2349,13 @@ async function runDeployBundle(runtime, controls) {
   }
 
   moveAll(runtime, "deploy", "released", "released", "Delivery runner: deploy bundle released");
+  if (deployBundleIds.length > 0) {
+    for (const bundleId of deployBundleIds) {
+      resetBundleAttempts(runtime, bundleId);
+    }
+  } else {
+    resetBundleAttempts(runtime, deployBundleKey);
+  }
   const deployInfo = deployCommitPush(runtime, controls);
   createPullRequest(runtime, controls, deployInfo);
   return true;
