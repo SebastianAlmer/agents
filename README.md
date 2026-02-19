@@ -57,10 +57,12 @@ PO vision rules:
 ### 3) Delivery runner
 - `node delivery-runner.js --mode full`
 - `node delivery-runner.js --mode fast`
+- `node delivery-runner.js --mode test`
 
 Modes:
-- `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA(advisory) -> UAT(advisory) -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan.
+- `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> UAT -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan. When Product Vision is marked complete and queues are drained, runner auto-triggers one comprehensive final test over `released` (UX final + SEC final + QA final + UAT full regression).
 - `fast`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream gates.
+- `test`: quality/regression mode. Runs delivery quality gates without deploy git actions and then performs a comprehensive full-system test over `released`.
 
 Bundle behavior:
 - Bundles start from `selected`.
@@ -125,6 +127,9 @@ Global pause guard:
 4) Optional fast delivery (no downstream gates):
 - `node delivery-runner.js --mode fast`
 
+5) Optional full regression test mode:
+- `node delivery-runner.js --mode test`
+
 ## Config
 
 `config.local.toml` is gitignored and project-specific.
@@ -132,7 +137,7 @@ Global pause guard:
 Important sections:
 - `[paths]`: `repo_root`, `requirements_root`, `docs_dir`, `product_vision_dir`
 - `[loops]`: bundle sizes, polling, retry policy
-- `[delivery_runner]`: `default_mode = full|fast`
+- `[delivery_runner]`: `default_mode = full|fast|test`
 - `[delivery_quality]`: strict QA/UAT gate behavior and bounded fix loop
 - `[po]`: vision defaults and limits
 - `loops.force_underfilled_after_cycles`: starts underfilled bundles after N idle cycles (default `3`)

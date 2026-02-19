@@ -11,6 +11,7 @@
     "po-vision": "node po-runner.js --mode vision",
     "delivery-runner": "node delivery-runner.js",
     "delivery-fast": "node delivery-runner.js --mode fast",
+    "delivery-test": "node delivery-runner.js --mode test",
     "setup": "node setup-project.js",
     "reqeng": "node reqeng-cli.js",
     "reqeng-cli": "node reqeng-cli.js"

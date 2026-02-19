@@ -88,7 +88,7 @@ function parseArgs(argv) {
 
 function usage() {
   console.log(
-    "Usage: node delivery-runner.js [--mode full|fast] [--once] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
+    "Usage: node delivery-runner.js [--mode full|fast|test] [--once] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
   );
 }
 
@@ -96,6 +96,9 @@ function normalizeDeliveryMode(value, fallback = "full") {
   const normalized = String(value || fallback || "").toLowerCase().trim();
   if (["dev-only", "dev_only", "devonly", "fast"].includes(normalized)) {
     return "fast";
+  }
+  if (["test", "uat", "regression", "full-test", "full_test"].includes(normalized)) {
+    return "test";
   }
   if (normalized === "full") {
     return "full";
@@ -1168,6 +1171,24 @@ function uatBatchGatePath(runtime) {
   return path.join(dir, "uat-bundle-gate.json");
 }
 
+function uxFinalGatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "ux-final-gate.json");
+}
+
+function secFinalGatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "sec-final-gate.json");
+}
+
+function uatFullRegressionGatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "uat-full-regression-gate.json");
+}
+
 function qaFinalGatePath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "qa-gates");
   fs.mkdirSync(dir, { recursive: true });
@@ -1640,6 +1661,38 @@ function createQaExecutionFailureGate() {
   };
 }
 
+function createUxExecutionFailureGate() {
+  return {
+    status: "fail",
+    summary: "UX final gate execution failed. Inspect logs and rerun.",
+    blocking_findings: ["P1: UX final gate execution failed. Inspect logs and rerun."],
+    findings: [
+      {
+        severity: "P1",
+        title: "UX final gate execution failed. Inspect logs and rerun.",
+        details: "",
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
+function createSecExecutionFailureGate() {
+  return {
+    status: "fail",
+    summary: "SEC final gate execution failed. Inspect logs and rerun.",
+    blocking_findings: ["P1: SEC final gate execution failed. Inspect logs and rerun."],
+    findings: [
+      {
+        severity: "P1",
+        title: "SEC final gate execution failed. Inspect logs and rerun.",
+        details: "",
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
 function createUatExecutionFailureGate() {
   return {
     status: "fail",
@@ -2051,6 +2104,368 @@ async function runUatBundle(runtime, controls) {
   };
 }
 
+async function runUxFinalPass(runtime, controls) {
+  if (countFiles(runtime.queues.released) === 0) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const gatePath = uxFinalGatePath(runtime);
+  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
+
+  log(controls, "UX final pass start");
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
+    args: ["--auto", "--final-pass", "--gate-file", gatePath],
+    cwd: runtime.agentsRoot,
+    maxRetries: runtime.loops.maxRetries,
+    retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
+  });
+
+  if (result.aborted && controls.stopRequested) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+  if (result.paused) {
+    log(controls, `UX final pass paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const parsed = parseGate(gatePath);
+  const gate = result.ok ? parsed : createUxExecutionFailureGate();
+  return {
+    progressed: true,
+    gate,
+  };
+}
+
+async function runSecFinalPass(runtime, controls) {
+  if (countFiles(runtime.queues.released) === 0) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const gatePath = secFinalGatePath(runtime);
+  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
+
+  log(controls, "SEC final pass start");
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
+    args: ["--auto", "--final-pass", "--gate-file", gatePath],
+    cwd: runtime.agentsRoot,
+    maxRetries: runtime.loops.maxRetries,
+    retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
+  });
+
+  if (result.aborted && controls.stopRequested) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+  if (result.paused) {
+    log(controls, `SEC final pass paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const parsed = parseGate(gatePath);
+  const gate = result.ok ? parsed : createSecExecutionFailureGate();
+  return {
+    progressed: true,
+    gate,
+  };
+}
+
+async function runUatFullRegression(runtime, controls) {
+  if (countFiles(runtime.queues.released) === 0) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const gatePath = uatFullRegressionGatePath(runtime);
+  fs.writeFileSync(gatePath, gateTemplateJson(), "utf8");
+
+  log(controls, "UAT full regression start");
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
+    args: ["--auto", "--full-regression", "--gate-file", gatePath],
+    cwd: runtime.agentsRoot,
+    maxRetries: runtime.loops.maxRetries,
+    retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
+  });
+
+  if (result.aborted && controls.stopRequested) {
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+  if (result.paused) {
+    log(controls, `UAT full regression paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    return {
+      progressed: false,
+      gate: null,
+    };
+  }
+
+  const parsed = parseGate(gatePath);
+  const gate = result.ok ? parsed : createUatExecutionFailureGate();
+  return {
+    progressed: true,
+    gate,
+  };
+}
+
+function comprehensiveSystemTestStatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "delivery-quality");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "comprehensive-test-state.json");
+}
+
+function readComprehensiveSystemTestState(runtime) {
+  const filePath = comprehensiveSystemTestStatePath(runtime);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function writeComprehensiveSystemTestState(runtime, state) {
+  const filePath = comprehensiveSystemTestStatePath(runtime);
+  const normalized = state && typeof state === "object" ? state : {};
+  fs.writeFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+}
+
+function hasOpenPlanningOrClarification(runtime) {
+  return countFiles(runtime.queues.refinement) > 0
+    || countFiles(runtime.queues.backlog) > 0
+    || countFiles(runtime.queues.selected) > 0
+    || countFiles(runtime.queues.arch) > 0
+    || countFiles(runtime.queues.dev) > 0
+    || countFiles(runtime.queues.toClarify) > 0
+    || countFiles(runtime.queues.humanInput) > 0
+    || countFiles(runtime.queues.humanDecisionNeeded) > 0
+    || countFiles(runtime.queues.blocked) > 0;
+}
+
+function shouldTriggerVisionFinalComprehensiveTest(runtime) {
+  if (!runtime || !runtime.po || String(runtime.po.defaultMode || "").toLowerCase() !== "vision") {
+    return false;
+  }
+  if (planningInProgress(runtime) || downstreamInProgress(runtime)) {
+    return false;
+  }
+  if (hasOpenPlanningOrClarification(runtime)) {
+    return false;
+  }
+  const decision = readPoVisionDecision(runtime);
+  if (!(decision.visionComplete && decision.status === "pass")) {
+    return false;
+  }
+  return countFiles(runtime.queues.released) > 0;
+}
+
+function applyGateByPolicy(runtime, controls, sourceLabel, gate, strict) {
+  if (!gate) {
+    return;
+  }
+  const shouldApply = !strict || gatePass(gate) || Boolean(runtime.deliveryQuality.emitFollowupsOnFail);
+  if (shouldApply) {
+    applyGateOutcomes(runtime, controls, sourceLabel, gate);
+  }
+}
+
+function strictGateFailRoute(runtime, controls, gateName, gate) {
+  return handleStrictGateFailure(runtime, controls, {
+    gateName,
+    sourceQueue: "released",
+    gate,
+  });
+}
+
+function strictGateEnabled(runtime) {
+  return Boolean(runtime.deliveryQuality && runtime.deliveryQuality.strictGate);
+}
+
+async function runComprehensiveSystemTest(runtime, controls, options = {}) {
+  if (countFiles(runtime.queues.released) === 0) {
+    return {
+      progressed: false,
+      passed: false,
+      reason: "no-released-items",
+    };
+  }
+
+  const strict = options.strict !== undefined ? Boolean(options.strict) : strictGateEnabled(runtime);
+  const reason = String(options.reason || "manual").trim() || "manual";
+  const releasedBundleKey = queueBundleKey(runtime, "released");
+
+  log(controls, `comprehensive test start reason=${reason} strict=${strict}`);
+
+  if (runtime.qa && runtime.qa.runChecksInRunner) {
+    const checks = runRunnerMandatoryChecks(runtime, controls);
+    if (!checks.ok) {
+      const gate = createMandatoryCheckFailureGate(checks);
+      applyGateByPolicy(runtime, controls, "qa-full", gate, strict);
+      if (strict) {
+        await strictGateFailRoute(runtime, controls, "qa-full", gate);
+      }
+      return {
+        progressed: true,
+        passed: false,
+        reason: "mandatory-checks-failed",
+      };
+    }
+    resetGateAttempt(runtime, "qa-full", releasedBundleKey);
+  }
+
+  const uxFinal = await runUxFinalPass(runtime, controls);
+  if (!uxFinal.progressed && !uxFinal.gate) {
+    return {
+      progressed: false,
+      passed: false,
+      reason: "ux-final-not-run",
+    };
+  }
+  if (uxFinal.progressed && uxFinal.gate) {
+    const uxGate = uxFinal.gate;
+    applyGateByPolicy(runtime, controls, "ux-final", uxGate, strict);
+    if (strict && !gatePass(uxGate)) {
+      await strictGateFailRoute(runtime, controls, "ux-final", uxGate);
+      return {
+        progressed: true,
+        passed: false,
+        reason: "ux-final-failed",
+      };
+    }
+    resetGateAttempt(runtime, "ux-final", releasedBundleKey);
+  }
+
+  const secFinal = await runSecFinalPass(runtime, controls);
+  if (!secFinal.progressed && !secFinal.gate) {
+    return {
+      progressed: false,
+      passed: false,
+      reason: "sec-final-not-run",
+    };
+  }
+  if (secFinal.progressed && secFinal.gate) {
+    const secGate = secFinal.gate;
+    applyGateByPolicy(runtime, controls, "sec-final", secGate, strict);
+    if (strict && !gatePass(secGate)) {
+      await strictGateFailRoute(runtime, controls, "sec-final", secGate);
+      return {
+        progressed: true,
+        passed: false,
+        reason: "sec-final-failed",
+      };
+    }
+    resetGateAttempt(runtime, "sec-final", releasedBundleKey);
+  }
+
+  const qaFinal = await runQaPostBundle(runtime, controls, "", { force: true, applyOutcomes: false });
+  if (!qaFinal.progressed && !qaFinal.gate) {
+    return {
+      progressed: false,
+      passed: false,
+      reason: "qa-final-not-run",
+    };
+  }
+  if (qaFinal.progressed && qaFinal.gate) {
+    const qaGate = qaFinal.gate;
+    applyGateByPolicy(runtime, controls, "qa-final", qaGate, strict);
+    if (strict && !gatePass(qaGate)) {
+      await strictGateFailRoute(runtime, controls, "qa-final", qaGate);
+      return {
+        progressed: true,
+        passed: false,
+        reason: "qa-final-failed",
+      };
+    }
+    resetGateAttempt(runtime, "qa-final", releasedBundleKey);
+  }
+
+  const uatFull = await runUatFullRegression(runtime, controls);
+  if (!uatFull.progressed && !uatFull.gate) {
+    return {
+      progressed: false,
+      passed: false,
+      reason: "uat-full-not-run",
+    };
+  }
+  if (uatFull.progressed && uatFull.gate) {
+    const uatGate = uatFull.gate;
+    applyGateByPolicy(runtime, controls, "uat-full", uatGate, strict);
+    if (strict && !gatePass(uatGate)) {
+      await strictGateFailRoute(runtime, controls, "uat-full", uatGate);
+      return {
+        progressed: true,
+        passed: false,
+        reason: "uat-full-failed",
+      };
+    }
+    resetGateAttempt(runtime, "uat-full", releasedBundleKey);
+  }
+
+  const state = readComprehensiveSystemTestState(runtime);
+  state.lastRunAt = new Date().toISOString();
+  state.lastReason = reason;
+  state.lastPassSignature = releasedSignature(runtime);
+  writeComprehensiveSystemTestState(runtime, state);
+
+  log(controls, `comprehensive test passed reason=${reason}`);
+  return {
+    progressed: true,
+    passed: true,
+    reason: "passed",
+  };
+}
+
+async function maybeRunComprehensiveSystemTest(runtime, controls, options = {}) {
+  const signature = releasedSignature(runtime);
+  if (!signature) {
+    return {
+      progressed: false,
+      passed: false,
+      reason: "no-signature",
+    };
+  }
+
+  const force = Boolean(options.force);
+  const state = readComprehensiveSystemTestState(runtime);
+  if (!force && String(state.lastPassSignature || "") === signature) {
+    return {
+      progressed: false,
+      passed: true,
+      reason: "already-passed",
+    };
+  }
+
+  return runComprehensiveSystemTest(runtime, controls, options);
+}
+
 async function runMaintPostDeploy(runtime, controls, lastSignature) {
   if (countFiles(runtime.queues.released) === 0) {
     return {
@@ -2421,7 +2836,10 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
 
   const parsed = parseGate(gatePath);
   const gate = result.ok ? parsed : createQaExecutionFailureGate();
-  applyGateOutcomes(runtime, controls, "qa-post", gate);
+  const shouldApplyOutcomes = options.applyOutcomes !== false;
+  if (shouldApplyOutcomes) {
+    applyGateOutcomes(runtime, controls, "qa-post", gate);
+  }
   return {
     progressed: true,
     signature: releasedSignature(runtime),
@@ -2441,8 +2859,11 @@ function snapshotHash(runtime) {
   return parts.sort().join("\n");
 }
 
-async function runFullDownstream(runtime, controls, lastReleasedSignature, lastMaintSignature) {
+async function runFullDownstream(runtime, controls, lastReleasedSignature, lastMaintSignature, options = {}) {
   let progressed = false;
+  const performDeploy = options.performDeploy !== false;
+  const runQaPost = options.runQaPost !== false;
+  const runMaint = options.runMaint !== false;
 
   if (await runUxBatch(runtime, controls)) {
     progressed = true;
@@ -2458,26 +2879,47 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
   if (uatBundle.progressed) {
     progressed = true;
   }
-  if (await runDeployBundle(runtime, controls)) {
-    progressed = true;
+  if (performDeploy) {
+    if (await runDeployBundle(runtime, controls)) {
+      progressed = true;
+    }
+  } else if (countFiles(runtime.queues.deploy) > 0) {
+    const moved = moveAll(
+      runtime,
+      "deploy",
+      "released",
+      "released",
+      "Delivery runner: test mode - skip deploy actions; keep released snapshot for comprehensive tests"
+    );
+    if (moved > 0) {
+      log(controls, `test mode normalized deploy->released: ${moved}`);
+      progressed = true;
+    }
   }
-  const qaPost = await runQaPostBundle(runtime, controls, lastReleasedSignature);
-  if (qaPost.progressed) {
-    progressed = true;
+  let qaPost = { progressed: false, signature: lastReleasedSignature };
+  if (runQaPost) {
+    qaPost = await runQaPostBundle(runtime, controls, lastReleasedSignature);
+    if (qaPost.progressed) {
+      progressed = true;
+    }
   }
-  const maint = await runMaintPostDeploy(
-    runtime,
-    controls,
-    lastMaintSignature
-  );
-  if (maint.progressed) {
-    progressed = true;
+
+  let maint = { progressed: false, signature: lastMaintSignature };
+  if (runMaint) {
+    maint = await runMaintPostDeploy(
+      runtime,
+      controls,
+      lastMaintSignature
+    );
+    if (maint.progressed) {
+      progressed = true;
+    }
   }
 
   return {
     progressed,
-    releasedSignature: qaPost.signature,
-    maintSignature: maint.signature,
+    releasedSignature: qaPost.signature || lastReleasedSignature,
+    maintSignature: maint.signature || lastMaintSignature,
   };
 }
 
@@ -2531,12 +2973,15 @@ async function main() {
     await runArch(runtime, controls);
     await runDev(runtime, controls);
 
-    if (mode === "full" && !planningInProgress(runtime)) {
+    if ((mode === "full" || mode === "test") && !planningInProgress(runtime)) {
       const downstream = await runFullDownstream(
         runtime,
         controls,
         lastReleasedSignature,
-        lastMaintSignature
+        lastMaintSignature,
+        mode === "test"
+          ? { performDeploy: false, runQaPost: false, runMaint: false }
+          : {}
       );
       if (downstream.releasedSignature) {
         lastReleasedSignature = downstream.releasedSignature;
@@ -2544,6 +2989,14 @@ async function main() {
       if (downstream.maintSignature) {
         lastMaintSignature = downstream.maintSignature;
       }
+    }
+
+    if (mode === "test" && !planningInProgress(runtime) && !downstreamInProgress(runtime)) {
+      await maybeRunComprehensiveSystemTest(runtime, controls, { reason: "test-mode" });
+    }
+
+    if (mode === "full" && shouldTriggerVisionFinalComprehensiveTest(runtime)) {
+      await maybeRunComprehensiveSystemTest(runtime, controls, { reason: "vision-complete" });
     }
 
     if (args.once) {

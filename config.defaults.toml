@@ -16,7 +16,7 @@
 # Startkommandos laufen aus dem Repo-Root:
 # - node setup-project.js --repo-root /abs/path
 # - node po-runner.js --mode vision|intake
-# - node delivery-runner.js --mode full|fast
+# - node delivery-runner.js --mode full|fast|test
 # - node reqeng-cli.js
 
 [paths]
@@ -53,9 +53,10 @@ retry_delay_seconds = 2
 force_underfilled_after_cycles = 3
 
 [delivery_runner]
-# OPTIONAL: full | fast
+# OPTIONAL: full | fast | test
 # full = kompletter Delivery-Flow mit Downstream-Gates
 # fast = nur selected -> arch -> dev
+# test = Quality-/Regression-Mode (kein Deploy), danach Volltest ueber released
 default_mode = "full"
 
 [delivery_quality]

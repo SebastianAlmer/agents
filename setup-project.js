@@ -260,7 +260,7 @@ function deepMerge(base, override) {
 
 function usage() {
   console.log(
-    "Usage: node setup-project.js --repo-root /abs/path [--flow full|fast] [--product-vision-dir /abs/path] [--po-mode vision|intake] [--bundle-min-size N --bundle-max-size N] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--qa-check <cmd>]"
+    "Usage: node setup-project.js --repo-root /abs/path [--flow full|fast|test] [--product-vision-dir /abs/path] [--po-mode vision|intake] [--bundle-min-size N --bundle-max-size N] [--dev-routing fullstack_only|split] [--deploy-mode check|commit|commit_push] [--qa-check <cmd>]"
   );
 }
 
@@ -326,9 +326,14 @@ function main() {
   const deliveryRunnerDefaultRaw = String(
     args.flow || (base.delivery_runner && base.delivery_runner.default_mode) || "full"
   ).toLowerCase();
-  const deliveryRunnerDefault = ["dev-only", "dev_only", "devonly"].includes(deliveryRunnerDefaultRaw)
-    ? "fast"
-    : normalizeEnum(deliveryRunnerDefaultRaw, ["full", "fast"], "full");
+  let deliveryRunnerDefault = deliveryRunnerDefaultRaw;
+  if (["dev-only", "dev_only", "devonly"].includes(deliveryRunnerDefaultRaw)) {
+    deliveryRunnerDefault = "fast";
+  } else if (["uat", "regression", "full-test", "full_test"].includes(deliveryRunnerDefaultRaw)) {
+    deliveryRunnerDefault = "test";
+  } else {
+    deliveryRunnerDefault = normalizeEnum(deliveryRunnerDefaultRaw, ["full", "fast", "test"], "full");
+  }
   const deliveryQualityBase = base.delivery_quality && typeof base.delivery_quality === "object"
     ? base.delivery_quality
     : {};
