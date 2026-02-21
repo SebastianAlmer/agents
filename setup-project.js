@@ -273,6 +273,14 @@ function normalizeBool(value, fallback) {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function normalizeReasoningEffort(value, fallback) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["low", "medium", "high", "xhigh"].includes(normalized)) {
+    return normalized;
+  }
+  return String(fallback || "").trim().toLowerCase() || "xhigh";
+}
+
 function toTomlString(value) {
   return JSON.stringify(String(value));
 }
@@ -583,8 +591,38 @@ function main() {
     model: (base.codex && base.codex.model) || models.default || "gpt-5.3-codex-spark",
     approval_policy: (base.codex && base.codex.approval_policy) || "never",
     sandbox_mode: (base.codex && base.codex.sandbox_mode) || "danger-full-access",
-    model_reasoning_effort: (base.codex && base.codex.model_reasoning_effort) || "xhigh",
+    model_reasoning_effort: normalizeReasoningEffort(
+      base.codex && base.codex.model_reasoning_effort,
+      "xhigh"
+    ),
   };
+  const baseReasoning =
+    base.codex && base.codex.reasoning_effort && typeof base.codex.reasoning_effort === "object"
+      ? base.codex.reasoning_effort
+      : {};
+  const reasoningKeys = [
+    "default",
+    "po",
+    "arch",
+    "reqeng",
+    "sec",
+    "dev_fe",
+    "dev_be",
+    "dev_fs",
+    "qa",
+    "uat",
+    "maint",
+    "ux",
+    "deploy",
+  ];
+  const reasoningEffort = {};
+  for (const key of reasoningKeys) {
+    reasoningEffort[key] = normalizeReasoningEffort(
+      baseReasoning[key],
+      codex.model_reasoning_effort
+    );
+  }
+  codex.model_reasoning_effort = reasoningEffort.default;
 
   const content = [
     "[paths]",
@@ -706,6 +744,21 @@ function main() {
     `approval_policy = ${toTomlString(codex.approval_policy)}`,
     `sandbox_mode = ${toTomlString(codex.sandbox_mode)}`,
     `model_reasoning_effort = ${toTomlString(codex.model_reasoning_effort)}`,
+    "",
+    "[codex.reasoning_effort]",
+    `default = ${toTomlString(reasoningEffort.default)}`,
+    `po = ${toTomlString(reasoningEffort.po)}`,
+    `arch = ${toTomlString(reasoningEffort.arch)}`,
+    `reqeng = ${toTomlString(reasoningEffort.reqeng)}`,
+    `sec = ${toTomlString(reasoningEffort.sec)}`,
+    `dev_fe = ${toTomlString(reasoningEffort.dev_fe)}`,
+    `dev_be = ${toTomlString(reasoningEffort.dev_be)}`,
+    `dev_fs = ${toTomlString(reasoningEffort.dev_fs)}`,
+    `qa = ${toTomlString(reasoningEffort.qa)}`,
+    `uat = ${toTomlString(reasoningEffort.uat)}`,
+    `maint = ${toTomlString(reasoningEffort.maint)}`,
+    `ux = ${toTomlString(reasoningEffort.ux)}`,
+    `deploy = ${toTomlString(reasoningEffort.deploy)}`,
     "",
   ].join("\n");
 

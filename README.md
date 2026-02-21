@@ -159,6 +159,8 @@ Important sections:
 - `[qa]`: `mandatory_checks` + `run_checks_in_runner` for deterministic pre-QA checks
 - `[models]`
 - Include optional per-agent model overrides such as `[models].uat` and `[models].maint`.
+- `[codex]`: base Codex profile (`model`, `approval_policy`, `sandbox_mode`, `model_reasoning_effort`)
+- `[codex.reasoning_effort]`: optional per-agent overrides (`default`, `po`, `arch`, `sec`, `dev_fe`, `dev_be`, `dev_fs`, `qa`, `ux`, `uat`, `deploy`, `maint`, `reqeng`)
 
 ## Queues
 

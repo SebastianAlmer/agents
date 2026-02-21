@@ -2,6 +2,7 @@
 
 This folder stores queue structure only.
 Requirement markdown payloads are intentionally ignored by git so each project can keep local queue content.
+Each queue keeps a `.gitkeep` placeholder; queue metrics must count only `*.md` requirement files and ignore `.gitkeep`.
 
 Default queues:
 - `refinement`

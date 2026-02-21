@@ -1147,7 +1147,7 @@ async function runDev(runtime, controls) {
 }
 
 async function runUxBatch(runtime, controls) {
-  if (countFiles(runtime.queues.qa) === 0) {
+  if (countFiles(runtime.queues.qa) === 0 && countFiles(runtime.queues.ux) === 0) {
     return false;
   }
 
