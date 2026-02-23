@@ -154,6 +154,8 @@ async function main() {
       agentsRoot: runtime.agentsRoot,
       bootstrapPrompt: fullPrompt,
       threadId,
+      runtime,
+      autoMode: false,
     });
     process.exit(0);
   }
@@ -167,6 +169,8 @@ async function main() {
     agentsRoot: runtime.agentsRoot,
     agentLabel: "MAINT",
     autoCompact: true,
+    runtime,
+    autoMode: args.auto,
   });
 
   validateDecisionFile(decisionFile);

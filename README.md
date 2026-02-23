@@ -72,7 +72,9 @@ Bundle behavior:
 - DEV has a watchdog + recovery ladder (`same-thread retry -> fresh-thread retry -> route to to-clarify`) to prevent infinite loops on a single requirement.
 - Default quality mode is strict: QA and UAT must pass before deploy.
 - On QA/UAT fail, the same bundle is routed back to `dev` for rework (bounded by `delivery_quality.max_fix_cycles`), then retried.
-- If max fix cycles are exceeded, the bundle is routed to `to-clarify` (no silent endless loop).
+- If max fix cycles are exceeded, the bundle is routed to `blocked` to avoid endless loops.
+- If QA `mandatory_checks` fail and `[qa].auto_fix_on_mandatory_fail=true`, the runner first attempts automatic technical repair (optional shell fix commands and/or Codex repair) before strict-gate escalation.
+- Agents support local project memory under `.runtime/memory` (shared + per-agent) and can auto-update it after runs.
 - `P0/P1` findings are auto-routed to `selected` as hotfix requirements.
 - `P2/P3` findings are auto-routed to `backlog`.
 - Strict non-automatable critical UAT checks are auto-routed to `human-decision-needed` as manual check packages.
@@ -156,7 +158,8 @@ Important sections:
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)
 - `[deploy.pr]`: optional PR creation after deploy push (`enabled`, `provider`, `remote`, `base_branch`, `head_mode`, `head_branch`, templates). Template vars: `${type}` (`feat|fix|chore` inferred from branch), `${branch}`, `${base}`, `${remote}`
 - `[dev_routing]`, `[dev_agents]`
-- `[qa]`: `mandatory_checks` + `run_checks_in_runner` for deterministic pre-QA checks
+- `[qa]`: `mandatory_checks`, `run_checks_in_runner`, and optional `auto_fix_*` settings for deterministic pre-QA checks plus automatic repair on technical gate failures
+- `[memory]`: local agent memory behavior (`enabled`, `dir`, `include_in_prompt`, `update_on_auto`, `update_on_interactive`, limits)
 - `[models]`
 - Include optional per-agent model overrides such as `[models].uat` and `[models].maint`.
 - `[codex]`: base Codex profile (`model`, `approval_policy`, `sandbox_mode`, `model_reasoning_effort`)
@@ -193,6 +196,7 @@ Intake recommendation:
 ## Git safety
 
 - Thread/runtime files are under `.runtime/` and ignored by git.
+- Memory files are local under `.runtime/memory/` and ignored by git.
 - Requirement payload markdown is ignored by git; queue folder structure is tracked via `.gitkeep`.
 - Delivery git actions are executed only in `paths.repo_root`.
 - Safety check prevents commits to the `agents` repo.

@@ -543,6 +543,36 @@ function main() {
     base.qa && base.qa.run_checks_in_runner,
     true
   );
+  const qaAutoFixOnMandatoryFail = normalizeBool(
+    base.qa && base.qa.auto_fix_on_mandatory_fail,
+    true
+  );
+  const qaAutoFixMaxAttempts = Number.isFinite(base.qa && base.qa.auto_fix_max_attempts)
+    ? Math.max(0, base.qa.auto_fix_max_attempts)
+    : 1;
+  const qaAutoFixCommands = Array.isArray(base.qa && base.qa.auto_fix_commands)
+    ? base.qa.auto_fix_commands.map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+  const qaAutoFixUseCodex = normalizeBool(
+    base.qa && base.qa.auto_fix_use_codex,
+    true
+  );
+  const baseMemory = base.memory && typeof base.memory === "object" ? base.memory : {};
+  const memoryEnabled = normalizeBool(baseMemory.enabled, true);
+  const memoryDir = String(baseMemory.dir || ".runtime/memory").trim() || ".runtime/memory";
+  const memoryIncludeInPrompt = normalizeBool(baseMemory.include_in_prompt, true);
+  const memoryUpdateOnAuto = normalizeBool(baseMemory.update_on_auto, true);
+  const memoryUpdateOnInteractive = normalizeBool(baseMemory.update_on_interactive, true);
+  const memorySharedFile = String(baseMemory.shared_file || "shared.md").trim() || "shared.md";
+  const memoryMaxContextCharsPerFile = Number.isFinite(baseMemory.max_context_chars_per_file)
+    ? Math.max(500, baseMemory.max_context_chars_per_file)
+    : 4000;
+  const memorySoftMaxLinesShared = Number.isFinite(baseMemory.soft_max_lines_shared)
+    ? Math.max(20, baseMemory.soft_max_lines_shared)
+    : 250;
+  const memorySoftMaxLinesAgent = Number.isFinite(baseMemory.soft_max_lines_agent)
+    ? Math.max(20, baseMemory.soft_max_lines_agent)
+    : 180;
 
   const baseE2e = base.e2e && typeof base.e2e === "object" ? base.e2e : {};
   const e2eEnabled = normalizeBool(baseE2e.enabled, false);
@@ -723,6 +753,21 @@ function main() {
     "[qa]",
     `mandatory_checks = ${toTomlArray(qaChecks)}`,
     `run_checks_in_runner = ${toTomlBool(qaRunChecksInRunner)}`,
+    `auto_fix_on_mandatory_fail = ${toTomlBool(qaAutoFixOnMandatoryFail)}`,
+    `auto_fix_max_attempts = ${toTomlInt(qaAutoFixMaxAttempts)}`,
+    `auto_fix_commands = ${toTomlArray(qaAutoFixCommands)}`,
+    `auto_fix_use_codex = ${toTomlBool(qaAutoFixUseCodex)}`,
+    "",
+    "[memory]",
+    `enabled = ${toTomlBool(memoryEnabled)}`,
+    `dir = ${toTomlString(memoryDir)}`,
+    `include_in_prompt = ${toTomlBool(memoryIncludeInPrompt)}`,
+    `update_on_auto = ${toTomlBool(memoryUpdateOnAuto)}`,
+    `update_on_interactive = ${toTomlBool(memoryUpdateOnInteractive)}`,
+    `shared_file = ${toTomlString(memorySharedFile)}`,
+    `max_context_chars_per_file = ${toTomlInt(memoryMaxContextCharsPerFile)}`,
+    `soft_max_lines_shared = ${toTomlInt(memorySoftMaxLinesShared)}`,
+    `soft_max_lines_agent = ${toTomlInt(memorySoftMaxLinesAgent)}`,
     "",
     "[models]",
     `default = ${toTomlString(models.default)}`,
@@ -771,6 +816,8 @@ function main() {
   console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
   console.log(`- delivery_runner.default_mode: ${deliveryRunnerDefault}`);
   console.log(`- delivery_quality: strict=${deliveryQualityStrictGate} qa_pass=${deliveryQualityRequireQaPass} uat_pass=${deliveryQualityRequireUatPass} route_to_dev=${deliveryQualityRouteToDevOnFail} max_fix_cycles=${deliveryQualityMaxFixCycles} emit_followups_on_fail=${deliveryQualityEmitFollowupsOnFail}`);
+  console.log(`- qa autofix: enabled=${qaAutoFixOnMandatoryFail} max_attempts=${qaAutoFixMaxAttempts} shell_cmds=${qaAutoFixCommands.length} codex=${qaAutoFixUseCodex}`);
+  console.log(`- memory: enabled=${memoryEnabled} dir=${memoryDir} include_in_prompt=${memoryIncludeInPrompt} update_on_auto=${memoryUpdateOnAuto} update_on_interactive=${memoryUpdateOnInteractive}`);
   console.log(`- e2e: enabled=${e2eEnabled} required_in_test_mode=${e2eRequiredInTestMode} run_on_full_completion=${e2eRunOnFullCompletion} timeout=${e2eTimeoutSeconds}s`);
   console.log(`- deploy.mode: ${deployMode}`);
   console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled}, backlog_promote_enabled=${poBacklogPromoteEnabled}, backlog_promote_after_cycles=${poBacklogPromoteAfterCycles}, backlog_promote_min_business_score=${poBacklogPromoteMinBusinessScore}, backlog_promote_max_per_cycle=${poBacklogPromoteMaxPerCycle})`);

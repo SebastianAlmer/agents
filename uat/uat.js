@@ -238,6 +238,8 @@ async function main() {
       agentsRoot: runtime.agentsRoot,
       bootstrapPrompt: fullPrompt,
       threadId,
+      runtime,
+      autoMode: false,
     });
     process.exit(0);
   }
@@ -251,6 +253,8 @@ async function main() {
     agentsRoot: runtime.agentsRoot,
     agentLabel: "UAT",
     autoCompact: auto,
+    runtime,
+    autoMode: auto,
   });
 
   if (batch || fullRegression) {

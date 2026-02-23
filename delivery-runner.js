@@ -18,7 +18,13 @@ const {
   getActivePauseState,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
-const { getThreadFilePath, readThreadId, clearThreadState } = require("./lib/agent");
+const {
+  getThreadFilePath,
+  readThreadId,
+  clearThreadState,
+  readConfigArgs,
+  runCodexExec,
+} = require("./lib/agent");
 
 const DELIVERY_IDLE_WAIT_MS = 5 * 60 * 1000;
 
@@ -2102,18 +2108,187 @@ function runRunnerMandatoryChecks(runtime, controls) {
   return { ok: true, skipped: false };
 }
 
+function buildMandatoryCheckAutoFixPrompt(checkResult) {
+  const command = String((checkResult && checkResult.command) || "").trim();
+  const output = truncateForQueueNote(String((checkResult && checkResult.output) || "no output"), 4000);
+  return [
+    "# Role",
+    "You are an autonomous repair engineer for CI gate failures.",
+    "",
+    "# Goal",
+    `Make this command pass from repository root: ${command || "<missing-command>"}`,
+    "",
+    "# Failure Output",
+    "```",
+    output,
+    "```",
+    "",
+    "# Constraints",
+    "- Apply minimal targeted fixes only.",
+    "- Prefer fixing tests/types/build issues over broad refactors.",
+    "- Run the failing command yourself until it passes.",
+    "- If the command cannot pass, stop after reasonable attempts and explain briefly.",
+  ].join("\n");
+}
+
+async function runCodexMandatoryCheckAutoFix(runtime, controls, checkResult, attempt) {
+  const prompt = buildMandatoryCheckAutoFixPrompt(checkResult);
+  const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("DEV_FS"));
+  const threadFile = getThreadFilePath({
+    agentsRoot: runtime.agentsRoot,
+    agentRoot: path.join(runtime.agentsRoot, "delivery-runner"),
+    auto: true,
+    threadKey: "mandatory-check-autofix",
+  });
+  const threadId = readThreadId(threadFile);
+
+  log(
+    controls,
+    `QA precheck auto-fix (codex) attempt ${attempt}: ${(checkResult && checkResult.command) || "unknown command"}`
+  );
+
+  try {
+    await runCodexExec({
+      prompt,
+      repoRoot: runtime.repoRoot,
+      configArgs,
+      threadId,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      agentLabel: "DELIVERY-QA-FIX",
+      autoCompact: true,
+    });
+    return { ok: true };
+  } catch (err) {
+    const message = String((err && err.message) || err || "codex autofix failed");
+    return { ok: false, error: message };
+  }
+}
+
+function runShellMandatoryAutoFixCommands(runtime, controls, commands, attempt) {
+  const results = [];
+  for (const entry of commands) {
+    const cmd = String(entry || "").trim();
+    if (!cmd) {
+      continue;
+    }
+    log(controls, `QA precheck auto-fix (shell) attempt ${attempt}: ${cmd}`);
+    const result = runShellCheckCommand(runtime, cmd);
+    results.push({
+      command: cmd,
+      ok: result.ok,
+      output: truncateForQueueNote(String(result.output || "no output"), 700),
+    });
+  }
+  return results;
+}
+
+async function runMandatoryChecksWithAutoFix(runtime, controls) {
+  const initial = runRunnerMandatoryChecks(runtime, controls);
+  if (initial.ok || initial.skipped) {
+    return initial;
+  }
+
+  const qa = runtime.qa || {};
+  const maxAttempts = Math.max(0, Number.parseInt(String(qa.autoFixMaxAttempts || 0), 10));
+  const autoFixCommands = Array.isArray(qa.autoFixCommands) ? qa.autoFixCommands : [];
+  const useCodex = Boolean(qa.autoFixUseCodex);
+  const canAutoFix = Boolean(qa.autoFixOnMandatoryFail) && maxAttempts > 0 && (autoFixCommands.length > 0 || useCodex);
+
+  if (!canAutoFix) {
+    return {
+      ...initial,
+      autoFix: {
+        attempted: false,
+        recovered: false,
+      },
+    };
+  }
+
+  let lastFailure = initial;
+  const traces = [];
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const shellRuns = autoFixCommands.length > 0
+      ? runShellMandatoryAutoFixCommands(runtime, controls, autoFixCommands, attempt)
+      : [];
+    let codexRun = null;
+    if (useCodex) {
+      codexRun = await runCodexMandatoryCheckAutoFix(runtime, controls, lastFailure, attempt);
+    }
+
+    const recheck = runRunnerMandatoryChecks(runtime, controls);
+    traces.push({
+      attempt,
+      shellRuns,
+      codexRun,
+      recheckOk: Boolean(recheck.ok),
+      recheckCommand: String(recheck.command || ""),
+    });
+    if (recheck.ok) {
+      log(controls, `QA precheck auto-fix recovered on attempt ${attempt}/${maxAttempts}`);
+      return {
+        ...recheck,
+        autoFix: {
+          attempted: true,
+          recovered: true,
+          attempts: attempt,
+          traces,
+        },
+      };
+    }
+    lastFailure = recheck;
+  }
+
+  return {
+    ...lastFailure,
+    autoFix: {
+      attempted: true,
+      recovered: false,
+      attempts: maxAttempts,
+      traces,
+    },
+  };
+}
+
 function createMandatoryCheckFailureGate(checkResult) {
   const command = String((checkResult && checkResult.command) || "unknown command");
   const output = truncateForQueueNote(String((checkResult && checkResult.output) || "no output"), 500);
+  const autoFix = checkResult && checkResult.autoFix && typeof checkResult.autoFix === "object"
+    ? checkResult.autoFix
+    : null;
+  const autoFixSuffix = autoFix && autoFix.attempted
+    ? (autoFix.recovered
+      ? " (auto-fix recovered)"
+      : ` (auto-fix attempted: ${Number(autoFix.attempts || 0)}x)`)
+    : "";
+  const traceParts = [];
+  if (autoFix && Array.isArray(autoFix.traces)) {
+    for (const trace of autoFix.traces) {
+      const attempt = Number.parseInt(String(trace.attempt || 0), 10) || 0;
+      if (Array.isArray(trace.shellRuns)) {
+        for (const run of trace.shellRuns) {
+          traceParts.push(
+            `attempt ${attempt} shell ${String(run.command || "").trim() || "unknown"} => ${run.ok ? "ok" : "fail"}`
+          );
+        }
+      }
+      if (trace.codexRun) {
+        traceParts.push(`attempt ${attempt} codex => ${trace.codexRun.ok ? "ok" : `fail (${trace.codexRun.error || "error"})`}`);
+      }
+    }
+  }
+  const traceSummary = traceParts.length > 0
+    ? ` | auto-fix: ${truncateForQueueNote(traceParts.join("; "), 380)}`
+    : "";
   return {
     status: "fail",
-    summary: `mandatory check failed: ${command}`,
+    summary: `mandatory check failed: ${command}${autoFixSuffix}`,
     blocking_findings: [`P1: Mandatory check failed: ${command}`],
     findings: [
       {
         severity: "P1",
         title: "Mandatory QA check failed",
-        details: `${command} :: ${output}`,
+        details: `${command} :: ${output}${traceSummary}`,
       },
     ],
     manual_uat: [],
@@ -2181,7 +2356,7 @@ async function runQaBundle(runtime, controls) {
   const bundleKey = queueBundleKey(runtime, "qa");
 
   if (strictQa && runtime.qa && runtime.qa.runChecksInRunner) {
-    const checks = runRunnerMandatoryChecks(runtime, controls);
+    const checks = await runMandatoryChecksWithAutoFix(runtime, controls);
     if (!checks.ok) {
       const gate = createMandatoryCheckFailureGate(checks);
       if (runtime.deliveryQuality.emitFollowupsOnFail) {
@@ -2781,7 +2956,7 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   );
 
   if (runtime.qa && runtime.qa.runChecksInRunner) {
-    const checks = runRunnerMandatoryChecks(runtime, controls);
+    const checks = await runMandatoryChecksWithAutoFix(runtime, controls);
     if (!checks.ok) {
       const gate = createMandatoryCheckFailureGate(checks);
       applyGateByPolicy(runtime, controls, "qa-full", gate, enforceStrictRouting);

@@ -109,6 +109,21 @@ head_mode = "current"
 # mandatory_checks = ["npm --prefix app run db:migrate", "npm --prefix app run test", "npm --prefix web run lint"]
 mandatory_checks = []
 run_checks_in_runner = true
+auto_fix_on_mandatory_fail = true
+auto_fix_max_attempts = 1
+auto_fix_commands = []
+auto_fix_use_codex = true
+
+[memory]
+enabled = true
+dir = ".runtime/memory"
+include_in_prompt = true
+update_on_auto = true
+update_on_interactive = true
+shared_file = "shared.md"
+max_context_chars_per_file = 4000
+soft_max_lines_shared = 250
+soft_max_lines_agent = 180
 
 [models]
 # Modellzuordnung pro Agent (Beispielprofil).

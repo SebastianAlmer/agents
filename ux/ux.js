@@ -243,6 +243,8 @@ async function main() {
       agentsRoot: runtime.agentsRoot,
       bootstrapPrompt: fullPrompt,
       threadId,
+      runtime,
+      autoMode: false,
     });
     process.exit(0);
   }
@@ -256,6 +258,8 @@ async function main() {
     agentsRoot: runtime.agentsRoot,
     agentLabel: "UX",
     autoCompact: auto,
+    runtime,
+    autoMode: auto,
   });
 
   if (finalPass) {

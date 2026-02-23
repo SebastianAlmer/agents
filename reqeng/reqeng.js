@@ -141,6 +141,8 @@ async function main() {
       agentsRoot: runtime.agentsRoot,
       agentLabel: "REQENG",
       autoCompact: false,
+      runtime,
+      autoMode: false,
     });
 
     if (result.threadId) {
@@ -186,6 +188,8 @@ async function main() {
     agentsRoot: runtime.agentsRoot,
     bootstrapPrompt,
     threadId,
+    runtime,
+    autoMode: false,
   });
 }
 

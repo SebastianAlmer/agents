@@ -228,6 +228,8 @@ async function main() {
       agentsRoot: runtime.agentsRoot,
       bootstrapPrompt: fullPrompt,
       threadId,
+      runtime,
+      autoMode: false,
     });
     process.exit(0);
   }
@@ -241,6 +243,8 @@ async function main() {
     agentsRoot: runtime.agentsRoot,
     agentLabel: "ARCH",
     autoCompact: auto,
+    runtime,
+    autoMode: auto,
   });
 
   if (result.threadId) {

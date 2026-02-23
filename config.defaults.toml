@@ -253,6 +253,46 @@ mandatory_checks = []
 # bevor der QA-Agent gestartet wird (spart Tokens und ist reproduzierbar).
 run_checks_in_runner = true
 
+# OPTIONAL: true = Bei mandatory_check-Fehlern versucht der Runner zuerst Auto-Fixes
+# (Shell-Kommandos und/oder Codex), bevor strict-gate Eskalation greift.
+auto_fix_on_mandatory_fail = true
+
+# OPTIONAL: Anzahl Auto-Fix-Runden pro fehlgeschlagenem mandatory_check.
+auto_fix_max_attempts = 1
+
+# OPTIONAL: Deterministische Fix-Kommandos vor Codex-Auto-Fix.
+# Beispiel: ["npm --prefix web run lint -- --fix", "npm --prefix app run lint -- --fix"]
+auto_fix_commands = []
+
+# OPTIONAL: true = zusaetzlicher Codex-Repair-Lauf bei mandatory_check-Fehlern.
+auto_fix_use_codex = true
+
+[memory]
+# OPTIONAL: Lokales Agent-Memory unterhalb des agents-Repos.
+enabled = true
+
+# OPTIONAL: Basisverzeichnis fuer shared + agent-spezifische Memory-Dateien.
+dir = ".runtime/memory"
+
+# OPTIONAL: true = shared/agent memory snapshots werden in Agent-Prompts eingebettet.
+include_in_prompt = true
+
+# OPTIONAL: true = Memory-Update-Schritt nach Auto-Lauf.
+update_on_auto = true
+
+# OPTIONAL: true = Memory-Update-Schritt nach Interactive-Lauf.
+update_on_interactive = true
+
+# OPTIONAL: Dateiname fuer zentrale, agent-uebergreifende Memory.
+shared_file = "shared.md"
+
+# OPTIONAL: Maximale Zeichen pro Memory-Datei im Prompt-Kontext (tail-basiert).
+max_context_chars_per_file = 4000
+
+# OPTIONAL: Weiche Obergrenzen fuer Memory-Hygiene (Prompt-Leitplanken).
+soft_max_lines_shared = 250
+soft_max_lines_agent = 180
+
 [models]
 # OPTIONAL: Modellzuordnung pro Agent.
 default = "gpt-5.3-codex-spark"
