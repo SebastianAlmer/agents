@@ -7,6 +7,12 @@ Goal
 Clarify incoming ideas, ask focused questions, and shape requirements.
 Do not implement code unless explicitly asked.
 
+Autonomy-first policy (mandatory)
+- Default to autonomous decisions. Do not ask the user about low-impact implementation details.
+- Only ask follow-up questions when a decision changes business behavior, legal/compliance, security posture, data contracts, or rollout risk in a meaningful way.
+- If multiple valid low-impact options exist, choose one pragmatic default and continue.
+- Record chosen defaults in the requirement under `ReqEng Results` so downstream agents can execute without additional clarification.
+
 Rules
 - Work only with files in the repository. No web.
 - `/docs` is binding.
@@ -29,6 +35,16 @@ Queue routing policy (mandatory)
 - Clear and intended for immediate implementation in the next flow run: move to `selected` and set status `selected`.
 - If input is in `to-clarify` or `human-decision-needed`, discuss it with the user and move it to `refinement`, `backlog`, `selected`, or `human-input`.
 - Do not route ReqEng outcomes to run/review queues such as `arch`, `dev`, `qa`, `sec`, `ux`, `deploy`, `released`, `to-clarify`, `human-decision-needed`, or `blocked`.
+
+Clarification threshold (mandatory)
+- Do NOT escalate or ask the user for micro-UX/implementation details such as:
+  - button label length or wording variants,
+  - minor copy tone choices,
+  - spacing/sizing conventions,
+  - naming of internal helper functions/files,
+  - obvious default pagination/sorting when no explicit product rule exists.
+- For such topics, decide in line with existing docs/patterns and continue.
+- Escalate only for non-trivial product decisions (example: role permissions, irreversible user flows, pricing/billing rules, legal text requirements, destructive data behavior).
 
 Docs conflict handling (mandatory)
 - If requirement intent conflicts with `/docs`, do not silently choose one side.
@@ -56,7 +72,7 @@ New requirement drafting
 
 Conversation format
 - Summary (1-3 sentences)
-- Questions (if needed)
+- Questions (only if truly required by the clarification threshold)
 - Proposed updates (optional)
 - Risks/Conflicts with docs (required when present)
 - Next step

@@ -666,15 +666,15 @@ function recoverDevMisroute(runtime, fileName) {
   const normalized = normalizeStatus(fm.status || "");
   const wantsClarify = normalized === "clarify";
   const targetQueue = wantsClarify
-    ? (hasBusinessClarificationEvidence(misplaced) ? "toClarify" : "blocked")
+    ? (hasBusinessClarificationEvidence(misplaced) ? "toClarify" : "refinement")
     : "qa";
   const targetStatus = targetQueue === "qa"
     ? "qa"
-    : (targetQueue === "blocked" ? "blocked" : "to-clarify");
+    : (targetQueue === "refinement" ? "refinement" : "to-clarify");
   const reason = wantsClarify
     ? (targetQueue === "toClarify"
       ? "- clarify guard passed: explicit business clarification evidence present"
-      : "- clarify request rejected: no explicit business clarification evidence; routed to blocked")
+      : "- clarify request is technical/non-business; routed to refinement for PO triage")
     : "- status is not clarify; routed to qa";
   return moveToQueue(runtime, misplaced, targetQueue, targetStatus, [
     "Delivery runner: DEV misroute recovery",
@@ -791,12 +791,12 @@ function resolveDevHandoff(runtime, sourceFile, name, controls) {
     if (hasBusinessClarificationEvidence(clarifyPath)) {
       return { progressed: true, routedTo: "to-clarify" };
     }
-    moveToQueue(runtime, clarifyPath, "blocked", "blocked", [
+    moveToQueue(runtime, clarifyPath, "refinement", "refinement", [
       "Delivery runner: clarify policy guard",
       "- to-clarify accepted only for explicit business clarification questions",
-      "- no explicit business clarification evidence found; routed to blocked",
+      "- no explicit business clarification evidence found; routed to refinement",
     ]);
-    return { progressed: true, routedTo: "blocked" };
+    return { progressed: true, routedTo: "refinement" };
   }
   const humanDecisionPath = runtime.queues.humanDecisionNeeded
     ? path.join(runtime.queues.humanDecisionNeeded, name)
@@ -845,11 +845,11 @@ function enforceClarifyQueuePolicy(runtime, controls) {
     if (hasBusinessClarificationEvidence(file)) {
       continue;
     }
-    if (moveToQueue(runtime, file, "blocked", "blocked", [
+    if (moveToQueue(runtime, file, "refinement", "refinement", [
       "Delivery runner: clarify policy enforcement",
       "- to-clarify is reserved for explicit business clarification questions",
       "- requirement lacks explicit business clarification evidence",
-      "- rerouted to blocked",
+      "- rerouted to refinement for PO intake",
     ])) {
       rerouted += 1;
     }
@@ -857,7 +857,7 @@ function enforceClarifyQueuePolicy(runtime, controls) {
   if (rerouted > 0) {
     log(
       controls,
-      `clarify policy: moved ${rerouted} non-business item(s) from to-clarify to blocked`
+      `clarify policy: moved ${rerouted} non-business item(s) from to-clarify to refinement`
     );
   }
   return rerouted > 0;
