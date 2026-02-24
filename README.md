@@ -165,6 +165,7 @@ Important sections:
 - `[dev_routing]`, `[dev_agents]`
 - `[qa]`: `mandatory_checks`, `run_checks_in_runner`, and optional `auto_fix_*` settings for deterministic pre-QA checks plus automatic repair on technical gate failures
 - `[memory]`: local agent memory behavior (`enabled`, `dir`, `include_in_prompt`, `update_on_auto`, `update_on_interactive`, limits)
+  - Memory content guideline: keep durable rules plus short recent run context (`Path(s)` + `Decision` + `Outcome`).
 - `[models]`
 - Include optional per-agent model overrides such as `[models].uat` and `[models].maint`.
 - `[codex]`: base Codex profile (`model`, `approval_policy`, `sandbox_mode`, `model_reasoning_effort`)
