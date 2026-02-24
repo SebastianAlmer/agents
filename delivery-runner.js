@@ -168,6 +168,7 @@ function createControls(initialVerbose, runtime) {
   const controls = {
     verbose: Boolean(initialVerbose),
     stopRequested: false,
+    drainRequested: false,
     onStop(callback) {
       if (typeof callback !== "function") {
         return () => {};
@@ -192,6 +193,17 @@ function createControls(initialVerbose, runtime) {
           // ignore hook errors during shutdown
         }
       }
+    },
+    requestDrain(reason = "q") {
+      if (controls.stopRequested) {
+        return;
+      }
+      if (controls.drainRequested) {
+        controls.requestStop(`${reason} (force)`);
+        return;
+      }
+      controls.drainRequested = true;
+      process.stdout.write("\nDELIVERY: graceful stop requested (finish current item, then exit)\n");
     },
     cleanup() {},
   };
@@ -229,7 +241,7 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if ((key.name || "").toLowerCase() === "q") {
-      controls.requestStop("q");
+      controls.requestDrain("q");
       return;
     }
   };
@@ -957,7 +969,7 @@ async function runArch(runtime, controls) {
   let progressed = false;
   while (true) {
     const file = listQueueFiles(runtime.queues.arch)[0];
-    if (!file || controls.stopRequested) {
+    if (!file || controls.stopRequested || controls.drainRequested) {
       break;
     }
     const sourceFile = resolveRequirementPath(runtime, file) || file;
@@ -1049,7 +1061,7 @@ async function runDev(runtime, controls) {
   const freshThreadRetriesMax = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.freshThreadRetries || 0), 10));
   while (true) {
     const file = listQueueFiles(runtime.queues.dev)[0];
-    if (!file || controls.stopRequested) {
+    if (!file || controls.stopRequested || controls.drainRequested) {
       break;
     }
 
@@ -3664,6 +3676,10 @@ async function main() {
   let forceComprehensiveOnce = Boolean(args.force);
 
   while (!controls.stopRequested) {
+    if (controls.drainRequested) {
+      log(controls, "graceful stop: no new work will be started");
+      break;
+    }
     if (await waitIfGloballyPaused(runtime, controls)) {
       if (args.once) {
         break;
@@ -3736,7 +3752,7 @@ async function main() {
       break;
     }
 
-    if (controls.stopRequested) {
+    if (controls.stopRequested || controls.drainRequested) {
       break;
     }
 

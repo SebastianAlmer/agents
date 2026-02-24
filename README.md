@@ -140,6 +140,11 @@ Global pause guard:
 5) Optional full regression test mode:
 - `node delivery-runner.js --mode test`
 
+Runner hotkeys (TTY):
+- `q`: graceful drain (finish current item, then stop)
+- `q` again: force stop
+- `Ctrl+C`: immediate stop
+
 ## Config
 
 `config.local.toml` is gitignored and project-specific.

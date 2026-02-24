@@ -203,6 +203,7 @@ function createControls(initialVerbose, runtime) {
   const controls = {
     verbose: Boolean(initialVerbose),
     stopRequested: false,
+    drainRequested: false,
     onStop(callback) {
       if (typeof callback !== "function") {
         return () => {};
@@ -227,6 +228,17 @@ function createControls(initialVerbose, runtime) {
           // ignore hook errors during shutdown
         }
       }
+    },
+    requestDrain(reason = "q") {
+      if (controls.stopRequested) {
+        return;
+      }
+      if (controls.drainRequested) {
+        controls.requestStop(`${reason} (force)`);
+        return;
+      }
+      controls.drainRequested = true;
+      process.stdout.write("\nPO-RUNNER: graceful stop requested (finish current item, then exit)\n");
     },
     cleanup() {},
   };
@@ -264,7 +276,7 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if ((key.name || "").toLowerCase() === "q") {
-      controls.requestStop("q");
+      controls.requestDrain("q");
       return;
     }
   };
@@ -1523,7 +1535,12 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
   let progressed = false;
   let processed = 0;
   const perCycleCap = Math.max(1, runtime.po.intakeMaxPerCycle || 3);
-  while (!controls.stopRequested && countFiles(runtime.queues.selected) < highWatermark && processed < perCycleCap) {
+  while (
+    !controls.stopRequested
+    && !controls.drainRequested
+    && countFiles(runtime.queues.selected) < highWatermark
+    && processed < perCycleCap
+  ) {
     const candidates = listIntakeCandidatesFair(runtime, perCycleCap - processed);
     if (candidates.length === 0) {
       break;
@@ -1531,7 +1548,12 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
 
     let handledAny = false;
     for (const source of candidates) {
-      if (controls.stopRequested || countFiles(runtime.queues.selected) >= highWatermark || processed >= perCycleCap) {
+      if (
+        controls.stopRequested
+        || controls.drainRequested
+        || countFiles(runtime.queues.selected) >= highWatermark
+        || processed >= perCycleCap
+      ) {
         break;
       }
       const handled = await runPoIntakeOnFile(runtime, source.path, controls, source.queue, state, cycle);
@@ -1579,6 +1601,10 @@ function releasedSignature(runtime) {
 async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, once) {
   const state = readPoRunnerState(runtime);
   while (!controls.stopRequested) {
+    if (controls.drainRequested) {
+      log(controls, "graceful stop: no new intake work will be started");
+      return;
+    }
     if (await waitIfGloballyPaused(runtime, controls)) {
       if (once) {
         return;
@@ -1639,6 +1665,10 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
   const state = readPoRunnerState(runtime);
 
   while (!controls.stopRequested) {
+    if (controls.drainRequested) {
+      log(controls, "graceful stop: no new vision work will be started");
+      return;
+    }
     if (await waitIfGloballyPaused(runtime, controls)) {
       if (once) {
         return;
