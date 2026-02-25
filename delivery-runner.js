@@ -947,19 +947,19 @@ function shouldForceUnderfilledFromVision(runtime) {
 
 function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, controls, options = {}) {
   if (planningInProgress(runtime) || downstreamInProgress(runtime)) {
-    return { started: false, underfilledCycles };
+    return { started: false, underfilledCycles, bundleKey: "" };
   }
 
   const selectedCount = countFiles(runtime.queues.selected);
   if (selectedCount === 0) {
-    return { started: false, underfilledCycles: 0 };
+    return { started: false, underfilledCycles: 0, bundleKey: "" };
   }
 
   const forceUnderfilled = Boolean(options.forceUnderfilled);
   const allowUnderfilled = underfilledCycles >= runtime.loops.forceUnderfilledAfterCycles;
   if (selectedCount < minBundle && !allowUnderfilled && !forceUnderfilled) {
     log(controls, `waiting for fuller bundle: selected=${selectedCount} min=${minBundle}`);
-    return { started: false, underfilledCycles: underfilledCycles + 1 };
+    return { started: false, underfilledCycles: underfilledCycles + 1, bundleKey: "" };
   }
   if (selectedCount < minBundle && forceUnderfilled && !allowUnderfilled) {
     log(
@@ -970,7 +970,7 @@ function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, co
 
   const picked = chooseBundleByBusinessScore(runtime.queues.selected, maxBundle);
   if (picked.length === 0) {
-    return { started: false, underfilledCycles };
+    return { started: false, underfilledCycles, bundleKey: "" };
   }
 
   let toArch = 0;
@@ -982,8 +982,9 @@ function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, co
     ]);
     toArch += 1;
   }
+  const bundleKey = queueBundleKey(runtime, "arch");
   log(controls, `bundle started with ${picked.length} requirement(s): arch=${toArch}`);
-  return { started: true, underfilledCycles: 0 };
+  return { started: true, underfilledCycles: 0, bundleKey };
 }
 
 async function runArch(runtime, controls) {
@@ -1998,6 +1999,164 @@ function writeDeliveryQualityState(runtime, state) {
     normalized.attempts = {};
   }
   fs.writeFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+}
+
+function bundleWorkspaceStatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "delivery-quality");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "bundle-workspace.json");
+}
+
+function readBundleWorkspaceState(runtime) {
+  const filePath = bundleWorkspaceStatePath(runtime);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object") {
+      return { bundleKey: "", branch: "" };
+    }
+    return {
+      bundleKey: String(parsed.bundleKey || "").trim(),
+      branch: String(parsed.branch || "").trim(),
+    };
+  } catch {
+    return { bundleKey: "", branch: "" };
+  }
+}
+
+function writeBundleWorkspaceState(runtime, state) {
+  const filePath = bundleWorkspaceStatePath(runtime);
+  const normalized = state && typeof state === "object" ? state : {};
+  const payload = {
+    bundleKey: String(normalized.bundleKey || "").trim(),
+    branch: String(normalized.branch || "").trim(),
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function clearBundleWorkspaceState(runtime) {
+  writeBundleWorkspaceState(runtime, { bundleKey: "", branch: "" });
+}
+
+function activeBundleKey(runtime) {
+  const orderedQueues = ["arch", "dev", "qa", "ux", "sec", "deploy"];
+  for (const queueName of orderedQueues) {
+    if (countFiles(runtime.queues[queueName]) > 0) {
+      return queueBundleKey(runtime, queueName);
+    }
+  }
+  return "";
+}
+
+function localBranchExists(repoRoot, branchName) {
+  const result = runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/heads/${branchName}`]);
+  return result.ok;
+}
+
+function buildWorkspaceBranchName(runtime, bundleKey) {
+  const releaseCfg = runtime && runtime.releaseAutomation ? runtime.releaseAutomation : {};
+  const branchPrefix = String(releaseCfg.branchPrefix || "release/bundle").trim() || "release/bundle";
+  const bundleLabel = sanitizeRefPart(bundleKey || "bundle", "bundle");
+  const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
+  return `${branchPrefix}-${bundleLabel}-w${stamp}`;
+}
+
+function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {}) {
+  const outcome = {
+    ok: false,
+    branch: "",
+    reason: "",
+  };
+  const normalizedBundleKey = String(bundleKey || "").trim();
+  if (!normalizedBundleKey) {
+    outcome.ok = true;
+    return outcome;
+  }
+
+  const agentsRootGit = gitRoot(runtime.agentsRoot);
+  const targetRootGit = gitRoot(runtime.repoRoot);
+  if (!targetRootGit) {
+    outcome.reason = "target repo is not git";
+    return outcome;
+  }
+  if (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit) {
+    outcome.reason = "safety guard prevented workspace branch management in agents repo";
+    return outcome;
+  }
+
+  const releaseCfg = runtime.releaseAutomation || {};
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const remote = String(releaseCfg.remote || "origin").trim() || "origin";
+  const state = readBundleWorkspaceState(runtime);
+  const rememberedBranch = state.bundleKey === normalizedBundleKey ? String(state.branch || "").trim() : "";
+  const allowAdoptCurrentBranch = Boolean(options.allowAdoptCurrentBranch);
+  const targetBranch = rememberedBranch || buildWorkspaceBranchName(runtime, normalizedBundleKey);
+
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (!currentBranch) {
+    outcome.reason = "could not resolve current git branch";
+    return outcome;
+  }
+  if (currentBranch === targetBranch) {
+    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+    outcome.ok = true;
+    outcome.branch = targetBranch;
+    return outcome;
+  }
+  if (!rememberedBranch && allowAdoptCurrentBranch && currentBranch !== baseBranch) {
+    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: currentBranch });
+    outcome.ok = true;
+    outcome.branch = currentBranch;
+    log(controls, `BUNDLE BRANCH: adopted current branch ${currentBranch} for ${normalizedBundleKey}`);
+    return outcome;
+  }
+
+  if (localBranchExists(runtime.repoRoot, targetBranch)) {
+    const checkoutExisting = runGit(runtime.repoRoot, ["checkout", targetBranch]);
+    if (!checkoutExisting.ok) {
+      outcome.reason = `checkout existing branch failed: ${truncateForQueueNote(checkoutExisting.output || "", 300)}`;
+      return outcome;
+    }
+    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+    outcome.ok = true;
+    outcome.branch = targetBranch;
+    log(controls, `BUNDLE BRANCH: switched to existing ${targetBranch}`);
+    return outcome;
+  }
+
+  if (currentBranch !== baseBranch) {
+    const checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
+    if (!checkoutBase.ok) {
+      outcome.reason = `checkout base branch failed: ${truncateForQueueNote(checkoutBase.output || "", 300)}`;
+      return outcome;
+    }
+  }
+
+  runGit(runtime.repoRoot, ["fetch", remote]);
+  const pullBase = runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
+  if (!pullBase.ok) {
+    log(controls, `BUNDLE BRANCH: base pull warning ${truncateForQueueNote(pullBase.output || "", 240)}`);
+  }
+
+  const createBranch = runGit(runtime.repoRoot, ["checkout", "-b", targetBranch]);
+  if (!createBranch.ok) {
+    outcome.reason = `create workspace branch failed: ${truncateForQueueNote(createBranch.output || "", 300)}`;
+    return outcome;
+  }
+
+  writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+  outcome.ok = true;
+  outcome.branch = targetBranch;
+  log(controls, `BUNDLE BRANCH: created and switched ${targetBranch} (base=${baseBranch})`);
+  return outcome;
+}
+
+function enforceActiveWorkspaceBranch(runtime, controls) {
+  const key = activeBundleKey(runtime);
+  if (!key) {
+    return { ok: true, branch: "" };
+  }
+  return ensureBundleWorkspaceBranch(runtime, controls, key, { allowAdoptCurrentBranch: true });
 }
 
 function queueBundleIds(runtime, queueName) {
@@ -3627,21 +3786,6 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     }
     return outcome;
   }
-  if (currentBranch !== baseBranch) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
-      bundleId: context.bundleId,
-      releaseBranch: currentBranch,
-      baseBranch,
-      remote,
-      reason: `release automation requires active branch '${baseBranch}' but found '${currentBranch}'`,
-      conflictFiles: [],
-    });
-    if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
-      outcome.conflictEscalation = humanPath;
-    }
-    return outcome;
-  }
 
   const versionFilePath = resolveVersionFilePath(runtime, releaseCfg);
   if (!versionFilePath || !fs.existsSync(versionFilePath)) {
@@ -3717,27 +3861,8 @@ function runReleaseAutomation(runtime, controls, context = {}) {
   outcome.version = newVersion;
 
   const bundleLabel = sanitizeRefPart(context.bundleId || context.bundleKey || "bundle", "bundle");
-  const versionLabel = sanitizeRefPart(newVersion, "0.0.0");
-  const branchPrefix = String(releaseCfg.branchPrefix || "release/bundle").trim() || "release/bundle";
-  const releaseBranch = `${branchPrefix}-${bundleLabel}-v${versionLabel}`;
+  const releaseBranch = currentBranch;
   outcome.releaseBranch = releaseBranch;
-
-  const branchCreate = runGit(runtime.repoRoot, ["checkout", "-b", releaseBranch]);
-  if (!branchCreate.ok) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
-      bundleId: context.bundleId,
-      releaseBranch,
-      baseBranch,
-      remote,
-      reason: `failed creating release branch: ${truncateForQueueNote(branchCreate.output || "", 300)}`,
-      conflictFiles: [],
-    });
-    if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
-      outcome.conflictEscalation = humanPath;
-    }
-    return outcome;
-  }
 
   runGit(runtime.repoRoot, ["add", "-A"]);
   const commitMessage = `chore(release): ${bundleLabel} v${newVersion}`;
@@ -3943,6 +4068,7 @@ async function runDeployBundle(runtime, controls) {
     deployInfo = deployCommitPush(runtime, controls);
     createPullRequest(runtime, controls, deployInfo);
   }
+  clearBundleWorkspaceState(runtime);
   return true;
 }
 
@@ -4069,6 +4195,7 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
     );
     if (moved > 0) {
       log(controls, `test mode normalized deploy->released: ${moved}`);
+      clearBundleWorkspaceState(runtime);
       progressed = true;
     }
   }
@@ -4154,6 +4281,22 @@ async function main() {
     );
     underfilledCycles = bundle.underfilledCycles;
 
+    if (bundle.started && bundle.bundleKey) {
+      const workspace = ensureBundleWorkspaceBranch(runtime, controls, bundle.bundleKey);
+      if (!workspace.ok) {
+        log(controls, `BUNDLE BRANCH: setup failed for ${bundle.bundleKey}: ${workspace.reason}`);
+        await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
+        continue;
+      }
+    }
+
+    const workspaceGuard = enforceActiveWorkspaceBranch(runtime, controls);
+    if (!workspaceGuard.ok) {
+      log(controls, `BUNDLE BRANCH: enforcement failed: ${workspaceGuard.reason}`);
+      await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
+      continue;
+    }
+
     await runArch(runtime, controls);
     await runDev(runtime, controls);
 
@@ -4172,6 +4315,9 @@ async function main() {
       }
       if (downstream.maintSignature) {
         lastMaintSignature = downstream.maintSignature;
+      }
+      if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
+        clearBundleWorkspaceState(runtime);
       }
     }
 
@@ -4198,6 +4344,10 @@ async function main() {
       if (forceComprehensiveOnce && result.reason !== "no-signature") {
         forceComprehensiveOnce = false;
       }
+    }
+
+    if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
+      clearBundleWorkspaceState(runtime);
     }
 
     if (args.once) {

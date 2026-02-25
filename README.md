@@ -66,6 +66,7 @@ Modes:
 
 Bundle behavior:
 - Bundles start from `selected`.
+- Before ARCH/DEV work starts, delivery runner creates/switches to a per-bundle local workspace branch derived from `[release_automation].branch_prefix`.
 - Priority uses `business_score` in requirement front matter.
 - Default bundle range: 5-20 (configurable).
 - Agents run once per bundle in downstream phase.
@@ -85,7 +86,7 @@ Bundle behavior:
 Release automation flow (`[release_automation].enabled=true`):
 - Runs after successful deploy bundle and requires `[deploy].mode=commit_push`.
 - Executes `version_command` in `paths.repo_root` (default `npm version patch --no-git-tag-version`).
-- Creates release branch `${branch_prefix}-${bundle}-v${version}` from `base_branch`.
+- Uses the active bundle workspace branch as release source and fast-forward merges into `base_branch`.
 - Commits and pushes release branch, then fast-forward merges it into `base_branch` and pushes.
 - Optional tagging via `tag_enabled` + `tag_prefix`.
 - On merge/push/version failures, creates a `human-input` requirement with conflict details.
