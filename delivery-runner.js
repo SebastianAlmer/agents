@@ -2089,7 +2089,7 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
   const remote = String(releaseCfg.remote || "origin").trim() || "origin";
   const state = readBundleWorkspaceState(runtime);
   const rememberedBranch = state.bundleKey === normalizedBundleKey ? String(state.branch || "").trim() : "";
-  const allowAdoptCurrentBranch = Boolean(options.allowAdoptCurrentBranch);
+  const createFromCurrent = Boolean(options.createFromCurrent);
   const targetBranch = rememberedBranch || buildWorkspaceBranchName(runtime, normalizedBundleKey);
 
   const currentBranch = getCurrentBranch(runtime.repoRoot);
@@ -2101,13 +2101,6 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
     writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
     outcome.ok = true;
     outcome.branch = targetBranch;
-    return outcome;
-  }
-  if (!rememberedBranch && allowAdoptCurrentBranch && currentBranch !== baseBranch) {
-    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: currentBranch });
-    outcome.ok = true;
-    outcome.branch = currentBranch;
-    log(controls, `BUNDLE BRANCH: adopted current branch ${currentBranch} for ${normalizedBundleKey}`);
     return outcome;
   }
 
@@ -2124,7 +2117,7 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
     return outcome;
   }
 
-  if (currentBranch !== baseBranch) {
+  if (!createFromCurrent && currentBranch !== baseBranch) {
     const checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
     if (!checkoutBase.ok) {
       outcome.reason = `checkout base branch failed: ${truncateForQueueNote(checkoutBase.output || "", 300)}`;
@@ -2132,10 +2125,12 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
     }
   }
 
-  runGit(runtime.repoRoot, ["fetch", remote]);
-  const pullBase = runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
-  if (!pullBase.ok) {
-    log(controls, `BUNDLE BRANCH: base pull warning ${truncateForQueueNote(pullBase.output || "", 240)}`);
+  if (!createFromCurrent) {
+    runGit(runtime.repoRoot, ["fetch", remote]);
+    const pullBase = runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
+    if (!pullBase.ok) {
+      log(controls, `BUNDLE BRANCH: base pull warning ${truncateForQueueNote(pullBase.output || "", 240)}`);
+    }
   }
 
   const createBranch = runGit(runtime.repoRoot, ["checkout", "-b", targetBranch]);
@@ -2156,7 +2151,7 @@ function enforceActiveWorkspaceBranch(runtime, controls) {
   if (!key) {
     return { ok: true, branch: "" };
   }
-  return ensureBundleWorkspaceBranch(runtime, controls, key, { allowAdoptCurrentBranch: true });
+  return ensureBundleWorkspaceBranch(runtime, controls, key, { createFromCurrent: true });
 }
 
 function queueBundleIds(runtime, queueName) {
