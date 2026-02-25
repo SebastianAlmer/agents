@@ -67,6 +67,7 @@ Modes:
 Bundle behavior:
 - Bundles start from `selected`.
 - Before ARCH/DEV work starts, delivery runner always creates/switches to a per-bundle local workspace branch derived from `[release_automation].branch_prefix` (no branch adoption fallback).
+- Safety guard: `base_branch` (for example `dev`) is never accepted as an active bundle workspace branch.
 - Priority uses `business_score` in requirement front matter.
 - Default bundle range: 5-20 (configurable).
 - Agents run once per bundle in downstream phase.

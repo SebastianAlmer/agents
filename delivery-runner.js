@@ -2088,8 +2088,17 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
   const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
   const remote = String(releaseCfg.remote || "origin").trim() || "origin";
   const state = readBundleWorkspaceState(runtime);
-  const rememberedBranch = state.bundleKey === normalizedBundleKey ? String(state.branch || "").trim() : "";
+  const rawRememberedBranch = state.bundleKey === normalizedBundleKey ? String(state.branch || "").trim() : "";
+  const rememberedBranch = rawRememberedBranch && rawRememberedBranch !== baseBranch
+    ? rawRememberedBranch
+    : "";
   const createFromCurrent = Boolean(options.createFromCurrent);
+  if (rawRememberedBranch && rawRememberedBranch === baseBranch) {
+    log(
+      controls,
+      `BUNDLE BRANCH: ignored invalid remembered branch '${baseBranch}' for ${normalizedBundleKey}`
+    );
+  }
   const targetBranch = rememberedBranch || buildWorkspaceBranchName(runtime, normalizedBundleKey);
 
   const currentBranch = getCurrentBranch(runtime.repoRoot);
@@ -2097,10 +2106,14 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
     outcome.reason = "could not resolve current git branch";
     return outcome;
   }
-  if (currentBranch === targetBranch) {
+  if (currentBranch === targetBranch && currentBranch !== baseBranch) {
     writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
     outcome.ok = true;
     outcome.branch = targetBranch;
+    return outcome;
+  }
+  if (currentBranch === baseBranch && targetBranch === baseBranch) {
+    outcome.reason = "refusing to use base branch as bundle workspace branch";
     return outcome;
   }
 
@@ -2151,7 +2164,21 @@ function enforceActiveWorkspaceBranch(runtime, controls) {
   if (!key) {
     return { ok: true, branch: "" };
   }
-  return ensureBundleWorkspaceBranch(runtime, controls, key, { createFromCurrent: true });
+  const result = ensureBundleWorkspaceBranch(runtime, controls, key, { createFromCurrent: true });
+  if (!result.ok) {
+    return result;
+  }
+  const releaseCfg = runtime.releaseAutomation || {};
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (currentBranch === baseBranch) {
+    return {
+      ok: false,
+      branch: currentBranch,
+      reason: `workspace branch guard: active bundle '${key}' is still on base branch '${baseBranch}'`,
+    };
+  }
+  return result;
 }
 
 function queueBundleIds(runtime, queueName) {
