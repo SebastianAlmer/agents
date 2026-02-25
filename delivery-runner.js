@@ -881,6 +881,27 @@ function enforceClarifyQueuePolicy(runtime, controls) {
   return rerouted > 0;
 }
 
+function enforceBlockedQueuePolicy(runtime, controls) {
+  const blockedFiles = listQueueFiles(runtime.queues.blocked);
+  let rerouted = 0;
+  for (const file of blockedFiles) {
+    if (moveToQueue(runtime, file, "refinement", "refinement", [
+      "Delivery runner: blocked queue policy enforcement",
+      "- blocked is treated as technical freeze, not a terminal queue",
+      "- rerouted to refinement for PO triage and re-planning",
+    ])) {
+      rerouted += 1;
+    }
+  }
+  if (rerouted > 0) {
+    log(
+      controls,
+      `blocked policy: moved ${rerouted} item(s) from blocked to refinement`
+    );
+  }
+  return rerouted > 0;
+}
+
 function readPoVisionDecision(runtime) {
   const filePath = path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
   try {
@@ -2888,6 +2909,8 @@ function writeComprehensiveSystemTestState(runtime, state) {
 }
 
 function hasOpenPlanningOrClarification(runtime) {
+  const releaseCfg = runtime && runtime.releaseAutomation ? runtime.releaseAutomation : {};
+  const blockOnHumanDecision = !releaseCfg.allowReleaseWithHumanDecisionNeeded;
   return countFiles(runtime.queues.refinement) > 0
     || countFiles(runtime.queues.backlog) > 0
     || countFiles(runtime.queues.selected) > 0
@@ -2895,7 +2918,7 @@ function hasOpenPlanningOrClarification(runtime) {
     || countFiles(runtime.queues.dev) > 0
     || countFiles(runtime.queues.toClarify) > 0
     || countFiles(runtime.queues.humanInput) > 0
-    || countFiles(runtime.queues.humanDecisionNeeded) > 0
+    || (blockOnHumanDecision && countFiles(runtime.queues.humanDecisionNeeded) > 0)
     || countFiles(runtime.queues.blocked) > 0;
 }
 
@@ -3454,6 +3477,425 @@ function deployCommitPush(runtime, controls) {
   return outcome;
 }
 
+function readJsonFileSafe(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeRefPart(value, fallback = "bundle") {
+  const cleaned = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || fallback;
+}
+
+function resolveVersionFilePath(runtime, releaseCfg) {
+  if (!runtime || !runtime.repoRoot) {
+    return "";
+  }
+  const scope = String((releaseCfg && releaseCfg.versionScope) || "root").trim().toLowerCase();
+  if (scope === "root") {
+    return path.join(runtime.repoRoot, "package.json");
+  }
+  return path.join(runtime.repoRoot, "package.json");
+}
+
+function readPackageVersion(versionFilePath) {
+  const parsed = readJsonFileSafe(versionFilePath);
+  const version = parsed && typeof parsed.version === "string" ? parsed.version.trim() : "";
+  return version;
+}
+
+function readUnmergedConflictFiles(repoRoot) {
+  const result = runGit(repoRoot, ["diff", "--name-only", "--diff-filter=U"]);
+  if (!result.ok) {
+    return [];
+  }
+  return String(result.output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 50);
+}
+
+function createReleaseConflictHumanInput(runtime, details) {
+  const targetDir = runtime.queues.humanInput || runtime.queues.toClarify;
+  if (!targetDir) {
+    return "";
+  }
+  fs.mkdirSync(targetDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const id = `REQ-RELEASE-CONFLICT-${stamp}`;
+  const filePath = path.join(targetDir, `${id}.md`);
+
+  const conflictFiles = Array.isArray(details.conflictFiles) ? details.conflictFiles : [];
+  const conflictList = conflictFiles.length > 0
+    ? conflictFiles.map((item) => `- ${item}`).join("\n")
+    : "- none captured";
+  const reason = String(details.reason || "merge conflict could not be auto-resolved").trim();
+  const releaseBranch = String(details.releaseBranch || "").trim();
+  const baseBranch = String(details.baseBranch || "dev").trim() || "dev";
+  const bundle = String(details.bundleId || "unknown").trim();
+  const remote = String(details.remote || "origin").trim() || "origin";
+
+  const content = [
+    "---",
+    `id: ${id}`,
+    "title: Release automation merge conflict needs human resolution",
+    "status: human-input",
+    "source: delivery-release-automation",
+    "priority: P1",
+    "implementation_scope: fullstack",
+    "---",
+    "",
+    "# Goal",
+    "Resolve release branch merge conflict and complete automated release handoff to dev.",
+    "",
+    "## Scope",
+    `- Bundle: ${bundle}`,
+    `- Remote: ${remote}`,
+    `- Base branch: ${baseBranch}`,
+    `- Release branch: ${releaseBranch || "<missing>"}`,
+    "",
+    "## Conflict Details",
+    `- Reason: ${reason}`,
+    "### Files",
+    conflictList,
+    "",
+    "## Recommended Action",
+    "- Resolve conflicts locally on the release branch.",
+    "- Re-run tests/checks for changed files.",
+    "- Merge release branch into dev and push origin/dev.",
+    "- Record decision notes in this requirement, then move as appropriate.",
+    "",
+  ].join("\n");
+
+  fs.writeFileSync(filePath, `${content}\n`, "utf8");
+  return filePath;
+}
+
+function runReleaseAutomation(runtime, controls, context = {}) {
+  const releaseCfg = runtime.releaseAutomation || {};
+  const outcome = {
+    committed: false,
+    pushed: false,
+    merged: false,
+    tagged: false,
+    releaseBranch: "",
+    version: "",
+    conflictEscalation: "",
+  };
+  if (!releaseCfg.enabled) {
+    return outcome;
+  }
+  if (runtime.deploy.mode !== "commit_push") {
+    log(controls, `RELEASE: skipped (deploy.mode=${runtime.deploy.mode}; requires commit_push)`);
+    return outcome;
+  }
+
+  const agentsRootGit = gitRoot(runtime.agentsRoot);
+  const targetRootGit = gitRoot(runtime.repoRoot);
+  if (!targetRootGit) {
+    log(controls, "RELEASE: skipped - target repo is not git");
+    return outcome;
+  }
+  if (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit) {
+    log(controls, "RELEASE: skipped - safety guard prevented agents repo release flow");
+    return outcome;
+  }
+
+  const remote = String(releaseCfg.remote || "origin").trim() || "origin";
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (!currentBranch) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: "could not determine current git branch",
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  if (currentBranch !== baseBranch) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: currentBranch,
+      baseBranch,
+      remote,
+      reason: `release automation requires active branch '${baseBranch}' but found '${currentBranch}'`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const versionFilePath = resolveVersionFilePath(runtime, releaseCfg);
+  if (!versionFilePath || !fs.existsSync(versionFilePath)) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `version file missing: ${versionFilePath || "unknown"}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const oldVersion = readPackageVersion(versionFilePath);
+  if (!oldVersion) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `could not read current version from ${versionFilePath}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const versionCmd = String(releaseCfg.versionCommand || "npm version patch --no-git-tag-version").trim();
+  log(controls, `RELEASE: version bump start command='${versionCmd}' current=${oldVersion}`);
+  const versionResult = runShellCheckCommand(runtime, versionCmd, {
+    cwd: runtime.repoRoot,
+  });
+  if (!versionResult.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `version command failed: ${truncateForQueueNote(versionResult.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const newVersion = readPackageVersion(versionFilePath);
+  if (!newVersion || newVersion === oldVersion) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `version did not change after bump (old=${oldVersion}, new=${newVersion || "<missing>"})`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  outcome.version = newVersion;
+
+  const bundleLabel = sanitizeRefPart(context.bundleId || context.bundleKey || "bundle", "bundle");
+  const versionLabel = sanitizeRefPart(newVersion, "0.0.0");
+  const branchPrefix = String(releaseCfg.branchPrefix || "release/bundle").trim() || "release/bundle";
+  const releaseBranch = `${branchPrefix}-${bundleLabel}-v${versionLabel}`;
+  outcome.releaseBranch = releaseBranch;
+
+  const branchCreate = runGit(runtime.repoRoot, ["checkout", "-b", releaseBranch]);
+  if (!branchCreate.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `failed creating release branch: ${truncateForQueueNote(branchCreate.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  runGit(runtime.repoRoot, ["add", "-A"]);
+  const commitMessage = `chore(release): ${bundleLabel} v${newVersion}`;
+  const commit = runGit(runtime.repoRoot, ["commit", "-m", commitMessage]);
+  if (!commit.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `commit failed: ${truncateForQueueNote(commit.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  outcome.committed = true;
+
+  const pushRelease = runGit(runtime.repoRoot, ["push", "-u", remote, releaseBranch]);
+  if (!pushRelease.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `push release branch failed: ${truncateForQueueNote(pushRelease.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  outcome.pushed = true;
+
+  runGit(runtime.repoRoot, ["fetch", remote]);
+  let checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
+  if (!checkoutBase.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `checkout base branch failed: ${truncateForQueueNote(checkoutBase.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  const pullBase = runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
+  if (!pullBase.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `base branch ff pull failed: ${truncateForQueueNote(pullBase.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  let merge = runGit(runtime.repoRoot, ["merge", "--ff-only", releaseBranch]);
+  if (!merge.ok) {
+    let resolved = false;
+    if (releaseCfg.autoResolveConflicts && (releaseCfg.maxConflictFixAttempts || 0) > 0) {
+      for (let attempt = 1; attempt <= (releaseCfg.maxConflictFixAttempts || 0); attempt++) {
+        log(controls, `RELEASE: auto-resolve attempt ${attempt}/${releaseCfg.maxConflictFixAttempts}`);
+        runGit(runtime.repoRoot, ["checkout", releaseBranch]);
+        runGit(runtime.repoRoot, ["fetch", remote]);
+        const rebase = runGit(runtime.repoRoot, ["rebase", `${remote}/${baseBranch}`]);
+        if (!rebase.ok) {
+          runGit(runtime.repoRoot, ["rebase", "--abort"]);
+          continue;
+        }
+        const pushRebased = runGit(runtime.repoRoot, ["push", "--force-with-lease", remote, releaseBranch]);
+        if (!pushRebased.ok) {
+          continue;
+        }
+        checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
+        if (!checkoutBase.ok) {
+          continue;
+        }
+        runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
+        merge = runGit(runtime.repoRoot, ["merge", "--ff-only", releaseBranch]);
+        if (merge.ok) {
+          resolved = true;
+          break;
+        }
+      }
+    }
+    if (!merge.ok && !resolved) {
+      const conflictFiles = readUnmergedConflictFiles(runtime.repoRoot);
+      const humanPath = createReleaseConflictHumanInput(runtime, {
+        bundleId: context.bundleId,
+        releaseBranch,
+        baseBranch,
+        remote,
+        reason: `ff-only merge unresolved: ${truncateForQueueNote(merge.output || "", 300)}`,
+        conflictFiles,
+      });
+      if (humanPath) {
+        log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+        outcome.conflictEscalation = humanPath;
+      }
+      return outcome;
+    }
+  }
+  outcome.merged = true;
+
+  const pushBase = runGit(runtime.repoRoot, ["push", remote, baseBranch]);
+  if (!pushBase.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `push base branch failed: ${truncateForQueueNote(pushBase.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  outcome.pushed = true;
+
+  if (releaseCfg.tagEnabled) {
+    const tagName = `${String(releaseCfg.tagPrefix || "v")}${newVersion}`;
+    const tagCreate = runGit(runtime.repoRoot, ["tag", tagName]);
+    if (!tagCreate.ok && !/already exists/i.test(String(tagCreate.output || ""))) {
+      log(controls, `RELEASE: tag create failed ${truncateForQueueNote(tagCreate.output || "", 240)}`);
+    } else {
+      const tagPush = runGit(runtime.repoRoot, ["push", remote, tagName]);
+      if (tagPush.ok || /already exists/i.test(String(tagPush.output || ""))) {
+        outcome.tagged = true;
+      } else {
+        log(controls, `RELEASE: tag push failed ${truncateForQueueNote(tagPush.output || "", 240)}`);
+      }
+    }
+  }
+
+  log(controls, `RELEASE: completed bundle=${bundleLabel} version=${newVersion} branch=${releaseBranch}`);
+  return outcome;
+}
+
 async function runDeployBundle(runtime, controls) {
   if (countFiles(runtime.queues.deploy) === 0) {
     return false;
@@ -3490,8 +3932,17 @@ async function runDeployBundle(runtime, controls) {
   } else {
     resetBundleAttempts(runtime, deployBundleKey);
   }
-  const deployInfo = deployCommitPush(runtime, controls);
-  createPullRequest(runtime, controls, deployInfo);
+  let deployInfo;
+  if (runtime.releaseAutomation && runtime.releaseAutomation.enabled) {
+    const bundleId = deployBundleIds.length === 1 ? deployBundleIds[0] : deployBundleKey;
+    deployInfo = runReleaseAutomation(runtime, controls, {
+      bundleId,
+      bundleKey: deployBundleKey,
+    });
+  } else {
+    deployInfo = deployCommitPush(runtime, controls);
+    createPullRequest(runtime, controls, deployInfo);
+  }
   return true;
 }
 
@@ -3688,6 +4139,7 @@ async function main() {
     }
 
     enforceClarifyQueuePolicy(runtime, controls);
+    enforceBlockedQueuePolicy(runtime, controls);
 
     const before = snapshotHash(runtime);
     const forceUnderfilledFromVision = shouldForceUnderfilledFromVision(runtime);

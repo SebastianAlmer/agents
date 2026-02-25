@@ -14,6 +14,8 @@ const {
 } = require("../lib/agent");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 
+const FINAL_GATE_PENDING_SUMMARY = "pending";
+
 function parseArgs(argv) {
   const args = {
     requirement: "",
@@ -76,6 +78,175 @@ function parseArgs(argv) {
     }
   }
   return args;
+}
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function failurePayloadFromReasons(label, reasons, fallback = "") {
+  const details = reasons.length > 0 ? reasons[0] : fallback;
+  const normalizedDetails = String(details || "").trim() || "QA final gate did not produce a definitive artifact.";
+  return {
+    status: "fail",
+    summary: `QA ${label} final gate invalid`,
+    blocking_findings: ["P1: QA final pass gate payload is missing or invalid."],
+    findings: [
+      {
+        severity: "P1",
+        title: `QA ${label} final gate invalid`,
+        details: normalizedDetails,
+      },
+    ],
+    manual_uat: [],
+  };
+}
+
+function isDefinitiveFinalGatePayload(parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      ok: false,
+      reasons: ["Parsed payload is missing or not a JSON object."],
+    };
+  }
+
+  const status = String(parsed.status || "").toLowerCase();
+  if (!["pass", "fail"].includes(status)) {
+    return {
+      ok: false,
+      reasons: [`Invalid status: ${String(parsed.status || "").trim() || "<empty>"}`],
+    };
+  }
+
+  const summary = String(parsed.summary || "").trim();
+  if (!summary) {
+    return {
+      ok: false,
+      reasons: ["Missing final gate summary."],
+    };
+  }
+
+  const blockingFindings = normalizeArray(parsed.blocking_findings);
+  const findings = normalizeArray(parsed.findings);
+  const manualUat = normalizeArray(parsed.manual_uat);
+  const hasArrays = Array.isArray(parsed.blocking_findings) && Array.isArray(parsed.findings) && Array.isArray(parsed.manual_uat);
+
+  if (!hasArrays) {
+    return {
+      ok: false,
+      reasons: ["Final gate arrays must be explicit arrays: blocking_findings, findings, manual_uat."],
+    };
+  }
+
+  if (status === "pass" && summary.toLowerCase() === FINAL_GATE_PENDING_SUMMARY) {
+    return {
+      ok: false,
+      reasons: ["Pass result cannot keep pending summary."],
+    };
+  }
+
+  if (
+    status === "fail"
+    && summary.toLowerCase() === FINAL_GATE_PENDING_SUMMARY
+    && blockingFindings.length === 0
+    && findings.length === 0
+  ) {
+    return {
+      ok: false,
+      reasons: ["Final gate left in pending state without findings."],
+    };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      status,
+      summary,
+      blocking_findings: blockingFindings,
+      findings: findings,
+      manual_uat: manualUat,
+    },
+  };
+}
+
+function validateFinalPassGateFile(gateFile) {
+  if (!fs.existsSync(gateFile)) {
+    return {
+      ok: false,
+      reasons: [`QA final gate file missing: ${gateFile}`],
+      gate: failurePayloadFromReasons("final-pass", ["QA final gate file missing."]),
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(gateFile, "utf8"));
+  } catch (err) {
+    return {
+      ok: false,
+      reasons: [`QA final gate file invalid JSON: ${err.message}`],
+      gate: failurePayloadFromReasons("final-pass", ["QA final gate file invalid JSON."]),
+    };
+  }
+
+  const check = isDefinitiveFinalGatePayload(parsed);
+  if (!check.ok) {
+    return {
+      ok: false,
+      reasons: check.reasons || ["Final gate payload is invalid."],
+      gate: failurePayloadFromReasons("final-pass", check.reasons || []),
+      gatePayload: parsed,
+    };
+  }
+
+  return {
+    ok: true,
+    gate: check.payload,
+  };
+}
+
+function applyFinalPassGateResult(gateFile, result, gateLabel = "final-pass") {
+  if (!result || result.ok) {
+    return result;
+  }
+  const stableGate = {
+    ...(result.gate || failurePayloadFromReasons(gateLabel, result.reasons || [])),
+    summary: result.gate && result.gate.summary ? result.gate.summary : `QA ${gateLabel} final gate invalid`,
+  };
+  fs.writeFileSync(gateFile, JSON.stringify(stableGate, null, 2), "utf8");
+  return {
+    ok: false,
+    reasons: result.reasons || [`QA ${gateLabel} final gate invalid.`],
+    gate: stableGate,
+  };
+}
+
+function persistFinalPassFailure(gateFile, errorOrReasons, gateLabel = "final-pass") {
+  const normalizedReasons = normalizeArray(Array.isArray(errorOrReasons) ? errorOrReasons : [errorOrReasons])
+    .map((reason) => String(reason || "").trim())
+    .filter(Boolean);
+  const finalReasons =
+    normalizedReasons.length > 0
+      ? normalizedReasons
+      : [`QA ${gateLabel} final gate failed.`];
+
+  const fallback = failurePayloadFromReasons(gateLabel, finalReasons);
+  const result = {
+    ok: false,
+    reasons: finalReasons,
+    gate: fallback,
+  };
+
+  try {
+    const applied = applyFinalPassGateResult(gateFile, result, gateLabel);
+    return Array.isArray(applied.reasons) && applied.reasons.length > 0
+      ? applied.reasons.join("; ")
+      : finalReasons.join("; ");
+  } catch (writeError) {
+    return `QA ${gateLabel} final gate failed and could not persist fail artifact: ${String(
+      writeError?.message || writeError || "unknown error",
+    )}`;
+  }
 }
 
 function listRequirementFiles(dir) {
@@ -289,27 +460,65 @@ async function main() {
     process.exit(0);
   }
 
-  const result = await runCodexExec({
-    prompt: fullPrompt,
-    repoRoot,
-    configArgs,
-    threadId,
-    threadFile,
-    agentsRoot: runtime.agentsRoot,
-    agentLabel: "QA",
-    autoCompact: auto,
-    runtime,
-    autoMode: auto,
-  });
-
+  let result;
   if (finalPass) {
-    validateGateFile(gateFile, "final");
-  }
-  if (batchTests) {
-    validateGateFile(gateFile, "batch-tests");
-  }
-  if (reviewOnly) {
-    validateReviewDecisionFile(decisionFile);
+    try {
+      result = await runCodexExec({
+        prompt: fullPrompt,
+        repoRoot,
+        configArgs,
+        threadId,
+        threadFile,
+        agentsRoot: runtime.agentsRoot,
+        agentLabel: "QA",
+        autoCompact: auto,
+        runtime,
+        autoMode: auto,
+      });
+
+      if (batchTests) {
+        validateGateFile(gateFile, "batch-tests");
+      }
+      validateGateFile(gateFile, "final");
+      const finalPassResult = validateFinalPassGateFile(gateFile);
+      if (!finalPassResult.ok) {
+        const applied = applyFinalPassGateResult(gateFile, finalPassResult, "final-pass");
+        const reason = applied && applied.reasons
+          ? applied.reasons.join("; ")
+          : "QA final pass gate failed";
+        throw Object.assign(new Error(reason), { qaFinalPassGateHandled: true });
+      }
+    } catch (error) {
+      if (!error.qaFinalPassGateHandled) {
+        const reason = persistFinalPassFailure(
+          gateFile,
+          `QA final pass execution failed: ${String(error && error.message ? error.message : error)}`,
+          "final-pass",
+        );
+        throw new Error(reason);
+      }
+      throw error;
+    }
+  } else {
+    result = await runCodexExec({
+      prompt: fullPrompt,
+      repoRoot,
+      configArgs,
+      threadId,
+      threadFile,
+      agentsRoot: runtime.agentsRoot,
+      agentLabel: "QA",
+      autoCompact: auto,
+      runtime,
+      autoMode: auto,
+    });
+
+    if (batchTests) {
+      validateGateFile(gateFile, "batch-tests");
+    }
+    if (reviewOnly) {
+      validateReviewDecisionFile(decisionFile);
+    }
   }
 
   if (result.threadId) {
@@ -320,7 +529,19 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  FINAL_GATE_PENDING_SUMMARY,
+  normalizeArray,
+  isDefinitiveFinalGatePayload,
+  validateFinalPassGateFile,
+  applyFinalPassGateResult,
+  persistFinalPassFailure,
+  failurePayloadFromReasons,
+};

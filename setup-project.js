@@ -400,6 +400,28 @@ function main() {
   const deployPrBodyTemplate = String(
     deployPrBase.body_template || "Automated PR from ${branch} to ${base} after deploy bundle."
   ).trim() || "Automated PR from ${branch} to ${base} after deploy bundle.";
+  const releaseBase = (base.release_automation && typeof base.release_automation === "object")
+    ? base.release_automation
+    : {};
+  const releaseAutomationEnabled = normalizeBool(releaseBase.enabled, true);
+  const releaseAutomationBaseBranch = String(releaseBase.base_branch || "dev").trim() || "dev";
+  const releaseAutomationRemote = String(releaseBase.remote || "origin").trim() || "origin";
+  const releaseAutomationBranchPrefix = String(releaseBase.branch_prefix || "release/bundle").trim() || "release/bundle";
+  const releaseAutomationVersionScope = String(releaseBase.version_scope || "root").trim().toLowerCase() || "root";
+  const releaseAutomationVersionCommand = String(
+    releaseBase.version_command || "npm version patch --no-git-tag-version"
+  ).trim() || "npm version patch --no-git-tag-version";
+  const releaseAutomationMergeMode = "ff-only";
+  const releaseAutomationTagEnabled = normalizeBool(releaseBase.tag_enabled, true);
+  const releaseAutomationTagPrefix = String(releaseBase.tag_prefix || "v").trim() || "v";
+  const releaseAutomationAutoResolveConflicts = normalizeBool(releaseBase.auto_resolve_conflicts, true);
+  const releaseAutomationMaxConflictFixAttempts = Number.isFinite(releaseBase.max_conflict_fix_attempts)
+    ? Math.max(0, releaseBase.max_conflict_fix_attempts)
+    : 1;
+  const releaseAutomationAllowWithHumanDecision = normalizeBool(
+    releaseBase.allow_release_with_human_decision_needed,
+    true
+  );
 
   let useFe = args.useFe;
   let useBe = args.useBe;
@@ -710,6 +732,20 @@ function main() {
     `title_template = ${toTomlString(deployPrTitleTemplate)}`,
     `body_template = ${toTomlString(deployPrBodyTemplate)}`,
     "",
+    "[release_automation]",
+    `enabled = ${toTomlBool(releaseAutomationEnabled)}`,
+    `base_branch = ${toTomlString(releaseAutomationBaseBranch)}`,
+    `remote = ${toTomlString(releaseAutomationRemote)}`,
+    `branch_prefix = ${toTomlString(releaseAutomationBranchPrefix)}`,
+    `version_scope = ${toTomlString(releaseAutomationVersionScope)}`,
+    `version_command = ${toTomlString(releaseAutomationVersionCommand)}`,
+    `merge_mode = ${toTomlString(releaseAutomationMergeMode)}`,
+    `tag_enabled = ${toTomlBool(releaseAutomationTagEnabled)}`,
+    `tag_prefix = ${toTomlString(releaseAutomationTagPrefix)}`,
+    `auto_resolve_conflicts = ${toTomlBool(releaseAutomationAutoResolveConflicts)}`,
+    `max_conflict_fix_attempts = ${toTomlInt(releaseAutomationMaxConflictFixAttempts)}`,
+    `allow_release_with_human_decision_needed = ${toTomlBool(releaseAutomationAllowWithHumanDecision)}`,
+    "",
     "[po]",
     `default_mode = ${toTomlString(poMode)}`,
     `vision_max_cycles = ${toTomlInt(poVisionMaxCycles)}`,
@@ -820,6 +856,7 @@ function main() {
   console.log(`- memory: enabled=${memoryEnabled} dir=${memoryDir} include_in_prompt=${memoryIncludeInPrompt} update_on_auto=${memoryUpdateOnAuto} update_on_interactive=${memoryUpdateOnInteractive}`);
   console.log(`- e2e: enabled=${e2eEnabled} required_in_test_mode=${e2eRequiredInTestMode} run_on_full_completion=${e2eRunOnFullCompletion} timeout=${e2eTimeoutSeconds}s`);
   console.log(`- deploy.mode: ${deployMode}`);
+  console.log(`- release_automation: enabled=${releaseAutomationEnabled} base=${releaseAutomationBaseBranch} remote=${releaseAutomationRemote} merge=${releaseAutomationMergeMode} tag=${releaseAutomationTagEnabled}`);
   console.log(`- po.default_mode: ${poMode} (intake_max_per_cycle=${poIntakeMaxPerCycle}, cooldown=${poIntakeLoopCooldownCycles}, idempotence=${poIntakeIdempotenceEnabled}, backlog_promote_enabled=${poBacklogPromoteEnabled}, backlog_promote_after_cycles=${poBacklogPromoteAfterCycles}, backlog_promote_min_business_score=${poBacklogPromoteMinBusinessScore}, backlog_promote_max_per_cycle=${poBacklogPromoteMaxPerCycle})`);
   console.log(`- arch.routing_mode: ${archRoutingMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);

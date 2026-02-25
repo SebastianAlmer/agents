@@ -37,6 +37,7 @@ Queue intent:
 - `human-decision-needed` is human-owned: no autonomous runner moves files out of this queue.
 - After human evaluation, move those items to `human-input`; PO ingests `human-input` in the next iteration.
 - Hard blockers from review phases may go to `blocked`.
+- `blocked` is treated as a technical freeze queue; runners may reroute blocked items to `refinement` for PO re-triage.
 - QA/UAT/MAINT follow-ups are auto-routed:
   - `P0/P1` -> `selected` (hotfix)
   - `P2/P3` -> `backlog`

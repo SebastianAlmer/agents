@@ -155,6 +155,21 @@ create_only_after_push = true
 title_template = "${type}: ${branch} -> ${base}"
 body_template = "Automated PR from ${branch} to ${base} after deploy bundle."
 
+[release_automation]
+# OPTIONAL: Automatischer Release-Flow nach erfolgreichem Bundle-Deploy.
+enabled = true
+base_branch = "dev"
+remote = "origin"
+branch_prefix = "release/bundle"
+version_scope = "root"
+version_command = "npm version patch --no-git-tag-version"
+merge_mode = "ff-only"
+tag_enabled = true
+tag_prefix = "v"
+auto_resolve_conflicts = true
+max_conflict_fix_attempts = 1
+allow_release_with_human_decision_needed = true
+
 [po]
 # OPTIONAL: intake | vision
 default_mode = "vision"

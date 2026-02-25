@@ -1274,6 +1274,24 @@ function promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark
   return promoted;
 }
 
+function enforceBlockedQueuePolicy(runtime, controls) {
+  const blockedFiles = listQueueFiles(runtime.queues.blocked);
+  let movedCount = 0;
+  for (const filePath of blockedFiles) {
+    if (moveWithFallback(runtime, filePath, "refinement", "refinement", [
+      "PO runner blocked policy enforcement",
+      "- blocked items are treated as technical freeze, not terminal",
+      "- rerouted to refinement for PO intake triage",
+    ])) {
+      movedCount += 1;
+    }
+  }
+  if (movedCount > 0) {
+    log(controls, `blocked policy: moved ${movedCount} item(s) blocked->refinement`);
+  }
+  return movedCount > 0;
+}
+
 async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", state = null, cycle = 0) {
   const sourceBefore = resolveSourcePath(runtime, filePath) || filePath;
   const originQueue = sourceHint || queueNameFromPath(sourceBefore, runtime.queues) || "";
@@ -1616,6 +1634,7 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
     const cycle = state.cycle;
     const before = snapshotHash(runtime);
 
+    enforceBlockedQueuePolicy(runtime, controls);
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
 
@@ -1680,6 +1699,7 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
     const cycle = state.cycle;
     const before = snapshotHash(runtime);
 
+    enforceBlockedQueuePolicy(runtime, controls);
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
 

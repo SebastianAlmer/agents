@@ -74,11 +74,22 @@ Bundle behavior:
 - On QA/UAT fail, the same bundle is routed back to `dev` for rework (bounded by `delivery_quality.max_fix_cycles`), then retried.
 - If max fix cycles are exceeded, the bundle is routed to `blocked` to avoid endless loops.
 - If QA `mandatory_checks` fail and `[qa].auto_fix_on_mandatory_fail=true`, the runner first attempts automatic technical repair (optional shell fix commands and/or Codex repair) before strict-gate escalation.
+- Technical items in `blocked` are auto-rerouted to `refinement` by runners for PO re-triage (instead of staying stuck).
+- With `[release_automation].allow_release_with_human_decision_needed=true`, pending items in `human-decision-needed` do not block release/finalization flow.
 - Agents support local project memory under `.runtime/memory` (shared + per-agent) and can auto-update it after runs.
 - `P0/P1` findings are auto-routed to `selected` as hotfix requirements.
 - `P2/P3` findings are auto-routed to `backlog`.
 - Strict non-automatable critical UAT checks are auto-routed to `human-decision-needed` as manual check packages.
 - MAINT cleanup findings are auto-routed using the same severity routing (`P0/P1 -> selected`, `P2/P3 -> backlog`).
+
+Release automation flow (`[release_automation].enabled=true`):
+- Runs after successful deploy bundle and requires `[deploy].mode=commit_push`.
+- Executes `version_command` in `paths.repo_root` (default `npm version patch --no-git-tag-version`).
+- Creates release branch `${branch_prefix}-${bundle}-v${version}` from `base_branch`.
+- Commits and pushes release branch, then fast-forward merges it into `base_branch` and pushes.
+- Optional tagging via `tag_enabled` + `tag_prefix`.
+- On merge/push/version failures, creates a `human-input` requirement with conflict details.
+- If auto-resolve is enabled, runner first tries bounded rebase/repush attempts before escalating.
 
 Deterministic E2E:
 - Controlled via `[e2e]` config.
@@ -162,6 +173,8 @@ Important sections:
 - `[dev]`: watchdog timeout + recovery retries for stuck DEV runs
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)
 - `[deploy.pr]`: optional PR creation after deploy push (`enabled`, `provider`, `remote`, `base_branch`, `head_mode`, `head_branch`, templates). Template vars: `${type}` (`feat|fix|chore` inferred from branch), `${branch}`, `${base}`, `${remote}`
+- `[release_automation]`: optional release flow after deploy bundle (`enabled`, `base_branch`, `remote`, `branch_prefix`, `version_command`, `merge_mode=ff-only`, conflict auto-resolve, tag options)
+- `[release_automation].allow_release_with_human_decision_needed`: when `true`, pending business decisions in `human-decision-needed` do not block release/finalization.
 - `[dev_routing]`, `[dev_agents]`
 - `[qa]`: `mandatory_checks`, `run_checks_in_runner`, and optional `auto_fix_*` settings for deterministic pre-QA checks plus automatic repair on technical gate failures
 - `[memory]`: local agent memory behavior (`enabled`, `dir`, `include_in_prompt`, `update_on_auto`, `update_on_interactive`, limits)

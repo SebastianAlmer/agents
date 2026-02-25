@@ -102,6 +102,20 @@ remote = "origin"
 base_branch = "main"
 head_mode = "current"
 
+[release_automation]
+enabled = true
+base_branch = "dev"
+remote = "origin"
+branch_prefix = "release/bundle"
+version_scope = "root"
+version_command = "npm version patch --no-git-tag-version"
+merge_mode = "ff-only"
+tag_enabled = true
+tag_prefix = "v"
+auto_resolve_conflicts = true
+max_conflict_fix_attempts = 1
+allow_release_with_human_decision_needed = true
+
 [qa]
 # WICHTIG: Hier projektspezifische Pflichtchecks hinterlegen, sonst kann QA
 # kritische Laufzeit-/Migrationsfehler spaeter erkennen.
