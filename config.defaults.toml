@@ -52,12 +52,52 @@ retry_delay_seconds = 2
 # startet Delivery nach N Zyklen trotzdem mit einem unterfuellten Bundle.
 force_underfilled_after_cycles = 3
 
+[bundle_flow]
+# OPTIONAL: Bundle-First Governance (sequenzielle, statische Bundles).
+enabled = true
+id_prefix = "B"
+id_pad = 4
+max_ready_ahead = 1
+enforce_single_active_bundle = true
+carryover_target_queue = "refinement"
+branch_prefix = "rb"
+allow_cross_bundle_moves = false
+
 [delivery_runner]
 # OPTIONAL: full | fast | test
 # full = kompletter Delivery-Flow mit Downstream-Gates
 # fast = nur selected -> arch -> dev
 # test = Quality-/Regression-Mode (kein Deploy), danach Volltest ueber released
 default_mode = "full"
+# OPTIONAL: Harte Timeout-Grenze (Sekunden) fuer Runner-Agent-Aufrufe (ARCH/UX/SEC/QA/UAT/DEPLOY/MAINT/PO).
+agent_timeout_seconds = 1800
+# OPTIONAL: Stuck-Guard - wenn ein Agentprozess laenger ohne Ausgabe laeuft, wird er abgebrochen.
+no_output_timeout_seconds = 600
+# OPTIONAL: Wie oft ein Item wegen token-guard/pause warten darf, bevor es eskaliert wird.
+max_paused_cycles_per_item = 2
+
+[retry_policy]
+# OPTIONAL: Stage-spezifische Retry-Limits (zusaetzlich zu fail-fast Verhalten).
+arch_retry_max = 1
+ux_retry_max = 0
+sec_retry_max = 0
+qa_retry_max = 1
+uat_retry_max = 1
+deploy_retry_max = 0
+po_intake_retry_max = 1
+po_vision_retry_max = 1
+maint_retry_max = 0
+qa_post_retry_max = 0
+ux_final_retry_max = 0
+sec_final_retry_max = 0
+uat_full_retry_max = 0
+
+[loop_policy]
+# OPTIONAL: Loop-Detection fuer wiederholte gleiche Fehlschlaege.
+loop_window_cycles = 20
+loop_threshold = 3
+max_total_attempts_per_req = 5
+escalate_business_loop_to_human_decision = true
 
 [delivery_quality]
 # OPTIONAL: true = QA/UAT sind harte Gates vor Deploy.
@@ -73,7 +113,7 @@ require_uat_pass = true
 route_to_dev_on_fail = true
 
 # OPTIONAL: Max. Anzahl QA/UAT Nachbesserungszyklen pro Bundle.
-max_fix_cycles = 3
+max_fix_cycles = 2
 
 # OPTIONAL: Bei Gate-Fail trotzdem automatische Follow-up-Reqs erzeugen.
 # Empfohlen: false, damit DEV erst das aktuelle Bundle sauber stabilisiert.
@@ -160,7 +200,7 @@ body_template = "Automated PR from ${branch} to ${base} after deploy bundle."
 enabled = true
 base_branch = "dev"
 remote = "origin"
-branch_prefix = "release/bundle"
+branch_prefix = "rb"
 version_scope = "root"
 version_command = "npm version patch --no-git-tag-version"
 merge_mode = "ff-only"

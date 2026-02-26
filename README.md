@@ -66,7 +66,10 @@ Modes:
 
 Bundle behavior:
 - Bundles start from `selected`.
-- Before ARCH/DEV work starts, delivery runner always creates/switches to a per-bundle local workspace branch derived from `[release_automation].branch_prefix` (no branch adoption fallback).
+- PO prepares exactly one ready bundle ahead; delivery activates that bundle via `.runtime/bundles/registry.json` (`ready_bundle_id` -> `active_bundle_id`).
+- PO writes bundle id into front matter (`bundle_id`) and normalizes selected filenames to `...-B0001.md`.
+- Carryovers from failed/clarification exits are marked with `...-carry-01-from-B0001.md` plus `carryover_*` metadata.
+- Before ARCH/DEV work starts, delivery runner creates/switches to a per-bundle local workspace branch derived from `[bundle_flow].branch_prefix` (default `rb/<bundle>-<short>`).
 - Safety guard: `base_branch` (for example `dev`) is never accepted as an active bundle workspace branch.
 - Priority uses `business_score` in requirement front matter.
 - Default bundle range: 5-20 (configurable).
@@ -75,8 +78,10 @@ Bundle behavior:
 - Default quality mode is strict: QA and UAT must pass before deploy.
 - On QA/UAT fail, the same bundle is routed back to `dev` for rework (bounded by `delivery_quality.max_fix_cycles`), then retried.
 - If max fix cycles are exceeded, the bundle is routed to `blocked` to avoid endless loops.
+- Repeated pauses/timeouts/identical failures are tracked; loop-policy thresholds trigger early escalation to avoid long retry chains.
 - If QA `mandatory_checks` fail and `[qa].auto_fix_on_mandatory_fail=true`, the runner first attempts automatic technical repair (optional shell fix commands and/or Codex repair) before strict-gate escalation.
 - Technical items in `blocked` are auto-rerouted to `refinement` by runners for PO re-triage (instead of staying stuck).
+- `to-clarify` and `blocked` are handled as next-bundle inputs; unresolved items are not kept inside the active bundle loop.
 - With `[release_automation].allow_release_with_human_decision_needed=true`, pending items in `human-decision-needed` do not block release/finalization flow.
 - Agents support local project memory under `.runtime/memory` (shared + per-agent) and can auto-update it after runs.
 - `P0/P1` findings are auto-routed to `selected` as hotfix requirements.
@@ -87,8 +92,9 @@ Bundle behavior:
 Release automation flow (`[release_automation].enabled=true`):
 - Runs after successful deploy bundle and requires `[deploy].mode=commit_push`.
 - Executes `version_command` in `paths.repo_root` (default `npm version patch --no-git-tag-version`).
-- Uses the active bundle workspace branch as release source and fast-forward merges into `base_branch`.
-- Commits and pushes release branch, then fast-forward merges it into `base_branch` and pushes.
+- Uses the active local bundle workspace branch as release source and fast-forward merges into `base_branch`.
+- Commits on the local bundle branch, merges locally into `base_branch`, then pushes `origin/<base_branch>`.
+- Bundle branches are local-only (never pushed to origin) and are deleted locally after successful merge.
 - Optional tagging via `tag_enabled` + `tag_prefix`.
 - On merge/push/version failures, creates a `human-input` requirement with conflict details.
 - If auto-resolve is enabled, runner first tries bounded rebase/repush attempts before escalating.
@@ -165,7 +171,13 @@ Runner hotkeys (TTY):
 Important sections:
 - `[paths]`: `repo_root`, `requirements_root`, `docs_dir`, `product_vision_dir`
 - `[loops]`: bundle sizes, polling, retry policy
+- `[bundle_flow]`: bundle id/registry/branch policy (`id_prefix`, `id_pad`, `max_ready_ahead`, `carryover_target_queue`, `branch_prefix`, `allow_cross_bundle_moves`)
 - `[delivery_runner]`: `default_mode = full|fast|test`
+- `[delivery_runner].agent_timeout_seconds`: hard timeout per runner agent call to prevent indefinite hangs
+- `[delivery_runner].no_output_timeout_seconds`: stuck-guard timeout when a runner child process emits no output
+- `[delivery_runner].max_paused_cycles_per_item`: pause/token-guard limit before escalation
+- `[retry_policy]`: stage-specific retry limits (fail-fast defaults)
+- `[loop_policy]`: loop detection and escalation thresholds
 - `[delivery_quality]`: strict QA/UAT gate behavior and bounded fix loop
 - `[e2e]`: deterministic full E2E configuration (`enabled`, `required_in_test_mode`, `run_on_full_completion`, commands, timeout, env)
 - `[po]`: vision defaults and limits

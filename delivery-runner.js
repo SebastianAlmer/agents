@@ -16,6 +16,8 @@ const {
   parseFrontMatter,
   normalizeStatus,
   getActivePauseState,
+  readBundleRegistry,
+  writeBundleRegistry,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
 const {
@@ -123,6 +125,131 @@ function normalizePositiveInt(value, fallback, min = 1) {
     return fallback;
   }
   return parsed;
+}
+
+function runnerAgentTimeoutSeconds(runtime) {
+  const parsed = Number.parseInt(
+    String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.agentTimeoutSeconds || 0),
+    10
+  );
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function runnerNoOutputTimeoutSeconds(runtime) {
+  const parsed = Number.parseInt(
+    String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.noOutputTimeoutSeconds || 0),
+    10
+  );
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function retryMaxForStage(runtime, stageName, fallback = 0) {
+  const policy = runtime && runtime.retryPolicy ? runtime.retryPolicy : {};
+  const map = {
+    arch: policy.archRetryMax,
+    ux: policy.uxRetryMax,
+    sec: policy.secRetryMax,
+    qa: policy.qaRetryMax,
+    uat: policy.uatRetryMax,
+    deploy: policy.deployRetryMax,
+    maint: policy.maintRetryMax,
+    "qa-post": policy.qaPostRetryMax,
+    "ux-final": policy.uxFinalRetryMax,
+    "sec-final": policy.secFinalRetryMax,
+    "uat-full": policy.uatFullRetryMax,
+  };
+  const value = map[String(stageName || "").toLowerCase()];
+  if (!Number.isFinite(value)) {
+    return Math.max(0, Number.parseInt(String(fallback || 0), 10) || 0);
+  }
+  return Math.max(0, Number.parseInt(String(value), 10) || 0);
+}
+
+function runnerMetricsDir(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "runner-metrics");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function appendRunnerMetric(runtime, event) {
+  try {
+    const dir = runnerMetricsDir(runtime);
+    const eventPath = path.join(dir, "events.jsonl");
+    const summaryPath = path.join(dir, "summary.json");
+    const payload = {
+      ts: new Date().toISOString(),
+      runner: "delivery",
+      ...event,
+    };
+    fs.appendFileSync(eventPath, `${JSON.stringify(payload)}\n`, "utf8");
+
+    let summary = { totals: { events: 0 }, byRunner: {}, byStage: {}, byResult: {} };
+    if (fs.existsSync(summaryPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+        if (parsed && typeof parsed === "object") {
+          summary = parsed;
+        }
+      } catch {
+        // keep default summary
+      }
+    }
+    summary.totals = summary.totals && typeof summary.totals === "object" ? summary.totals : { events: 0 };
+    summary.byRunner = summary.byRunner && typeof summary.byRunner === "object" ? summary.byRunner : {};
+    summary.byStage = summary.byStage && typeof summary.byStage === "object" ? summary.byStage : {};
+    summary.byResult = summary.byResult && typeof summary.byResult === "object" ? summary.byResult : {};
+    summary.totals.events = Math.max(0, Number.parseInt(String(summary.totals.events || 0), 10)) + 1;
+    const runnerKey = String(payload.runner || "delivery");
+    const stageKey = String(payload.stage || "unknown");
+    const resultKey = String(payload.result || "unknown");
+    summary.byRunner[runnerKey] = Math.max(0, Number.parseInt(String(summary.byRunner[runnerKey] || 0), 10)) + 1;
+    summary.byStage[stageKey] = Math.max(0, Number.parseInt(String(summary.byStage[stageKey] || 0), 10)) + 1;
+    summary.byResult[resultKey] = Math.max(0, Number.parseInt(String(summary.byResult[resultKey] || 0), 10)) + 1;
+    summary.updatedAt = new Date().toISOString();
+    fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+  } catch {
+    // metrics are best-effort only
+  }
+}
+
+function pausedLimit(runtime) {
+  return Math.max(
+    1,
+    Number.parseInt(
+      String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.maxPausedCyclesPerItem || 2),
+      10
+    ) || 2
+  );
+}
+
+function handlePausedStage(runtime, controls, stageName, queueName, reason = "paused") {
+  const itemKey = stageItemKey(runtime, queueName);
+  const current = registerPausedOccurrence(runtime, stageName, itemKey);
+  appendRunnerMetric(runtime, {
+    stage: stageName,
+    queue: queueName,
+    item_key: itemKey,
+    result: "paused",
+    attempt: current,
+    reason,
+  });
+  const limit = pausedLimit(runtime);
+  if (current >= limit) {
+    return escalateStageLoop(
+      runtime,
+      stageName,
+      queueName,
+      `paused-limit reached (${current}/${limit})`,
+      controls
+    );
+  }
+  return false;
 }
 
 function queueSummary(runtime) {
@@ -269,9 +396,118 @@ function getStopSignal(controls) {
   };
 }
 
+function timestampMinute() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${y}-${m}-${d} ${hh}:${mm}`;
+}
+
+function bundleIdFromSequence(seq, runtime) {
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const prefix = String(cfg.idPrefix || "B").trim() || "B";
+  const pad = Math.max(1, Number.parseInt(String(cfg.idPad || 4), 10) || 4);
+  const normalized = Math.max(1, Number.parseInt(String(seq || 1), 10) || 1);
+  return `${prefix}${String(normalized).padStart(pad, "0")}`;
+}
+
+function readBundleRegistryForRuntime(runtime) {
+  return readBundleRegistry(runtime.agentsRoot);
+}
+
+function writeBundleRegistryForRuntime(runtime, registry) {
+  return writeBundleRegistry(runtime.agentsRoot, registry);
+}
+
+function activeBundleId(runtime) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  return String(registry.active_bundle_id || "").trim();
+}
+
+function fileBundleId(filePath) {
+  const fm = parseFrontMatter(filePath);
+  return String(fm.bundle_id || "").trim();
+}
+
+function listQueueFilesByBundle(runtime, queueName, bundleId) {
+  const files = listQueueFiles(runtime.queues[queueName]);
+  const normalized = String(bundleId || "").trim();
+  if (!normalized) {
+    return files;
+  }
+  return files.filter((filePath) => String(fileBundleId(filePath) || "").trim() === normalized);
+}
+
+function countFilesByBundle(runtime, queueName, bundleId) {
+  return listQueueFilesByBundle(runtime, queueName, bundleId).length;
+}
+
+function activateReadyBundle(runtime, controls) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const readyId = String(registry.ready_bundle_id || "").trim();
+  if (!readyId) {
+    return { started: false, bundleId: "", reason: "no-ready-bundle" };
+  }
+  const now = new Date().toISOString();
+  registry.active_bundle_id = readyId;
+  registry.ready_bundle_id = "";
+  const current = registry.bundles[readyId] && typeof registry.bundles[readyId] === "object"
+    ? registry.bundles[readyId]
+    : {};
+  registry.bundles[readyId] = {
+    ...current,
+    id: readyId,
+    seq: Number.parseInt(String(current.seq || 0), 10) || 0,
+    status: "active",
+    startedAt: now,
+    createdAt: String(current.createdAt || now).trim() || now,
+  };
+  writeBundleRegistryForRuntime(runtime, registry);
+  log(controls, `bundle activated id=${readyId}`);
+  return { started: true, bundleId: readyId, reason: "" };
+}
+
+function completeActiveBundle(runtime, controls, details = {}) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const activeId = String(registry.active_bundle_id || "").trim();
+  if (!activeId) {
+    return;
+  }
+  const now = new Date().toISOString();
+  const current = registry.bundles[activeId] && typeof registry.bundles[activeId] === "object"
+    ? registry.bundles[activeId]
+    : {};
+  registry.bundles[activeId] = {
+    ...current,
+    id: activeId,
+    status: String(details.status || "completed").trim() || "completed",
+    finishedAt: now,
+  };
+  registry.active_bundle_id = "";
+  writeBundleRegistryForRuntime(runtime, registry);
+  log(controls, `bundle completed id=${activeId} status=${registry.bundles[activeId].status}`);
+}
+
+function activeBundleDrained(runtime) {
+  const activeId = activeBundleId(runtime);
+  if (!activeId) {
+    return false;
+  }
+  const executionQueues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy"];
+  for (const queueName of executionQueues) {
+    if (countFilesByBundle(runtime, queueName, activeId) > 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function log(controls, message) {
   if (controls.verbose) {
-    process.stdout.write(`DELIVERY: ${message}\n`);
+    process.stdout.write(`${timestampMinute()} DELIVERY: ${message}\n`);
   }
 }
 
@@ -304,7 +540,7 @@ async function waitIfGloballyPaused(runtime, controls) {
   if (!pauseState) {
     return false;
   }
-  process.stdout.write(`DELIVERY: ${formatPauseLine(pauseState)}\n`);
+  process.stdout.write(`${timestampMinute()} DELIVERY: ${formatPauseLine(pauseState)}\n`);
   const fallbackMs = Math.max(1, runtime.loops.deliveryPollSeconds) * 1000;
   const waitMs = Number.isFinite(pauseState.remainingMs)
     ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
@@ -402,7 +638,15 @@ function moveToQueue(runtime, sourcePath, targetQueue, status, noteLines) {
 }
 
 function moveAll(runtime, fromQueue, toQueue, status, note) {
-  const files = listQueueFiles(runtime.queues[fromQueue]);
+  let files = listQueueFiles(runtime.queues[fromQueue]);
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const bundleScoped = Boolean(cfg.enabled) && !Boolean(cfg.allowCrossBundleMoves);
+  if (bundleScoped) {
+    const activeId = activeBundleId(runtime);
+    if (activeId) {
+      files = files.filter((filePath) => String(fileBundleId(filePath) || "").trim() === activeId);
+    }
+  }
   let moved = 0;
   for (const file of files) {
     if (moveToQueue(runtime, file, toQueue, status, [note])) {
@@ -949,48 +1193,52 @@ function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, co
   if (planningInProgress(runtime) || downstreamInProgress(runtime)) {
     return { started: false, underfilledCycles, bundleKey: "" };
   }
+  if (activeBundleId(runtime)) {
+    return { started: false, underfilledCycles, bundleKey: "" };
+  }
 
-  const selectedCount = countFiles(runtime.queues.selected);
+  const activated = activateReadyBundle(runtime, controls);
+  if (!activated.started) {
+    return { started: false, underfilledCycles: 0, bundleKey: "" };
+  }
+  const readyBundleId = activated.bundleId;
+  const selectedBundleFiles = listQueueFilesByBundle(runtime, "selected", readyBundleId);
+  const selectedCount = selectedBundleFiles.length;
   if (selectedCount === 0) {
+    log(controls, `bundle activate warning: ${readyBundleId} has no selected files`);
+    completeActiveBundle(runtime, controls, { status: "aborted" });
     return { started: false, underfilledCycles: 0, bundleKey: "" };
   }
 
   const forceUnderfilled = Boolean(options.forceUnderfilled);
   const allowUnderfilled = underfilledCycles >= runtime.loops.forceUnderfilledAfterCycles;
   if (selectedCount < minBundle && !allowUnderfilled && !forceUnderfilled) {
-    log(controls, `waiting for fuller bundle: selected=${selectedCount} min=${minBundle}`);
-    return { started: false, underfilledCycles: underfilledCycles + 1, bundleKey: "" };
-  }
-  if (selectedCount < minBundle && forceUnderfilled && !allowUnderfilled) {
-    log(
-      controls,
-      `vision final-drain: start underfilled bundle selected=${selectedCount} min=${minBundle}`
-    );
+    log(controls, `bundle ${readyBundleId} under min-size selected=${selectedCount} min=${minBundle}; starting anyway (static bundle)`);
   }
 
-  const picked = chooseBundleByBusinessScore(runtime.queues.selected, maxBundle);
-  if (picked.length === 0) {
-    return { started: false, underfilledCycles, bundleKey: "" };
-  }
+  const picked = chooseBundleByBusinessScore(runtime.queues.selected, maxBundle)
+    .filter((filePath) => String(fileBundleId(filePath) || "").trim() === readyBundleId);
+  const filesToMove = picked.length > 0 ? picked : selectedBundleFiles;
 
   let toArch = 0;
-  for (const file of picked) {
+  for (const file of filesToMove) {
     moveToQueue(runtime, file, "arch", "arch", [
-      "Delivery runner: bundle intake by business score",
+      "Delivery runner: bundle intake by ready bundle id",
+      `- bundle id=${readyBundleId}`,
       `- bundle size target max=${maxBundle}`,
       "- route: arch intake",
     ]);
     toArch += 1;
   }
-  const bundleKey = queueBundleKey(runtime, "arch");
-  log(controls, `bundle started with ${picked.length} requirement(s): arch=${toArch}`);
+  const bundleKey = readyBundleId;
+  log(controls, `bundle started id=${readyBundleId} size=${filesToMove.length}: arch=${toArch}`);
   return { started: true, underfilledCycles: 0, bundleKey };
 }
 
 async function runArch(runtime, controls) {
   let progressed = false;
   while (true) {
-    const file = listQueueFiles(runtime.queues.arch)[0];
+    const file = listQueueFilesByBundle(runtime, "arch", activeBundleId(runtime))[0];
     if (!file || controls.stopRequested || controls.drainRequested) {
       break;
     }
@@ -1011,11 +1259,15 @@ async function runArch(runtime, controls) {
       scriptPath: path.join(runtime.agentsRoot, "arch", "arch.js"),
       args: ["--auto", "--requirement", sourceFile],
       cwd: runtime.agentsRoot,
-      maxRetries: runtime.arch && Number.isInteger(runtime.arch.maxRetries)
-        ? runtime.arch.maxRetries
-        : 0,
+      maxRetries: retryMaxForStage(
+        runtime,
+        "arch",
+        runtime.arch && Number.isInteger(runtime.arch.maxRetries) ? runtime.arch.maxRetries : 0
+      ),
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
       stopSignal: getStopSignal(controls),
+      timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+      noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
     });
     if (!result.ok) {
       if (result.aborted && controls.stopRequested) {
@@ -1023,6 +1275,10 @@ async function runArch(runtime, controls) {
       }
       if (result.paused) {
         log(controls, `ARCH paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+        if (handlePausedStage(runtime, controls, "arch", "arch", "token-guard")) {
+          progressed = true;
+          continue;
+        }
         break;
       }
       moveToQueue(runtime, sourceFile, "dev", "dev", [
@@ -1082,7 +1338,7 @@ async function runDev(runtime, controls) {
   const sameThreadRetriesMax = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.sameThreadRetries || 0), 10));
   const freshThreadRetriesMax = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.freshThreadRetries || 0), 10));
   while (true) {
-    const file = listQueueFiles(runtime.queues.dev)[0];
+    const file = listQueueFilesByBundle(runtime, "dev", activeBundleId(runtime))[0];
     if (!file || controls.stopRequested || controls.drainRequested) {
       break;
     }
@@ -1109,6 +1365,7 @@ async function runDev(runtime, controls) {
         retryDelaySeconds: runtime.loops.retryDelaySeconds,
         stopSignal: getStopSignal(controls),
         timeoutSeconds: devTimeoutSeconds,
+        noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
       });
 
       if (!result.ok && result.aborted && controls.stopRequested) {
@@ -1210,9 +1467,11 @@ async function runUxBatch(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "ux", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (!result.ok) {
@@ -1221,11 +1480,26 @@ async function runUxBatch(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `UX paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return false;
+      return handlePausedStage(runtime, controls, "ux", "ux", "token-guard");
     }
+    appendRunnerMetric(runtime, {
+      stage: "ux",
+      queue: "ux",
+      item_key: stageItemKey(runtime, "ux"),
+      result: result.timedOut ? "timeout" : "fail",
+      reason: truncateForQueueNote(result.stderr || "", 200),
+    });
+    escalateStageLoop(runtime, "ux", "ux", "technical failure", controls);
     moveAll(runtime, "ux", "blocked", "blocked", "Delivery runner: UX batch failed (technical) -> blocked");
     return true;
   }
+  resetPausedOccurrence(runtime, "ux", stageItemKey(runtime, "ux"));
+  appendRunnerMetric(runtime, {
+    stage: "ux",
+    queue: "ux",
+    item_key: stageItemKey(runtime, "ux"),
+    result: "pass",
+  });
 
   const normalized = moveAll(
     runtime,
@@ -1250,9 +1524,11 @@ async function runSecBatch(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "sec", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (!result.ok) {
@@ -1261,11 +1537,26 @@ async function runSecBatch(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `SEC paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return false;
+      return handlePausedStage(runtime, controls, "sec", "sec", "token-guard");
     }
+    appendRunnerMetric(runtime, {
+      stage: "sec",
+      queue: "sec",
+      item_key: stageItemKey(runtime, "sec"),
+      result: result.timedOut ? "timeout" : "fail",
+      reason: truncateForQueueNote(result.stderr || "", 200),
+    });
+    escalateStageLoop(runtime, "sec", "sec", "technical failure", controls);
     moveAll(runtime, "sec", "blocked", "blocked", "Delivery runner: SEC batch failed (technical) -> blocked");
     return true;
   }
+  resetPausedOccurrence(runtime, "sec", stageItemKey(runtime, "sec"));
+  appendRunnerMetric(runtime, {
+    stage: "sec",
+    queue: "sec",
+    item_key: stageItemKey(runtime, "sec"),
+    result: "pass",
+  });
 
   const normalized = moveAll(
     runtime,
@@ -1981,24 +2272,90 @@ function readDeliveryQualityState(runtime) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || typeof parsed !== "object") {
-      return { attempts: {} };
+      return { attempts: {}, pausedCounts: {}, loopCounters: {} };
     }
     if (!parsed.attempts || typeof parsed.attempts !== "object") {
-      return { attempts: {} };
+      parsed.attempts = {};
     }
-    return { attempts: parsed.attempts };
+    if (!parsed.pausedCounts || typeof parsed.pausedCounts !== "object") {
+      parsed.pausedCounts = {};
+    }
+    if (!parsed.loopCounters || typeof parsed.loopCounters !== "object") {
+      parsed.loopCounters = {};
+    }
+    return {
+      attempts: parsed.attempts,
+      pausedCounts: parsed.pausedCounts,
+      loopCounters: parsed.loopCounters,
+    };
   } catch {
-    return { attempts: {} };
+    return { attempts: {}, pausedCounts: {}, loopCounters: {} };
   }
 }
 
 function writeDeliveryQualityState(runtime, state) {
   const filePath = deliveryQualityStatePath(runtime);
-  const normalized = state && typeof state === "object" ? state : { attempts: {} };
+  const normalized = state && typeof state === "object" ? state : {};
   if (!normalized.attempts || typeof normalized.attempts !== "object") {
     normalized.attempts = {};
   }
+  if (!normalized.pausedCounts || typeof normalized.pausedCounts !== "object") {
+    normalized.pausedCounts = {};
+  }
+  if (!normalized.loopCounters || typeof normalized.loopCounters !== "object") {
+    normalized.loopCounters = {};
+  }
   fs.writeFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+}
+
+function pausedKey(stageName, itemKey) {
+  return `${String(stageName || "unknown").toLowerCase()}:${String(itemKey || "unknown")}`;
+}
+
+function registerPausedOccurrence(runtime, stageName, itemKey) {
+  const state = readDeliveryQualityState(runtime);
+  const key = pausedKey(stageName, itemKey);
+  const next = Math.max(1, Number.parseInt(String((state.pausedCounts && state.pausedCounts[key]) || 0), 10) + 1);
+  state.pausedCounts[key] = next;
+  writeDeliveryQualityState(runtime, state);
+  return next;
+}
+
+function resetPausedOccurrence(runtime, stageName, itemKey) {
+  const state = readDeliveryQualityState(runtime);
+  const key = pausedKey(stageName, itemKey);
+  if (Object.prototype.hasOwnProperty.call(state.pausedCounts, key)) {
+    delete state.pausedCounts[key];
+    writeDeliveryQualityState(runtime, state);
+  }
+}
+
+function loopCounterKey(stageName, itemKey, failureClass) {
+  return `${String(stageName || "unknown").toLowerCase()}:${String(itemKey || "unknown")}:${String(failureClass || "fail")}`;
+}
+
+function registerLoopFailure(runtime, stageName, itemKey, failureClass = "fail") {
+  const state = readDeliveryQualityState(runtime);
+  const key = loopCounterKey(stageName, itemKey, failureClass);
+  const next = Math.max(1, Number.parseInt(String((state.loopCounters && state.loopCounters[key]) || 0), 10) + 1);
+  state.loopCounters[key] = next;
+  writeDeliveryQualityState(runtime, state);
+  return next;
+}
+
+function resetLoopFailuresForItem(runtime, stageName, itemKey) {
+  const state = readDeliveryQualityState(runtime);
+  const prefix = `${String(stageName || "unknown").toLowerCase()}:${String(itemKey || "unknown")}:`;
+  let changed = false;
+  for (const key of Object.keys(state.loopCounters || {})) {
+    if (key.startsWith(prefix)) {
+      delete state.loopCounters[key];
+      changed = true;
+    }
+  }
+  if (changed) {
+    writeDeliveryQualityState(runtime, state);
+  }
 }
 
 function bundleWorkspaceStatePath(runtime) {
@@ -2039,6 +2396,10 @@ function clearBundleWorkspaceState(runtime) {
 }
 
 function activeBundleKey(runtime) {
+  const registryActive = activeBundleId(runtime);
+  if (registryActive) {
+    return registryActive;
+  }
   const orderedQueues = ["arch", "dev", "qa", "ux", "sec", "deploy"];
   for (const queueName of orderedQueues) {
     if (countFiles(runtime.queues[queueName]) > 0) {
@@ -2055,10 +2416,11 @@ function localBranchExists(repoRoot, branchName) {
 
 function buildWorkspaceBranchName(runtime, bundleKey) {
   const releaseCfg = runtime && runtime.releaseAutomation ? runtime.releaseAutomation : {};
-  const branchPrefix = String(releaseCfg.branchPrefix || "release/bundle").trim() || "release/bundle";
+  const bundleCfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const branchPrefix = String(bundleCfg.branchPrefix || releaseCfg.branchPrefix || "rb").trim() || "rb";
   const bundleLabel = sanitizeRefPart(bundleKey || "bundle", "bundle");
-  const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
-  return `${branchPrefix}-${bundleLabel}-w${stamp}`;
+  const short = new Date().toISOString().replace(/[^0-9]/g, "").slice(8, 12);
+  return `${branchPrefix}/${bundleLabel}-${short}`;
 }
 
 function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {}) {
@@ -2186,10 +2548,16 @@ function queueBundleIds(runtime, queueName) {
   if (!dir) {
     return [];
   }
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const bundleScoped = Boolean(cfg.enabled) && !Boolean(cfg.allowCrossBundleMoves);
+  const activeId = bundleScoped ? activeBundleId(runtime) : "";
   const ids = new Set();
   for (const filePath of listQueueFiles(dir)) {
     const fm = parseFrontMatter(filePath);
     const id = String(fm.bundle_id || "").trim();
+    if (bundleScoped && activeId && id && id !== activeId) {
+      continue;
+    }
     if (id) {
       ids.add(id);
     }
@@ -2206,6 +2574,84 @@ function queueBundleKey(runtime, queueName) {
     return ids[0];
   }
   return `mixed:${ids.join("+")}`;
+}
+
+function stageItemKey(runtime, queueName) {
+  const ids = queueBundleIds(runtime, queueName);
+  if (ids.length > 0) {
+    return ids.length === 1 ? ids[0] : `mixed:${ids.join("+")}`;
+  }
+  const dir = runtime && runtime.queues ? runtime.queues[queueName] : "";
+  const files = dir ? listQueueFiles(dir) : [];
+  if (files.length > 0) {
+    const fm = parseFrontMatter(files[0]);
+    const id = String(fm.id || "").trim();
+    if (id) {
+      return id;
+    }
+    return path.basename(files[0]);
+  }
+  return `${queueName}:no-item`;
+}
+
+function shouldEscalateBusinessLoop(runtime) {
+  return Boolean(runtime && runtime.loopPolicy && runtime.loopPolicy.escalateBusinessLoopToHumanDecision);
+}
+
+function escalateStageLoop(runtime, stageName, sourceQueue, reason, controls) {
+  const queue = String(sourceQueue || "").trim();
+  const itemKey = stageItemKey(runtime, queue);
+  const maxAttempts = Math.max(1, Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.maxTotalAttemptsPerReq || 5), 10));
+  const threshold = Math.max(2, Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.loopThreshold || 3), 10));
+  const totalAttempts = registerLoopFailure(runtime, stageName, itemKey, "fail");
+  const shouldEscalate = totalAttempts >= threshold || totalAttempts >= maxAttempts;
+  if (!shouldEscalate) {
+    return false;
+  }
+
+  const businessEscalation = shouldEscalateBusinessLoop(runtime) && ["qa", "uat", "ux", "sec"].includes(String(stageName || "").toLowerCase());
+  if (businessEscalation && runtime.queues.humanDecisionNeeded) {
+    const moved = moveAll(
+      runtime,
+      queue,
+      "humanDecisionNeeded",
+      "human-decision-needed",
+      `Delivery runner: ${String(stageName || "").toUpperCase()} loop escalation -> human-decision-needed (${reason})`
+    );
+    if (moved > 0) {
+      appendRunnerMetric(runtime, {
+        stage: stageName,
+        item_key: itemKey,
+        result: "escalated",
+        escalated_to: "human-decision-needed",
+        reason,
+      });
+      log(controls, `${String(stageName || "").toUpperCase()} loop escalation to human-decision-needed item=${itemKey}`);
+      resetLoopFailuresForItem(runtime, stageName, itemKey);
+      return true;
+    }
+  }
+
+  const moved = moveAll(
+    runtime,
+    queue,
+    "blocked",
+    "blocked",
+    `Delivery runner: ${String(stageName || "").toUpperCase()} loop escalation -> blocked (${reason})`
+  );
+  if (moved > 0) {
+    appendRunnerMetric(runtime, {
+      stage: stageName,
+      item_key: itemKey,
+      result: "escalated",
+      escalated_to: "blocked",
+      reason,
+    });
+    log(controls, `${String(stageName || "").toUpperCase()} loop escalation to blocked item=${itemKey}`);
+    resetLoopFailuresForItem(runtime, stageName, itemKey);
+    return true;
+  }
+  return false;
 }
 
 function gateAttemptKey(gateName, bundleKey) {
@@ -2592,9 +3038,11 @@ async function runQaBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--batch-tests", "--batch-queue", "qa", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "qa", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
   if (result.aborted && controls.stopRequested) {
     return {
@@ -2604,11 +3052,13 @@ async function runQaBundle(runtime, controls) {
   }
   if (result.paused) {
     log(controls, `QA paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "qa", "qa", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       gate: null,
     };
   }
+  resetPausedOccurrence(runtime, "qa", stageItemKey(runtime, "qa"));
 
   const parsed = parseGate(gatePath);
   const gate = gateFromAgentResult({
@@ -2621,6 +3071,12 @@ async function runQaBundle(runtime, controls) {
   if (strictQa) {
     if (gatePass(gate)) {
       resetGateAttempt(runtime, "qa", bundleKey);
+      appendRunnerMetric(runtime, {
+        stage: "qa",
+        queue: "qa",
+        item_key: bundleKey,
+        result: "pass",
+      });
       applyGateOutcomes(runtime, controls, "qa", gate);
       moveAll(runtime, "qa", "deploy", "deploy", "Delivery runner: QA strict pass -> deploy");
       return {
@@ -2631,6 +3087,19 @@ async function runQaBundle(runtime, controls) {
     if (runtime.deliveryQuality.emitFollowupsOnFail) {
       applyGateOutcomes(runtime, controls, "qa", gate);
     }
+    appendRunnerMetric(runtime, {
+      stage: "qa",
+      queue: "qa",
+      item_key: bundleKey,
+      result: "fail",
+      reason: queueNote("qa gate fail", gate),
+    });
+    if (escalateStageLoop(runtime, "qa", "qa", "strict gate fail", controls)) {
+      return {
+        progressed: true,
+        gate,
+      };
+    }
     return handleStrictGateFailure(runtime, controls, {
       gateName: "qa",
       sourceQueue: "qa",
@@ -2639,6 +3108,13 @@ async function runQaBundle(runtime, controls) {
   }
 
   applyGateOutcomes(runtime, controls, "qa", gate);
+  appendRunnerMetric(runtime, {
+    stage: "qa",
+    queue: "qa",
+    item_key: bundleKey,
+    result: gatePass(gate) ? "pass" : "fail",
+    reason: queueNote("qa advisory", gate),
+  });
   const note = gatePass(gate)
     ? "Delivery runner: QA advisory pass -> continue to deploy"
     : queueNote("Delivery runner: QA advisory fail -> continue to deploy", gate);
@@ -2672,9 +3148,11 @@ async function runUatBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
     args: ["--auto", "--batch", "--source-queue", "deploy", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "uat", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
   if (result.aborted && controls.stopRequested) {
     return {
@@ -2684,11 +3162,13 @@ async function runUatBundle(runtime, controls) {
   }
   if (result.paused) {
     log(controls, `UAT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "uat", "deploy", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       gate: null,
     };
   }
+  resetPausedOccurrence(runtime, "uat", stageItemKey(runtime, "deploy"));
 
   const parsed = parseGate(gatePath);
   const gate = gateFromAgentResult({
@@ -2701,6 +3181,12 @@ async function runUatBundle(runtime, controls) {
   if (strictUat) {
     if (gatePass(gate)) {
       resetGateAttempt(runtime, "uat", bundleKey);
+      appendRunnerMetric(runtime, {
+        stage: "uat",
+        queue: "deploy",
+        item_key: bundleKey,
+        result: "pass",
+      });
       applyGateOutcomes(runtime, controls, "uat", gate);
       log(controls, "UAT strict pass");
       return {
@@ -2711,6 +3197,19 @@ async function runUatBundle(runtime, controls) {
     if (runtime.deliveryQuality.emitFollowupsOnFail) {
       applyGateOutcomes(runtime, controls, "uat", gate);
     }
+    appendRunnerMetric(runtime, {
+      stage: "uat",
+      queue: "deploy",
+      item_key: bundleKey,
+      result: "fail",
+      reason: queueNote("uat gate fail", gate),
+    });
+    if (escalateStageLoop(runtime, "uat", "deploy", "strict gate fail", controls)) {
+      return {
+        progressed: true,
+        gate,
+      };
+    }
     return handleStrictGateFailure(runtime, controls, {
       gateName: "uat",
       sourceQueue: "deploy",
@@ -2719,6 +3218,13 @@ async function runUatBundle(runtime, controls) {
   }
 
   applyGateOutcomes(runtime, controls, "uat", gate);
+  appendRunnerMetric(runtime, {
+    stage: "uat",
+    queue: "deploy",
+    item_key: bundleKey,
+    result: gatePass(gate) ? "pass" : "fail",
+    reason: queueNote("uat advisory", gate),
+  });
   if (!gatePass(gate)) {
     log(controls, queueNote("UAT advisory fail -> continue to deploy", gate));
   } else {
@@ -2747,9 +3253,11 @@ async function runUxFinalPass(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "ux-final", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -2796,9 +3304,11 @@ async function runSecFinalPass(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "sec-final", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -2845,9 +3355,11 @@ async function runUatFullRegression(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
     args: ["--auto", "--full-regression", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "uat-full", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -3409,9 +3921,11 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
     scriptPath: path.join(runtime.agentsRoot, "maint", "maint.js"),
     args: ["--auto", "--post-deploy", "--decision-file", decisionPath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "maint", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -3423,8 +3937,9 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
   }
   if (result.paused) {
     log(controls, `MAINT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "maint", "released", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       signature: lastSignature,
       gate: null,
     };
@@ -3808,6 +4323,21 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     }
     return outcome;
   }
+  if (currentBranch === baseBranch) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: currentBranch,
+      baseBranch,
+      remote,
+      reason: `active branch is base branch '${baseBranch}' (bundle branch required)`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
 
   const versionFilePath = resolveVersionFilePath(runtime, releaseCfg);
   if (!versionFilePath || !fs.existsSync(versionFilePath)) {
@@ -3906,23 +4436,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
   }
   outcome.committed = true;
 
-  const pushRelease = runGit(runtime.repoRoot, ["push", "-u", remote, releaseBranch]);
-  if (!pushRelease.ok) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
-      bundleId: context.bundleId,
-      releaseBranch,
-      baseBranch,
-      remote,
-      reason: `push release branch failed: ${truncateForQueueNote(pushRelease.output || "", 300)}`,
-      conflictFiles: [],
-    });
-    if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
-      outcome.conflictEscalation = humanPath;
-    }
-    return outcome;
-  }
-  outcome.pushed = true;
+  log(controls, `RELEASE: keeping bundle branch local only (${releaseBranch})`);
 
   runGit(runtime.repoRoot, ["fetch", remote]);
   let checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
@@ -3969,10 +4483,6 @@ function runReleaseAutomation(runtime, controls, context = {}) {
         const rebase = runGit(runtime.repoRoot, ["rebase", `${remote}/${baseBranch}`]);
         if (!rebase.ok) {
           runGit(runtime.repoRoot, ["rebase", "--abort"]);
-          continue;
-        }
-        const pushRebased = runGit(runtime.repoRoot, ["push", "--force-with-lease", remote, releaseBranch]);
-        if (!pushRebased.ok) {
           continue;
         }
         checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
@@ -4039,6 +4549,13 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     }
   }
 
+  const deleteLocalRelease = runGit(runtime.repoRoot, ["branch", "-D", releaseBranch]);
+  if (!deleteLocalRelease.ok) {
+    log(controls, `RELEASE: local bundle branch cleanup warning ${truncateForQueueNote(deleteLocalRelease.output || "", 220)}`);
+  } else {
+    log(controls, `RELEASE: deleted local bundle branch ${releaseBranch}`);
+  }
+
   log(controls, `RELEASE: completed bundle=${bundleLabel} version=${newVersion} branch=${releaseBranch}`);
   return outcome;
 }
@@ -4054,9 +4571,11 @@ async function runDeployBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "deploy", "deploy.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "deploy", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (!result.ok) {
@@ -4065,13 +4584,28 @@ async function runDeployBundle(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `DEPLOY paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return false;
+      return handlePausedStage(runtime, controls, "deploy", "deploy", "token-guard");
     }
+    appendRunnerMetric(runtime, {
+      stage: "deploy",
+      queue: "deploy",
+      item_key: deployBundleKey,
+      result: result.timedOut ? "timeout" : "fail",
+      reason: truncateForQueueNote(result.stderr || "", 200),
+    });
+    escalateStageLoop(runtime, "deploy", "deploy", "deploy stage failed", controls);
     moveAll(runtime, "deploy", "blocked", "blocked", "Delivery runner: deploy bundle failed (technical) -> blocked");
     return true;
   }
+  resetPausedOccurrence(runtime, "deploy", deployBundleKey);
 
   moveAll(runtime, "deploy", "released", "released", "Delivery runner: deploy bundle released");
+  appendRunnerMetric(runtime, {
+    stage: "deploy",
+    queue: "deploy",
+    item_key: deployBundleKey,
+    result: "pass",
+  });
   if (deployBundleIds.length > 0) {
     for (const bundleId of deployBundleIds) {
       resetBundleAttempts(runtime, bundleId);
@@ -4090,6 +4624,7 @@ async function runDeployBundle(runtime, controls) {
     deployInfo = deployCommitPush(runtime, controls);
     createPullRequest(runtime, controls, deployInfo);
   }
+  completeActiveBundle(runtime, controls, { status: "completed" });
   clearBundleWorkspaceState(runtime);
   return true;
 }
@@ -4130,9 +4665,11 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "qa-post", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -4145,8 +4682,9 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
 
   if (result.paused) {
     log(controls, `QA post-bundle paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "qa-post", "released", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       signature: lastSignature,
       gate: null,
     };
@@ -4368,6 +4906,10 @@ async function main() {
       }
     }
 
+    if (activeBundleDrained(runtime)) {
+      completeActiveBundle(runtime, controls, { status: "aborted" });
+    }
+
     if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
       clearBundleWorkspaceState(runtime);
     }
@@ -4385,7 +4927,7 @@ async function main() {
       if (shouldUseLongIdleWait(runtime, mode)) {
         const minutes = Math.max(1, Math.round(DELIVERY_IDLE_WAIT_MS / 60000));
         process.stdout.write(
-          `DELIVERY: waiting ${minutes}m - upstream idle (selected=0 arch=0 dev=0), checking again for new PO input\n`
+          `${timestampMinute()} DELIVERY: waiting ${minutes}m - upstream idle (selected=0 arch=0 dev=0), checking again for new PO input\n`
         );
         await sleepWithStopCheck(DELIVERY_IDLE_WAIT_MS, controls);
       } else {

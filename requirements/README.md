@@ -31,6 +31,7 @@ Queue intent:
 - Autonomous delivery starts from `selected`.
 - Unclear items from ARCH/DEV/QA/SEC/UX/DEPLOY go to `to-clarify`.
 - PO resolves `to-clarify` whenever possible.
+- `to-clarify` and `blocked` are treated as next-bundle planning input, not as in-bundle execution queues.
 - Only PO escalates hard unresolved conflicts to `human-decision-needed`.
 - UAT may create manual decision packages in `human-decision-needed` only for business-critical checks that are not automatable.
 - MAINT may create cleanup follow-up requirements after deploy.

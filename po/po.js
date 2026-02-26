@@ -13,7 +13,10 @@ const {
   runCodexExec,
   startInteractiveCodexAgent,
 } = require("../lib/agent");
+const { installTimestampedConsole } = require("../lib/logging");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
+
+installTimestampedConsole();
 
 function normalizePoMode(value, fallback = "intake") {
   const normalized = String(value || fallback || "").trim().toLowerCase();

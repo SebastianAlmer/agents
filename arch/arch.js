@@ -12,7 +12,10 @@ const {
   runCodexExec,
   startInteractiveCodexAgent,
 } = require("../lib/agent");
+const { installTimestampedConsole } = require("../lib/logging");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
+
+installTimestampedConsole();
 
 function parseArgs(argv) {
   const args = { requirement: "", auto: false };

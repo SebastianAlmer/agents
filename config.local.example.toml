@@ -32,11 +32,45 @@ requirements_root = "./requirements"
 bundle_min_size = 10
 bundle_max_size = 10
 
+[bundle_flow]
+enabled = true
+id_prefix = "B"
+id_pad = 4
+max_ready_ahead = 1
+enforce_single_active_bundle = true
+carryover_target_queue = "refinement"
+branch_prefix = "rb"
+allow_cross_bundle_moves = false
+
 [delivery_runner]
 # full = kompletter Flow mit UX/SEC/QA/UAT/DEPLOY
 # fast = nur arch+dev (ohne Downstream-Gates)
 # test = Regression-Mode mit Volltest (ohne Deploy-Git-Aktionen)
 default_mode = "full"
+agent_timeout_seconds = 1800
+no_output_timeout_seconds = 600
+max_paused_cycles_per_item = 2
+
+[retry_policy]
+arch_retry_max = 1
+ux_retry_max = 0
+sec_retry_max = 0
+qa_retry_max = 1
+uat_retry_max = 1
+deploy_retry_max = 0
+po_intake_retry_max = 1
+po_vision_retry_max = 1
+maint_retry_max = 0
+qa_post_retry_max = 0
+ux_final_retry_max = 0
+sec_final_retry_max = 0
+uat_full_retry_max = 0
+
+[loop_policy]
+loop_window_cycles = 20
+loop_threshold = 3
+max_total_attempts_per_req = 5
+escalate_business_loop_to_human_decision = true
 
 [delivery_quality]
 # Strenger Qualitaetsmodus: QA/UAT muessen gruen sein vor Deploy.
@@ -44,7 +78,7 @@ strict_gate = true
 require_qa_pass = true
 require_uat_pass = true
 route_to_dev_on_fail = true
-max_fix_cycles = 3
+max_fix_cycles = 2
 emit_followups_on_fail = false
 
 [e2e]
@@ -106,7 +140,7 @@ head_mode = "current"
 enabled = true
 base_branch = "dev"
 remote = "origin"
-branch_prefix = "release/bundle"
+branch_prefix = "rb"
 version_scope = "root"
 version_command = "npm version patch --no-git-tag-version"
 merge_mode = "ff-only"

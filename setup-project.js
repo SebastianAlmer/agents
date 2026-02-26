@@ -342,6 +342,27 @@ function main() {
   } else {
     deliveryRunnerDefault = normalizeEnum(deliveryRunnerDefaultRaw, ["full", "fast", "test"], "full");
   }
+  const deliveryRunnerTimeoutSeconds = Number.isFinite(
+    base.delivery_runner && base.delivery_runner.agent_timeout_seconds
+  )
+    ? Math.max(0, base.delivery_runner.agent_timeout_seconds)
+    : 1800;
+  const deliveryRunnerNoOutputTimeoutSeconds = Number.isFinite(
+    base.delivery_runner && base.delivery_runner.no_output_timeout_seconds
+  )
+    ? Math.max(0, base.delivery_runner.no_output_timeout_seconds)
+    : 600;
+  const deliveryRunnerMaxPausedCyclesPerItem = Number.isFinite(
+    base.delivery_runner && base.delivery_runner.max_paused_cycles_per_item
+  )
+    ? Math.max(1, base.delivery_runner.max_paused_cycles_per_item)
+    : 2;
+  const retryPolicyBase = base.retry_policy && typeof base.retry_policy === "object"
+    ? base.retry_policy
+    : {};
+  const loopPolicyBase = base.loop_policy && typeof base.loop_policy === "object"
+    ? base.loop_policy
+    : {};
   const deliveryQualityBase = base.delivery_quality && typeof base.delivery_quality === "object"
     ? base.delivery_quality
     : {};
@@ -351,7 +372,7 @@ function main() {
   const deliveryQualityRouteToDevOnFail = normalizeBool(deliveryQualityBase.route_to_dev_on_fail, true);
   const deliveryQualityMaxFixCycles = Number.isFinite(deliveryQualityBase.max_fix_cycles)
     ? Math.max(1, deliveryQualityBase.max_fix_cycles)
-    : 3;
+    : 2;
   const deliveryQualityEmitFollowupsOnFail = normalizeBool(
     deliveryQualityBase.emit_followups_on_fail,
     false
@@ -406,7 +427,7 @@ function main() {
   const releaseAutomationEnabled = normalizeBool(releaseBase.enabled, true);
   const releaseAutomationBaseBranch = String(releaseBase.base_branch || "dev").trim() || "dev";
   const releaseAutomationRemote = String(releaseBase.remote || "origin").trim() || "origin";
-  const releaseAutomationBranchPrefix = String(releaseBase.branch_prefix || "release/bundle").trim() || "release/bundle";
+  const releaseAutomationBranchPrefix = String(releaseBase.branch_prefix || "rb").trim() || "rb";
   const releaseAutomationVersionScope = String(releaseBase.version_scope || "root").trim().toLowerCase() || "root";
   const releaseAutomationVersionCommand = String(
     releaseBase.version_command || "npm version patch --no-git-tag-version"
@@ -453,6 +474,27 @@ function main() {
       ? Math.max(1, baseLoops.bundle_max_size)
       : 20;
   const bundleMaxSize = Math.max(bundleMinSize, bundleMaxSizeRaw);
+  const bundleFlowBase = base.bundle_flow && typeof base.bundle_flow === "object"
+    ? base.bundle_flow
+    : {};
+  const bundleFlowEnabled = normalizeBool(bundleFlowBase.enabled, true);
+  const bundleFlowIdPrefix = String(bundleFlowBase.id_prefix || "B").trim() || "B";
+  const bundleFlowIdPad = Number.isFinite(bundleFlowBase.id_pad)
+    ? Math.max(1, bundleFlowBase.id_pad)
+    : 4;
+  const bundleFlowMaxReadyAhead = Number.isFinite(bundleFlowBase.max_ready_ahead)
+    ? Math.max(1, bundleFlowBase.max_ready_ahead)
+    : 1;
+  const bundleFlowEnforceSingleActiveBundle = normalizeBool(
+    bundleFlowBase.enforce_single_active_bundle,
+    true
+  );
+  const bundleFlowCarryoverTargetQueue = String(bundleFlowBase.carryover_target_queue || "refinement").trim() || "refinement";
+  const bundleFlowBranchPrefix = String(bundleFlowBase.branch_prefix || "rb").trim() || "rb";
+  const bundleFlowAllowCrossBundleMoves = normalizeBool(
+    bundleFlowBase.allow_cross_bundle_moves,
+    false
+  );
   const poMode = normalizeEnum(
     args.poMode || (base.po && base.po.default_mode) || "vision",
     ["vision", "intake"],
@@ -692,8 +734,42 @@ function main() {
     `retry_delay_seconds = ${toTomlInt(Number.isFinite(baseLoops.retry_delay_seconds) ? baseLoops.retry_delay_seconds : 2)}`,
     `force_underfilled_after_cycles = ${toTomlInt(Number.isFinite(baseLoops.force_underfilled_after_cycles) ? baseLoops.force_underfilled_after_cycles : 3)}`,
     "",
+    "[bundle_flow]",
+    `enabled = ${toTomlBool(bundleFlowEnabled)}`,
+    `id_prefix = ${toTomlString(bundleFlowIdPrefix)}`,
+    `id_pad = ${toTomlInt(bundleFlowIdPad)}`,
+    `max_ready_ahead = ${toTomlInt(bundleFlowMaxReadyAhead)}`,
+    `enforce_single_active_bundle = ${toTomlBool(bundleFlowEnforceSingleActiveBundle)}`,
+    `carryover_target_queue = ${toTomlString(bundleFlowCarryoverTargetQueue)}`,
+    `branch_prefix = ${toTomlString(bundleFlowBranchPrefix)}`,
+    `allow_cross_bundle_moves = ${toTomlBool(bundleFlowAllowCrossBundleMoves)}`,
+    "",
     "[delivery_runner]",
     `default_mode = ${toTomlString(deliveryRunnerDefault)}`,
+    `agent_timeout_seconds = ${toTomlInt(deliveryRunnerTimeoutSeconds)}`,
+    `no_output_timeout_seconds = ${toTomlInt(deliveryRunnerNoOutputTimeoutSeconds)}`,
+    `max_paused_cycles_per_item = ${toTomlInt(deliveryRunnerMaxPausedCyclesPerItem)}`,
+    "",
+    "[retry_policy]",
+    `arch_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.arch_retry_max) ? Math.max(0, retryPolicyBase.arch_retry_max) : 1)}`,
+    `ux_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.ux_retry_max) ? Math.max(0, retryPolicyBase.ux_retry_max) : 0)}`,
+    `sec_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.sec_retry_max) ? Math.max(0, retryPolicyBase.sec_retry_max) : 0)}`,
+    `qa_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.qa_retry_max) ? Math.max(0, retryPolicyBase.qa_retry_max) : 1)}`,
+    `uat_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.uat_retry_max) ? Math.max(0, retryPolicyBase.uat_retry_max) : 1)}`,
+    `deploy_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.deploy_retry_max) ? Math.max(0, retryPolicyBase.deploy_retry_max) : 0)}`,
+    `po_intake_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.po_intake_retry_max) ? Math.max(0, retryPolicyBase.po_intake_retry_max) : 1)}`,
+    `po_vision_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.po_vision_retry_max) ? Math.max(0, retryPolicyBase.po_vision_retry_max) : 1)}`,
+    `maint_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.maint_retry_max) ? Math.max(0, retryPolicyBase.maint_retry_max) : 0)}`,
+    `qa_post_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.qa_post_retry_max) ? Math.max(0, retryPolicyBase.qa_post_retry_max) : 0)}`,
+    `ux_final_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.ux_final_retry_max) ? Math.max(0, retryPolicyBase.ux_final_retry_max) : 0)}`,
+    `sec_final_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.sec_final_retry_max) ? Math.max(0, retryPolicyBase.sec_final_retry_max) : 0)}`,
+    `uat_full_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.uat_full_retry_max) ? Math.max(0, retryPolicyBase.uat_full_retry_max) : 0)}`,
+    "",
+    "[loop_policy]",
+    `loop_window_cycles = ${toTomlInt(Number.isFinite(loopPolicyBase.loop_window_cycles) ? Math.max(1, loopPolicyBase.loop_window_cycles) : 20)}`,
+    `loop_threshold = ${toTomlInt(Number.isFinite(loopPolicyBase.loop_threshold) ? Math.max(2, loopPolicyBase.loop_threshold) : 3)}`,
+    `max_total_attempts_per_req = ${toTomlInt(Number.isFinite(loopPolicyBase.max_total_attempts_per_req) ? Math.max(1, loopPolicyBase.max_total_attempts_per_req) : 5)}`,
+    `escalate_business_loop_to_human_decision = ${toTomlBool(normalizeBool(loopPolicyBase.escalate_business_loop_to_human_decision, true))}`,
     "",
     "[delivery_quality]",
     `strict_gate = ${toTomlBool(deliveryQualityStrictGate)}`,
@@ -850,7 +926,8 @@ function main() {
   console.log(`- product_vision_dir: ${productVisionDir || "<default>"}`);
   console.log(`- loops.bundle_min_size: ${bundleMinSize}`);
   console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
-  console.log(`- delivery_runner.default_mode: ${deliveryRunnerDefault}`);
+  console.log(`- bundle_flow: enabled=${bundleFlowEnabled} id_prefix=${bundleFlowIdPrefix} id_pad=${bundleFlowIdPad} max_ready_ahead=${bundleFlowMaxReadyAhead} carryover_target_queue=${bundleFlowCarryoverTargetQueue} branch_prefix=${bundleFlowBranchPrefix} allow_cross_bundle_moves=${bundleFlowAllowCrossBundleMoves}`);
+  console.log(`- delivery_runner: mode=${deliveryRunnerDefault} agent_timeout_seconds=${deliveryRunnerTimeoutSeconds} no_output_timeout_seconds=${deliveryRunnerNoOutputTimeoutSeconds} max_paused_cycles_per_item=${deliveryRunnerMaxPausedCyclesPerItem}`);
   console.log(`- delivery_quality: strict=${deliveryQualityStrictGate} qa_pass=${deliveryQualityRequireQaPass} uat_pass=${deliveryQualityRequireUatPass} route_to_dev=${deliveryQualityRouteToDevOnFail} max_fix_cycles=${deliveryQualityMaxFixCycles} emit_followups_on_fail=${deliveryQualityEmitFollowupsOnFail}`);
   console.log(`- qa autofix: enabled=${qaAutoFixOnMandatoryFail} max_attempts=${qaAutoFixMaxAttempts} shell_cmds=${qaAutoFixCommands.length} codex=${qaAutoFixUseCodex}`);
   console.log(`- memory: enabled=${memoryEnabled} dir=${memoryDir} include_in_prompt=${memoryIncludeInPrompt} update_on_auto=${memoryUpdateOnAuto} update_on_interactive=${memoryUpdateOnInteractive}`);

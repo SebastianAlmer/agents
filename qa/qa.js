@@ -12,7 +12,10 @@ const {
   runCodexExec,
   startInteractiveCodexAgent,
 } = require("../lib/agent");
+const { installTimestampedConsole } = require("../lib/logging");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
+
+installTimestampedConsole();
 
 const FINAL_GATE_PENDING_SUMMARY = "pending";
 
