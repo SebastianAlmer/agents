@@ -462,13 +462,14 @@ function shouldFillSelected(runtime, highWatermark, state, controls) {
     return false;
   }
 
-  if (selectedCount >= highWatermark) {
+  const bundleTarget = Math.max(highWatermark, Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1));
+  if (selectedCount >= bundleTarget) {
     state.bundleLocked = true;
-    log(controls, `bundle lock engaged at selected=${selectedCount} (target=${highWatermark})`);
+    log(controls, `bundle lock engaged at selected=${selectedCount} (target=${bundleTarget})`);
     return false;
   }
 
-  return selectedCount < highWatermark;
+  return selectedCount < bundleTarget;
 }
 
 function logWaitCheck(runtime, state, controls, highWatermark) {
@@ -489,7 +490,7 @@ function logWaitCheck(runtime, state, controls, highWatermark) {
     reason = `bundle-ready(${readyBundleId})`;
   } else if (planningBusy) {
     reason = "planning-busy";
-  } else if (selectedCount >= highWatermark) {
+  } else if (selectedCount >= Math.max(highWatermark, Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1))) {
     reason = "selected-at-target";
   }
 
@@ -553,8 +554,10 @@ function waitReason(runtime, state, highWatermark, mode) {
     reason = `ready bundle waiting for delivery start (${readyBundleId})`;
   } else if (state && state.bundleLocked) {
     reason = `bundle locked while delivery drains (selected=${selected})`;
-  } else if (selected >= highWatermark) {
-    reason = `selected buffer at target (${selected}/${highWatermark})`;
+  } else if (selected >= Math.max(highWatermark, minBundle)) {
+    reason = `selected buffer at target (${selected}/${Math.max(highWatermark, minBundle)})`;
+  } else if (selected > 0) {
+    reason = `waiting for full bundle (${selected}/${minBundle})`;
   } else if (mode === "vision") {
     const visionHint = findVisionOpenDecisionHint(runtime);
     if (intakeCandidates > 0) {
@@ -693,6 +696,7 @@ function setFrontMatterField(filePath, key, value) {
 
 function stripBundleSuffix(stem) {
   return String(stem || "")
+    .replace(/^B\d{4}-/i, "")
     .replace(/-B\d{4}(?:-carry-\d{2}-from-B\d{4})?$/i, "")
     .replace(/-carry-\d{2}-from-B\d{4}$/i, "");
 }
@@ -705,7 +709,7 @@ function renameRequirementForBundle(filePath, bundleId) {
   const ext = path.extname(filePath) || ".md";
   const stem = path.basename(filePath, ext);
   const normalizedStem = stripBundleSuffix(stem);
-  const nextName = `${normalizedStem}-${bundleId}${ext}`;
+  const nextName = `${bundleId}-${normalizedStem}${ext}`;
   const target = path.join(dir, nextName);
   if (path.resolve(target) === path.resolve(filePath)) {
     return filePath;
@@ -718,7 +722,9 @@ function renameRequirementForBundle(filePath, bundleId) {
 }
 
 function stripCarryoverSuffix(stem) {
-  return String(stem || "").replace(/-carry-\d{2}-from-B\d{4}$/i, "");
+  return String(stem || "")
+    .replace(/^carry-\d{2}-from-B\d{4}-/i, "")
+    .replace(/-carry-\d{2}-from-B\d{4}$/i, "");
 }
 
 function renameRequirementAsCarryover(filePath, oldBundleId, carryoverCount) {
@@ -729,7 +735,7 @@ function renameRequirementAsCarryover(filePath, oldBundleId, carryoverCount) {
   const ext = path.extname(filePath) || ".md";
   const stem = path.basename(filePath, ext);
   const normalizedStem = stripCarryoverSuffix(stripBundleSuffix(stem));
-  const nextName = `${normalizedStem}-carry-${String(Math.max(1, carryoverCount)).padStart(2, "0")}-from-${oldBundleId}${ext}`;
+  const nextName = `carry-${String(Math.max(1, carryoverCount)).padStart(2, "0")}-from-${oldBundleId}-${normalizedStem}${ext}`;
   const target = path.join(dir, nextName);
   if (path.resolve(target) === path.resolve(filePath)) {
     return filePath;
@@ -801,6 +807,52 @@ function assignBundleIdToSelected(runtime, bundleId, bundleSeq) {
   return updated;
 }
 
+function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
+  if (!canPrepareBundle(runtime)) {
+    return false;
+  }
+  const selectedCount = countFiles(runtime.queues.selected);
+  if (selectedCount <= 0) {
+    state.underfilledSelectedCycles = 0;
+    return false;
+  }
+  const minBundle = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1);
+  const target = Math.max(highWatermark, minBundle);
+  const underfilled = selectedCount < minBundle;
+  const forceAfter = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.forceUnderfilledAfterCycles || 1), 10) || 1);
+  const openIntakeCandidates = listIntakeCandidates(runtime).length;
+
+  if (underfilled) {
+    state.underfilledSelectedCycles = Math.max(0, Number.parseInt(String(state.underfilledSelectedCycles || 0), 10) || 0) + 1;
+  } else {
+    state.underfilledSelectedCycles = 0;
+  }
+
+  const allowUnderfilledByCycles = underfilled && state.underfilledSelectedCycles >= forceAfter;
+  const allowUnderfilled = allowUnderfilledByCycles && openIntakeCandidates === 0;
+  if (selectedCount < target && !allowUnderfilled) {
+    if (allowUnderfilledByCycles && openIntakeCandidates > 0) {
+      log(controls, `bundle readiness hold selected=${selectedCount} min=${minBundle}: intake candidates still open (${openIntakeCandidates})`);
+    }
+    log(controls, `bundle readiness wait selected=${selectedCount} target=${target} min=${minBundle} underfilled_cycles=${state.underfilledSelectedCycles}/${forceAfter}`);
+    return false;
+  }
+
+  if (underfilled && allowUnderfilled) {
+    log(controls, `bundle readiness forced underfilled selected=${selectedCount} min=${minBundle} after ${state.underfilledSelectedCycles} cycle(s)`);
+  }
+
+  const nextBundle = reserveNextBundle(runtime);
+  const tagged = assignBundleIdToSelected(runtime, nextBundle.id, nextBundle.seq);
+  const sourceReqIds = listQueueFiles(runtime.queues.selected)
+    .map((filePath) => String(parseFrontMatter(filePath).id || "").trim())
+    .filter(Boolean);
+  updateBundleRegistryReady(runtime, nextBundle.id, sourceReqIds);
+  state.underfilledSelectedCycles = 0;
+  log(controls, `bundle prepared id=${nextBundle.id} selected_tagged=${tagged}`);
+  return true;
+}
+
 function validateProductVision(runtime) {
   const dir = String(runtime.productVisionDir || "").trim();
   const files = Array.isArray(runtime.productVisionFiles) ? runtime.productVisionFiles : [];
@@ -852,23 +904,24 @@ function poRunnerStatePath(runtime) {
 function readPoRunnerState(runtime) {
   const filePath = poRunnerStatePath(runtime);
   if (!fs.existsSync(filePath)) {
-    return { version: 1, cycle: 0, bundleLocked: false, items: {}, pausedCounts: {}, loopCounters: {} };
+    return { version: 1, cycle: 0, bundleLocked: false, underfilledSelectedCycles: 0, items: {}, pausedCounts: {}, loopCounters: {} };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || typeof parsed !== "object") {
-      return { version: 1, cycle: 0, bundleLocked: false, items: {}, pausedCounts: {}, loopCounters: {} };
+      return { version: 1, cycle: 0, bundleLocked: false, underfilledSelectedCycles: 0, items: {}, pausedCounts: {}, loopCounters: {} };
     }
     return {
       version: 1,
       cycle: Number.isInteger(parsed.cycle) ? parsed.cycle : 0,
       bundleLocked: parsed.bundleLocked === true,
+      underfilledSelectedCycles: Number.isInteger(parsed.underfilledSelectedCycles) ? Math.max(0, parsed.underfilledSelectedCycles) : 0,
       items: parsed.items && typeof parsed.items === "object" ? parsed.items : {},
       pausedCounts: parsed.pausedCounts && typeof parsed.pausedCounts === "object" ? parsed.pausedCounts : {},
       loopCounters: parsed.loopCounters && typeof parsed.loopCounters === "object" ? parsed.loopCounters : {},
     };
   } catch {
-    return { version: 1, cycle: 0, bundleLocked: false, items: {}, pausedCounts: {}, loopCounters: {} };
+    return { version: 1, cycle: 0, bundleLocked: false, underfilledSelectedCycles: 0, items: {}, pausedCounts: {}, loopCounters: {} };
   }
 }
 
@@ -1962,10 +2015,14 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
   let progressed = false;
   let processed = 0;
   const perCycleCap = Math.max(1, runtime.po.intakeMaxPerCycle || 3);
+  const targetSelected = Math.max(
+    highWatermark,
+    Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1)
+  );
   while (
     !controls.stopRequested
     && !controls.drainRequested
-    && countFiles(runtime.queues.selected) < highWatermark
+    && countFiles(runtime.queues.selected) < targetSelected
     && processed < perCycleCap
   ) {
     const candidates = listIntakeCandidatesFair(runtime, perCycleCap - processed);
@@ -1978,7 +2035,7 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
       if (
         controls.stopRequested
         || controls.drainRequested
-        || countFiles(runtime.queues.selected) >= highWatermark
+        || countFiles(runtime.queues.selected) >= targetSelected
         || processed >= perCycleCap
       ) {
         break;
@@ -2027,6 +2084,7 @@ function releasedSignature(runtime) {
 
 async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, once) {
   const state = readPoRunnerState(runtime);
+  state.underfilledSelectedCycles = 0;
   while (!controls.stopRequested) {
     if (controls.drainRequested) {
       log(controls, "graceful stop: no new intake work will be started");
@@ -2047,21 +2105,10 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
 
-    if (shouldFillSelected(runtime, highWatermark, state, controls)) {
-      const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
-      if (filled && countFiles(runtime.queues.selected) > 0) {
-        if (!canPrepareBundle(runtime)) {
-          log(controls, "bundle prep skipped: ready bundle already exists");
-        } else {
-          const nextBundle = reserveNextBundle(runtime);
-          const tagged = assignBundleIdToSelected(runtime, nextBundle.id, nextBundle.seq);
-          const sourceReqIds = listQueueFiles(runtime.queues.selected)
-            .map((filePath) => String(parseFrontMatter(filePath).id || "").trim())
-            .filter(Boolean);
-          updateBundleRegistryReady(runtime, nextBundle.id, sourceReqIds);
-          log(controls, `bundle prepared id=${nextBundle.id} selected_tagged=${tagged}`);
-        }
-      }
+    const preparedBeforeFill = tryPrepareReadyBundle(runtime, controls, state, highWatermark);
+    if (!preparedBeforeFill && shouldFillSelected(runtime, highWatermark, state, controls)) {
+      await fillSelected(runtime, highWatermark, controls, state, cycle);
+      tryPrepareReadyBundle(runtime, controls, state, highWatermark);
     } else {
       logWaitCheck(runtime, state, controls, highWatermark);
     }
@@ -2099,6 +2146,7 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
   let visionComplete = false;
   let lastReleased = releasedSignature(runtime);
   const state = readPoRunnerState(runtime);
+  state.underfilledSelectedCycles = 0;
 
   while (!controls.stopRequested) {
     if (controls.drainRequested) {
@@ -2212,21 +2260,10 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
       );
     }
 
-    if (shouldFillSelected(runtime, highWatermark, state, controls)) {
-      const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
-      if (filled && countFiles(runtime.queues.selected) > 0) {
-        if (!canPrepareBundle(runtime)) {
-          log(controls, "bundle prep skipped: ready bundle already exists");
-        } else {
-          const nextBundle = reserveNextBundle(runtime);
-          const tagged = assignBundleIdToSelected(runtime, nextBundle.id, nextBundle.seq);
-          const sourceReqIds = listQueueFiles(runtime.queues.selected)
-            .map((filePath) => String(parseFrontMatter(filePath).id || "").trim())
-            .filter(Boolean);
-          updateBundleRegistryReady(runtime, nextBundle.id, sourceReqIds);
-          log(controls, `bundle prepared id=${nextBundle.id} selected_tagged=${tagged}`);
-        }
-      }
+    const preparedBeforeFill = tryPrepareReadyBundle(runtime, controls, state, highWatermark);
+    if (!preparedBeforeFill && shouldFillSelected(runtime, highWatermark, state, controls)) {
+      await fillSelected(runtime, highWatermark, controls, state, cycle);
+      tryPrepareReadyBundle(runtime, controls, state, highWatermark);
     } else {
       logWaitCheck(runtime, state, controls, highWatermark);
     }

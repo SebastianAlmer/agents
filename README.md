@@ -67,6 +67,7 @@ Modes:
 Bundle behavior:
 - Bundles start from `selected`.
 - PO prepares exactly one ready bundle ahead; delivery activates that bundle via `.runtime/bundles/registry.json` (`ready_bundle_id` -> `active_bundle_id`).
+- PO marks a bundle as `ready` only after the selected set reaches `loops.bundle_min_size` (or underfilled fallback via `loops.force_underfilled_after_cycles`).
 - PO writes bundle id into front matter (`bundle_id`) and normalizes selected filenames to `...-B0001.md`.
 - Carryovers from failed/clarification exits are marked with `...-carry-01-from-B0001.md` plus `carryover_*` metadata.
 - Before ARCH/DEV work starts, delivery runner creates/switches to a per-bundle local workspace branch derived from `[bundle_flow].branch_prefix` (default `rb/<bundle>-<short>`).
