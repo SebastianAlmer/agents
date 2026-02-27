@@ -534,6 +534,10 @@ function findVisionOpenDecisionHint(runtime) {
 
 function waitReason(runtime, state, highWatermark, mode) {
   const selected = countFiles(runtime.queues.selected);
+  const minBundle = Math.max(
+    1,
+    Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1
+  );
   const arch = countFiles(runtime.queues.arch);
   const dev = countFiles(runtime.queues.dev);
   const planningBusy = arch > 0 || dev > 0;
@@ -820,7 +824,6 @@ function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
   const target = Math.max(highWatermark, minBundle);
   const underfilled = selectedCount < minBundle;
   const forceAfter = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.forceUnderfilledAfterCycles || 1), 10) || 1);
-  const openIntakeCandidates = listIntakeCandidates(runtime).length;
 
   if (underfilled) {
     state.underfilledSelectedCycles = Math.max(0, Number.parseInt(String(state.underfilledSelectedCycles || 0), 10) || 0) + 1;
@@ -828,12 +831,8 @@ function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
     state.underfilledSelectedCycles = 0;
   }
 
-  const allowUnderfilledByCycles = underfilled && state.underfilledSelectedCycles >= forceAfter;
-  const allowUnderfilled = allowUnderfilledByCycles && openIntakeCandidates === 0;
+  const allowUnderfilled = underfilled && state.underfilledSelectedCycles >= forceAfter;
   if (selectedCount < target && !allowUnderfilled) {
-    if (allowUnderfilledByCycles && openIntakeCandidates > 0) {
-      log(controls, `bundle readiness hold selected=${selectedCount} min=${minBundle}: intake candidates still open (${openIntakeCandidates})`);
-    }
     log(controls, `bundle readiness wait selected=${selectedCount} target=${target} min=${minBundle} underfilled_cycles=${state.underfilledSelectedCycles}/${forceAfter}`);
     return false;
   }
@@ -1665,6 +1664,69 @@ function promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark
   return promoted;
 }
 
+function topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, highWatermark) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  if (String(registry.ready_bundle_id || "").trim()) {
+    return 0;
+  }
+  if (planningQueuesBusy(runtime)) {
+    return 0;
+  }
+
+  const minBundle = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1);
+  const target = Math.max(highWatermark, minBundle);
+  let selectedCount = countFiles(runtime.queues.selected);
+  if (selectedCount <= 0 || selectedCount >= target) {
+    return 0;
+  }
+
+  const backlogFiles = listQueueFiles(runtime.queues.backlog)
+    .sort((a, b) => {
+      const scoreDelta = parseBusinessScoreFromRequirement(b) - parseBusinessScoreFromRequirement(a);
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+      return path.basename(a).localeCompare(path.basename(b));
+    });
+
+  let movedCount = 0;
+  for (const candidate of backlogFiles) {
+    if (controls.stopRequested || controls.drainRequested) {
+      break;
+    }
+    if (selectedCount >= target) {
+      break;
+    }
+    const moved = moveWithFallback(
+      runtime,
+      candidate,
+      "selected",
+      "selected",
+      [
+        "PO runner bundle top-up",
+        `- selected below bundle target (${selectedCount}/${target})`,
+        "- moved backlog item to selected to complete bundle and unblock delivery",
+      ]
+    );
+    if (!moved) {
+      continue;
+    }
+    updatePoStateAfterDirectMove({
+      runtime,
+      state,
+      cycle,
+      sourcePath: candidate,
+      sourceQueue: "backlog",
+      targetQueue: "selected",
+    });
+    movedCount += 1;
+    selectedCount += 1;
+    log(controls, `bundle top-up promoted ${path.basename(candidate)} backlog->selected (${selectedCount}/${target})`);
+  }
+
+  return movedCount;
+}
+
 function enforceBlockedQueuePolicy(runtime, controls) {
   const blockedFiles = listQueueFiles(runtime.queues.blocked);
   let movedCount = 0;
@@ -2104,6 +2166,10 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
     enforceBlockedQueuePolicy(runtime, controls);
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
+    const toppedUp = topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, highWatermark);
+    if (toppedUp > 0) {
+      log(controls, `bundle top-up moved ${toppedUp} item(s) backlog->selected`);
+    }
 
     const preparedBeforeFill = tryPrepareReadyBundle(runtime, controls, state, highWatermark);
     if (!preparedBeforeFill && shouldFillSelected(runtime, highWatermark, state, controls)) {
@@ -2258,6 +2324,11 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
         controls,
         `vision cycle reason=${planningFillNeeded ? "planning-fill" : "released-reconcile"} planning_cycles=${planningCycles} changed=${changed} stable=${stableCycles} new_req_total=${newReqTotal}`
       );
+    }
+
+    const toppedUp = topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, highWatermark);
+    if (toppedUp > 0) {
+      log(controls, `bundle top-up moved ${toppedUp} item(s) backlog->selected`);
     }
 
     const preparedBeforeFill = tryPrepareReadyBundle(runtime, controls, state, highWatermark);

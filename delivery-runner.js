@@ -2419,8 +2419,8 @@ function buildWorkspaceBranchName(runtime, bundleKey) {
   const bundleCfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
   const branchPrefix = String(bundleCfg.branchPrefix || releaseCfg.branchPrefix || "rb").trim() || "rb";
   const bundleLabel = sanitizeRefPart(bundleKey || "bundle", "bundle");
-  const short = new Date().toISOString().replace(/[^0-9]/g, "").slice(8, 12);
-  return `${branchPrefix}/${bundleLabel}-${short}`;
+  const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(2, 12); // YYMMDDHHMM
+  return `${branchPrefix}/${bundleLabel}-${stamp}`;
 }
 
 function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {}) {
@@ -4931,6 +4931,15 @@ async function main() {
         );
         await sleepWithStopCheck(DELIVERY_IDLE_WAIT_MS, controls);
       } else {
+        const seconds = Math.max(1, runtime.loops.deliveryPollSeconds);
+        const selected = countFiles(runtime.queues.selected);
+        const arch = countFiles(runtime.queues.arch);
+        const dev = countFiles(runtime.queues.dev);
+        const qa = countFiles(runtime.queues.qa);
+        const deploy = countFiles(runtime.queues.deploy);
+        process.stdout.write(
+          `${timestampMinute()} DELIVERY: waiting ${seconds}s - no bundle progress (selected=${selected} arch=${arch} dev=${dev} qa=${qa} deploy=${deploy})\n`
+        );
         await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
       }
     }
