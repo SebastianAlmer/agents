@@ -2609,15 +2609,31 @@ function clearBundleWorkspaceState(runtime) {
   writeBundleWorkspaceState(runtime, { bundleKey: "", branch: "" });
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isBundleIdKey(runtime, value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return false;
+  }
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const prefix = String(cfg.idPrefix || "B").trim() || "B";
+  const pattern = new RegExp(`^${escapeRegExp(prefix)}\\d+$`, "i");
+  return pattern.test(raw);
+}
+
 function activeBundleKey(runtime) {
   const registryActive = activeBundleId(runtime);
-  if (registryActive) {
+  if (registryActive && isBundleIdKey(runtime, registryActive)) {
     return registryActive;
   }
   const orderedQueues = ["arch", "dev", "qa", "ux", "sec", "deploy"];
   for (const queueName of orderedQueues) {
-    if (countFiles(runtime.queues[queueName]) > 0) {
-      return queueBundleKey(runtime, queueName);
+    const ids = queueBundleIds(runtime, queueName).filter((id) => isBundleIdKey(runtime, id));
+    if (ids.length === 1) {
+      return ids[0];
     }
   }
   return "";
@@ -2637,6 +2653,94 @@ function buildWorkspaceBranchName(runtime, bundleKey) {
   return `${branchPrefix}/${bundleLabel}-${stamp}`;
 }
 
+function workspaceBranchPrefix(runtime) {
+  const releaseCfg = runtime && runtime.releaseAutomation ? runtime.releaseAutomation : {};
+  const bundleCfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  return String(bundleCfg.branchPrefix || releaseCfg.branchPrefix || "rb").trim() || "rb";
+}
+
+function listLocalWorkspaceBranches(runtime) {
+  const prefix = workspaceBranchPrefix(runtime);
+  const result = runGit(runtime.repoRoot, [
+    "for-each-ref",
+    "--format=%(refname:short)",
+    `refs/heads/${prefix}`,
+  ]);
+  if (!result.ok) {
+    return [];
+  }
+  return String(result.output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function branchDivergenceAgainstBase(repoRoot, baseBranch, branchName) {
+  const result = runGit(repoRoot, ["rev-list", "--left-right", "--count", `${baseBranch}...${branchName}`]);
+  if (!result.ok) {
+    return { ok: false, baseOnly: 0, branchOnly: 0 };
+  }
+  const parts = String(result.output || "")
+    .trim()
+    .split(/\s+/)
+    .map((value) => Number.parseInt(value, 10));
+  const baseOnly = Number.isFinite(parts[0]) ? parts[0] : 0;
+  const branchOnly = Number.isFinite(parts[1]) ? parts[1] : 0;
+  return { ok: true, baseOnly, branchOnly };
+}
+
+function pruneStaleWorkspaceBranches(runtime, controls, reason = "idle") {
+  const agentsRootGit = gitRoot(runtime.agentsRoot);
+  const targetRootGit = gitRoot(runtime.repoRoot);
+  if (!targetRootGit || (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit)) {
+    return;
+  }
+
+  const releaseCfg = runtime.releaseAutomation || {};
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (!currentBranch) {
+    return;
+  }
+  const state = readBundleWorkspaceState(runtime);
+  const rememberedBranch = String(state.branch || "").trim();
+  const protectedBranches = new Set([currentBranch]);
+  if (rememberedBranch) {
+    protectedBranches.add(rememberedBranch);
+  }
+
+  let deleted = 0;
+  let keptWithCommits = 0;
+  for (const branchName of listLocalWorkspaceBranches(runtime)) {
+    if (protectedBranches.has(branchName)) {
+      continue;
+    }
+    const divergence = branchDivergenceAgainstBase(runtime.repoRoot, baseBranch, branchName);
+    if (!divergence.ok) {
+      continue;
+    }
+    if (divergence.branchOnly > 0) {
+      keptWithCommits += 1;
+      continue;
+    }
+    const dropped = runGit(runtime.repoRoot, ["branch", "-D", branchName]);
+    if (dropped.ok) {
+      deleted += 1;
+    }
+  }
+
+  if (deleted > 0) {
+    log(controls, `BUNDLE BRANCH: pruned ${deleted} stale local workspace branch(es) reason=${reason}`);
+  }
+  if (keptWithCommits > 0) {
+    log(
+      controls,
+      `BUNDLE BRANCH: kept ${keptWithCommits} local workspace branch(es) with unique commits vs ${baseBranch}`
+    );
+  }
+}
+
 function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {}) {
   const outcome = {
     ok: false,
@@ -2646,6 +2750,11 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
   const normalizedBundleKey = String(bundleKey || "").trim();
   if (!normalizedBundleKey) {
     outcome.ok = true;
+    return outcome;
+  }
+  if (!isBundleIdKey(runtime, normalizedBundleKey)) {
+    outcome.ok = true;
+    log(controls, `BUNDLE BRANCH: skip workspace branch for non-bundle key '${normalizedBundleKey}'`);
     return outcome;
   }
 
@@ -5019,6 +5128,7 @@ async function main() {
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
   resetGlobalPauseOnStartup(runtime, controls);
+  pruneStaleWorkspaceBranches(runtime, controls, "startup");
 
   log(controls, `mode=${mode}`);
   log(controls, `bundle min=${minBundle} max=${maxBundle}`);
@@ -5127,6 +5237,7 @@ async function main() {
 
     if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
       clearBundleWorkspaceState(runtime);
+      pruneStaleWorkspaceBranches(runtime, controls, "idle");
     }
 
     if (args.once) {

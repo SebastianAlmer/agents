@@ -72,6 +72,8 @@ Bundle behavior:
 - Carryovers from failed/clarification exits are marked with `...-carry-01-from-B0001.md` plus `carryover_*` metadata.
 - Before ARCH/DEV work starts, delivery runner creates/switches to a per-bundle local workspace branch derived from `[bundle_flow].branch_prefix` (default `rb/<bundle>-<short>`).
 - Safety guard: `base_branch` (for example `dev`) is never accepted as an active bundle workspace branch.
+- Workspace branches are created only for valid bundle IDs (for example `B0019`); non-bundle queue keys never create `*-no-bundle` branches.
+- Delivery automatically prunes stale local workspace branches that have no unique commits vs `base_branch` (keeps current/active branch and any branch with unique commits).
 - Priority uses `business_score` in requirement front matter.
 - Default bundle range: 5-20 (configurable).
 - Agents run once per bundle in downstream phase.
