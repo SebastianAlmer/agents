@@ -1745,22 +1745,14 @@ function topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, high
 }
 
 function enforceBlockedQueuePolicy(runtime, controls) {
-  const blockedFiles = listQueueFiles(runtime.queues.blocked);
-  let movedCount = 0;
-  for (const sourcePath of blockedFiles) {
-    const filePath = markRequirementAsCarryover(sourcePath, controls, "blocked-to-next-bundle");
-    if (moveWithFallback(runtime, filePath, "refinement", "refinement", [
-      "PO runner blocked policy enforcement",
-      "- blocked items are treated as technical freeze, not terminal",
-      "- rerouted to refinement for PO intake triage",
-    ])) {
-      movedCount += 1;
-    }
+  const blockedCount = countFiles(runtime.queues.blocked);
+  if (blockedCount > 0) {
+    log(
+      controls,
+      `blocked policy: ${blockedCount} item(s) pending; PO leaves blocked untouched (delivery handles auto-recovery/escalation)`
+    );
   }
-  if (movedCount > 0) {
-    log(controls, `blocked policy: moved ${movedCount} item(s) blocked->refinement`);
-  }
-  return movedCount > 0;
+  return false;
 }
 
 async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", state = null, cycle = 0) {

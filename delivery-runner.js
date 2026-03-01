@@ -740,7 +740,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const files = scopedQueueFiles(runtime, sourceQueue);
   if (files.length === 0) {
     return {
-      route: "human-decision-needed",
+      route: "dev",
       reasonCode: "no-source-files",
       summary: "Visual regression failure has no source requirements in scope.",
       recommendation: "Requeue affected requirements and decide baseline action explicitly.",
@@ -765,7 +765,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const invalid = details.filter((item) => item.intent === null || !item.decision);
   if (invalid.length > 0) {
     return {
-      route: "human-decision-needed",
+      route: "dev",
       reasonCode: "missing-frontmatter",
       summary: "Visual regression requires explicit visual_change_intent and baseline_decision fields.",
       recommendation: "Set frontmatter fields per requirement, then rerun QA.",
@@ -778,7 +778,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const intents = new Set(details.map((item) => item.intent));
   if (intents.size > 1) {
     return {
-      route: "human-decision-needed",
+      route: "dev",
       reasonCode: "mixed-intent",
       summary: "Bundle contains mixed visual_change_intent values.",
       recommendation: "Align all requirements in the active bundle to one visual intent.",
@@ -793,7 +793,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
     const inconsistent = details.filter((item) => item.decision !== "none");
     if (inconsistent.length > 0) {
       return {
-        route: "human-decision-needed",
+        route: "dev",
         reasonCode: "inconsistent-regression-policy",
         summary: "visual_change_intent=false conflicts with non-none baseline_decision.",
         recommendation: "Set baseline_decision=none for regression requirements.",
@@ -816,7 +816,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const decisions = new Set(details.map((item) => item.decision));
   if (decisions.has("none")) {
     return {
-      route: "human-decision-needed",
+      route: "dev",
       reasonCode: "intent-without-decision",
       summary: "Intentional visual change requires baseline_decision update_baseline or revert_ui.",
       recommendation: "Set baseline_decision consistently across the bundle.",
@@ -828,7 +828,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
 
   if (decisions.size > 1) {
     return {
-      route: "human-decision-needed",
+      route: "dev",
       reasonCode: "mixed-baseline-decision",
       summary: "Bundle contains conflicting baseline_decision values.",
       recommendation: "Choose one baseline_decision for the active bundle.",
@@ -863,7 +863,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   }
 
   return {
-    route: "human-decision-needed",
+    route: "dev",
     reasonCode: "unknown-decision",
     summary: "Unknown baseline_decision value in active bundle.",
     recommendation: "Normalize baseline_decision to update_baseline, revert_ui, or none.",
@@ -1552,25 +1552,162 @@ function enforceClarifyQueuePolicy(runtime, controls) {
   return rerouted > 0;
 }
 
+function blockedRecoveryMaxAttempts(runtime) {
+  return Math.max(
+    2,
+    Number.parseInt(
+      String((runtime.loopPolicy && runtime.loopPolicy.maxTotalAttemptsPerReq) || 5),
+      10
+    ) || 5
+  );
+}
+
+function blockedRecoveryItemKey(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return "";
+  }
+  const fm = parseFrontMatter(filePath);
+  const id = String(fm.id || "").trim();
+  if (id) {
+    return id;
+  }
+  return path.basename(filePath);
+}
+
+function applyBlockedHumanDecisionSection(filePath, details = {}) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const reasonCode = String(details.reasonCode || "blocked-recovery-escalation").trim();
+  const reasonText = String(details.reasonText || "Blocked auto-recovery reached escalation condition.").trim();
+  const attempts = Math.max(0, Number.parseInt(String(details.attempts || 0), 10) || 0);
+  const maxAttempts = Math.max(1, Number.parseInt(String(details.maxAttempts || 1), 10) || 1);
+  const itemKey = String(details.itemKey || "").trim() || path.basename(filePath);
+  upsertMarkdownSection(filePath, "Human Decision", [
+    "- Question: How should this requirement proceed after blocked auto-recovery escalation?",
+    "- Options: provide clarifying business decision | split requirement | move to wont-do",
+    `- Why now: ${reasonText}`,
+    `- Escalation code: ${reasonCode}`,
+    `- Recovery attempts: ${attempts}/${maxAttempts}`,
+    `- Item key: ${itemKey}`,
+  ]);
+}
+
 function enforceBlockedQueuePolicy(runtime, controls) {
   const blockedFiles = listQueueFiles(runtime.queues.blocked);
-  let rerouted = 0;
+  if (blockedFiles.length === 0) {
+    return false;
+  }
+
+  const maxAttempts = blockedRecoveryMaxAttempts(runtime);
+  let recovered = 0;
+  let clarified = 0;
+  let escalated = 0;
+  let routeFailed = 0;
+
   for (const file of blockedFiles) {
-    if (moveToQueue(runtime, file, "refinement", "refinement", [
-      "Delivery runner: blocked queue policy enforcement",
-      "- blocked is treated as technical freeze, not a terminal queue",
-      "- rerouted to refinement for PO triage and re-planning",
-    ])) {
-      rerouted += 1;
+    const itemKey = blockedRecoveryItemKey(file) || path.basename(file);
+    const attempts = registerLoopFailure(runtime, "blocked-recovery", itemKey, "recover");
+    const businessUnclear = hasBusinessClarificationEvidence(file);
+    if (businessUnclear) {
+      const movedToClarify = moveToQueue(runtime, file, "toClarify", "to-clarify", [
+        "Delivery runner: blocked recovery clarification handoff",
+        "- explicit business ambiguity detected in requirement content",
+        "- route: to-clarify (PO intake owner)",
+        "- technical recovery paused until PO clarification is provided",
+      ]);
+      if (movedToClarify) {
+        appendRunnerMetric(runtime, {
+          stage: "blocked",
+          queue: "blocked",
+          item_key: itemKey,
+          result: "clarification-routed",
+          routed_to: "to-clarify",
+          reason: "blocked-business-ambiguity",
+        });
+        resetLoopFailuresForItem(runtime, "blocked-recovery", itemKey);
+        clarified += 1;
+        continue;
+      }
+      routeFailed += 1;
+      appendRunnerMetric(runtime, {
+        stage: "blocked",
+        queue: "blocked",
+        item_key: itemKey,
+        result: "route-failed",
+        reason: "blocked-business-ambiguity",
+      });
+      continue;
     }
+
+    const exhausted = attempts >= maxAttempts;
+    if (exhausted && runtime.queues.humanDecisionNeeded) {
+      const reasonCode = "blocked-auto-recovery-exhausted";
+      const reasonText = "Technical auto-recovery retries were exhausted while the requirement repeatedly returned to blocked.";
+      applyBlockedHumanDecisionSection(file, {
+        reasonCode,
+        reasonText,
+        attempts,
+        maxAttempts,
+        itemKey,
+      });
+      const movedToDecision = moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
+        "Delivery runner: blocked recovery escalation",
+        `- reason: ${reasonCode}`,
+        `- detail: ${reasonText}`,
+        `- attempts: ${attempts}/${maxAttempts}`,
+        "- routed to human-decision-needed to prevent endless technical retry loops",
+      ]);
+      if (movedToDecision) {
+        appendRunnerMetric(runtime, {
+          stage: "blocked",
+          queue: "blocked",
+          item_key: itemKey,
+          result: "escalated",
+          escalated_to: "human-decision-needed",
+          reason: reasonCode,
+        });
+        resetLoopFailuresForItem(runtime, "blocked-recovery", itemKey);
+        escalated += 1;
+        continue;
+      }
+    }
+
+    const movedToDev = moveToQueue(runtime, file, "dev", "dev", [
+      "Delivery runner: blocked auto-recovery",
+      "- blocked is treated as technical work queue for autonomous repair",
+      `- recovery attempt: ${attempts}/${maxAttempts}`,
+      "- route: dev (then normal downstream QA/UX/SEC/DEPLOY flow)",
+      "- escalation target: human-decision-needed after retry exhaustion",
+      "- if business ambiguity is detected, route switches to to-clarify (PO intake owner)",
+    ]);
+    if (movedToDev) {
+      appendRunnerMetric(runtime, {
+        stage: "blocked",
+        queue: "blocked",
+        item_key: itemKey,
+        result: "recovery-routed",
+        routed_to: "dev",
+        reason: `attempt ${attempts}/${maxAttempts}`,
+      });
+      recovered += 1;
+      continue;
+    }
+
+    routeFailed += 1;
+    appendRunnerMetric(runtime, {
+      stage: "blocked",
+      queue: "blocked",
+      item_key: itemKey,
+      result: "route-failed",
+      reason: `attempt ${attempts}/${maxAttempts}`,
+    });
   }
-  if (rerouted > 0) {
-    log(
-      controls,
-      `blocked policy: moved ${rerouted} item(s) from blocked to refinement`
-    );
+
+  if (recovered > 0 || clarified > 0 || escalated > 0 || routeFailed > 0) {
+    log(controls, `blocked policy: recovered=${recovered} clarified=${clarified} escalated=${escalated} route_failed=${routeFailed}`);
   }
-  return rerouted > 0;
+  return recovered > 0 || clarified > 0 || escalated > 0;
 }
 
 function readPoVisionDecision(runtime) {

@@ -84,8 +84,10 @@ Bundle behavior:
 - If max fix cycles are exceeded, the bundle is routed to `blocked` to avoid endless loops.
 - Repeated pauses/timeouts/identical failures are tracked; loop-policy thresholds trigger early escalation to avoid long retry chains.
 - If QA `mandatory_checks` fail and `[qa].auto_fix_on_mandatory_fail=true`, the runner first attempts automatic technical repair (optional shell fix commands and/or Codex repair) before strict-gate escalation.
-- Technical items in `blocked` are auto-rerouted to `refinement` by runners for PO re-triage (instead of staying stuck).
-- `to-clarify` and `blocked` are handled as next-bundle inputs; unresolved items are not kept inside the active bundle loop.
+- `blocked` is treated as an autonomous technical recovery queue: delivery reroutes technical items to `dev` for repair/retest loops.
+- If `blocked` contains explicit business ambiguity, delivery reroutes to `to-clarify` (PO intake owner) instead of escalating directly.
+- `blocked` escalates to `human-decision-needed` only when technical retries are exhausted; escalation notes include a clear `why`.
+- PO does not reroute `blocked` directly; `to-clarify` stays PO-owned, while technical `blocked` recovery stays delivery-owned.
 - With `[release_automation].allow_release_with_human_decision_needed=true`, pending items in `human-decision-needed` do not block release/finalization flow.
 - Agents support local project memory under `.runtime/memory` (shared + per-agent) and can auto-update it after runs.
 - `P0/P1` findings are auto-routed to `selected` as hotfix requirements.
@@ -95,7 +97,7 @@ Bundle behavior:
 - Visual screenshot diffs in QA mandatory checks use requirement frontmatter policy:
   - `visual_change_intent=false` + `baseline_decision=none` -> route to `dev` as regression fix
   - `visual_change_intent=true` + `baseline_decision=update_baseline|revert_ui` -> route to `dev` with explicit action
-  - missing/conflicting fields -> route to `human-decision-needed`
+  - missing/conflicting fields -> route to `dev` for local normalization and fix (no human hard-block)
 
 Release automation flow (`[release_automation].enabled=true`):
 - Runs after successful deploy bundle and requires `[deploy].mode=commit_push`.
@@ -237,6 +239,7 @@ Intake recommendation:
 - ARCH/DEV/QA/SEC/UX/DEPLOY route unresolved items to `to-clarify`.
 - PO intake ownership is `to-clarify`, `human-input`, `backlog`, `refinement`.
 - PO resolves `to-clarify` when possible and escalates only hard unresolved conflicts to `human-decision-needed`.
+- Delivery owns `blocked`: technical items auto-recover in `dev`; business-ambiguous items route to `to-clarify` for PO; only exhausted technical retries escalate to `human-decision-needed`.
 - Items in `human-decision-needed` are human-owned and must not be moved by autonomous runners.
 - After manual evaluation, move items to `human-input`; PO ingests `human-input` in the next iteration.
 
