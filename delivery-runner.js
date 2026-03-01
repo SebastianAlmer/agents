@@ -10,6 +10,7 @@ const {
   countFiles,
   listQueueFiles,
   moveRequirementFile,
+  upsertMarkdownSection,
   appendQueueSection,
   runNodeScript,
   chooseBundleByBusinessScore,
@@ -671,6 +672,280 @@ function moveAll(runtime, fromQueue, toQueue, status, note) {
     }
   }
   return moved;
+}
+
+function scopedQueueFiles(runtime, queueName) {
+  const dir = runtime && runtime.queues ? runtime.queues[queueName] : "";
+  if (!dir) {
+    return [];
+  }
+  let files = listQueueFiles(dir);
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const bundleScoped = Boolean(cfg.enabled) && !Boolean(cfg.allowCrossBundleMoves);
+  if (bundleScoped) {
+    const activeId = activeBundleId(runtime);
+    if (activeId) {
+      files = files.filter((filePath) => String(fileBundleId(filePath) || "").trim() === activeId);
+    }
+  }
+  return files;
+}
+
+function parseFrontMatterBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+function normalizeBaselineDecision(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (["update_baseline", "update-baseline", "update", "baseline-update"].includes(normalized)) {
+    return "update_baseline";
+  }
+  if (["revert_ui", "revert-ui", "revert", "restore"].includes(normalized)) {
+    return "revert_ui";
+  }
+  if (["none", "n/a", "na", "not_applicable", "not-applicable"].includes(normalized)) {
+    return "none";
+  }
+  return "";
+}
+
+function isVisualSnapshotFailure(checkResult) {
+  const command = String((checkResult && checkResult.command) || "").toLowerCase();
+  const output = String((checkResult && checkResult.output) || "").toLowerCase();
+  if (!command) {
+    return false;
+  }
+  const commandLooksVisual = /(playwright|e2e:ui:gates|visual-regression|tohavescreenshot|screenshot)/i.test(command);
+  if (!commandLooksVisual) {
+    return false;
+  }
+  const outputLooksVisual = /(tohavescreenshot|screenshot comparison failed|pixel-?diff|snapshot.*(mismatch|different|failed)|visual regression)/i.test(output);
+  return outputLooksVisual;
+}
+
+function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
+  const files = scopedQueueFiles(runtime, sourceQueue);
+  if (files.length === 0) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "no-source-files",
+      summary: "Visual regression failure has no source requirements in scope.",
+      recommendation: "Requeue affected requirements and decide baseline action explicitly.",
+      question: "Should this visual change be accepted by updating baselines, or should UI be reverted?",
+      files: [],
+      details: [],
+    };
+  }
+
+  const details = files.map((filePath) => {
+    const fm = parseFrontMatter(filePath);
+    const intent = parseFrontMatterBoolean(fm.visual_change_intent);
+    const decision = normalizeBaselineDecision(fm.baseline_decision);
+    return {
+      filePath,
+      fileName: path.basename(filePath),
+      intent,
+      decision,
+    };
+  });
+
+  const invalid = details.filter((item) => item.intent === null || !item.decision);
+  if (invalid.length > 0) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "missing-frontmatter",
+      summary: "Visual regression requires explicit visual_change_intent and baseline_decision fields.",
+      recommendation: "Set frontmatter fields per requirement, then rerun QA.",
+      question: "Is this visual diff intended and should baselines be updated, or should UI be reverted?",
+      files,
+      details,
+    };
+  }
+
+  const intents = new Set(details.map((item) => item.intent));
+  if (intents.size > 1) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "mixed-intent",
+      summary: "Bundle contains mixed visual_change_intent values.",
+      recommendation: "Align all requirements in the active bundle to one visual intent.",
+      question: "Should this bundle be treated as intentional visual change, or as regression fix?",
+      files,
+      details,
+    };
+  }
+
+  const onlyIntent = details[0].intent;
+  if (!onlyIntent) {
+    const inconsistent = details.filter((item) => item.decision !== "none");
+    if (inconsistent.length > 0) {
+      return {
+        route: "human-decision-needed",
+        reasonCode: "inconsistent-regression-policy",
+        summary: "visual_change_intent=false conflicts with non-none baseline_decision.",
+        recommendation: "Set baseline_decision=none for regression requirements.",
+        question: "Should this be treated as regression fix without baseline update?",
+        files,
+        details,
+      };
+    }
+    return {
+      route: "dev",
+      reasonCode: "regression-fix",
+      summary: "Visual diff classified as unintended regression.",
+      recommendation: "Fix UI implementation until existing baseline passes.",
+      question: "",
+      files,
+      details,
+    };
+  }
+
+  const decisions = new Set(details.map((item) => item.decision));
+  if (decisions.has("none")) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "intent-without-decision",
+      summary: "Intentional visual change requires baseline_decision update_baseline or revert_ui.",
+      recommendation: "Set baseline_decision consistently across the bundle.",
+      question: "Should intentional visual changes update baselines or be reverted?",
+      files,
+      details,
+    };
+  }
+
+  if (decisions.size > 1) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "mixed-baseline-decision",
+      summary: "Bundle contains conflicting baseline_decision values.",
+      recommendation: "Choose one baseline_decision for the active bundle.",
+      question: "Should this bundle update baselines or revert UI?",
+      files,
+      details,
+    };
+  }
+
+  if (decisions.has("update_baseline")) {
+    return {
+      route: "dev",
+      reasonCode: "update-baseline",
+      summary: "Intentional visual change approved for baseline update.",
+      recommendation: "Update targeted snapshots and rerun UI gates.",
+      question: "",
+      files,
+      details,
+    };
+  }
+
+  if (decisions.has("revert_ui")) {
+    return {
+      route: "dev",
+      reasonCode: "revert-ui",
+      summary: "Intentional visual diff must be removed by reverting UI changes.",
+      recommendation: "Revert UI to baseline-compliant state and rerun UI gates.",
+      question: "",
+      files,
+      details,
+    };
+  }
+
+  return {
+    route: "human-decision-needed",
+    reasonCode: "unknown-decision",
+    summary: "Unknown baseline_decision value in active bundle.",
+    recommendation: "Normalize baseline_decision to update_baseline, revert_ui, or none.",
+    question: "Which baseline decision should apply to this visual diff?",
+    files,
+    details,
+  };
+}
+
+function applyVisualBaselineHumanDecisionSection(filePath, policy, checkResult) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const command = String((checkResult && checkResult.command) || "").trim() || "unknown command";
+  const summary = String((policy && policy.summary) || "").trim() || "Visual baseline decision required.";
+  const recommendation = String((policy && policy.recommendation) || "").trim() || "Choose baseline action and rerun QA.";
+  const question = String((policy && policy.question) || "").trim()
+    || "Should this visual diff be accepted via baseline update, or should UI be reverted?";
+  upsertMarkdownSection(filePath, "Human Decision", [
+    `- Question: ${question}`,
+    "- Options: update_baseline | revert_ui",
+    `- Recommendation: ${recommendation}`,
+    `- Evidence: mandatory check failed (${command})`,
+    `- Context: ${summary}`,
+  ]);
+}
+
+function handleVisualBaselineFailureRoute(runtime, controls, options = {}) {
+  const sourceQueue = String(options.sourceQueue || "").trim();
+  const gateName = String(options.gateName || "qa").trim();
+  const gate = options.gate || null;
+  const checkResult = options.checkResult || null;
+  const policy = options.policy || null;
+  if (!policy || !sourceQueue) {
+    return null;
+  }
+
+  const note = `Delivery runner: ${String(gateName || "").toUpperCase()} visual baseline policy -> ${policy.route} (${policy.reasonCode})`;
+  const summary = truncateForQueueNote(String(policy.summary || queueNote("qa gate fail", gate)), 240);
+  const itemKey = queueBundleKey(runtime, sourceQueue);
+
+  if (policy.route === "human-decision-needed") {
+    const files = scopedQueueFiles(runtime, sourceQueue);
+    for (const filePath of files) {
+      applyVisualBaselineHumanDecisionSection(filePath, policy, checkResult);
+    }
+    const moved = moveAll(runtime, sourceQueue, "humanDecisionNeeded", "human-decision-needed", `${note}; ${summary}`);
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: itemKey,
+      result: "fail",
+      reason: `${queueNote("visual baseline decision required", gate)} | ${policy.reasonCode}`,
+      routed_to: "human-decision-needed",
+    });
+    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> human-decision-needed (${moved})`);
+    return {
+      progressed: moved > 0,
+      gate,
+      routedTo: "human-decision-needed",
+    };
+  }
+
+  if (policy.route === "dev") {
+    const moved = moveAll(runtime, sourceQueue, "dev", "dev", `${note}; ${summary}`);
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: itemKey,
+      result: "fail",
+      reason: `${queueNote("visual baseline route dev", gate)} | ${policy.reasonCode}`,
+      routed_to: "dev",
+    });
+    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> dev (${moved})`);
+    return {
+      progressed: moved > 0,
+      gate,
+      routedTo: "dev",
+    };
+  }
+
+  return null;
 }
 
 function removeDuplicateSourceIfTargetExists(sourcePath, targetPath, controls, stageLabel) {
@@ -2064,6 +2339,8 @@ function createQualityFollowUp(runtime, sourceLabel, queueName, findings, summar
     `status: ${status}`,
     `source: ${sourceLabel}-gate`,
     "implementation_scope: fullstack",
+    "visual_change_intent: false",
+    "baseline_decision: none",
     `business_score: ${targetIsSelected ? 100 : 60}`,
     `review_risk: ${targetIsSelected ? "high" : "medium"}`,
     `followup_fingerprint: ${fingerprint}`,
@@ -2180,6 +2457,8 @@ function createManualUatDecision(runtime, items, summary) {
     "status: human-decision-needed",
     "source: uat-manual",
     "implementation_scope: fullstack",
+    "visual_change_intent: false",
+    "baseline_decision: none",
     "review_risk: high",
     "business_score: 100",
     `manual_uat_fingerprint: ${fingerprint}`,
@@ -2473,6 +2752,15 @@ function queueNote(prefix, gate) {
     return prefix;
   }
   return `${prefix} (summary: ${summary.slice(0, 250)})`;
+}
+
+function strictGateLoopReason(gateName, gate) {
+  const summary = truncateForQueueNote(String(gate && gate.summary || "").trim(), 220);
+  if (!summary) {
+    return "strict gate fail";
+  }
+  const stage = String(gateName || "gate").toUpperCase();
+  return `strict gate fail (${stage}): ${summary}`;
 }
 
 function deliveryQualityStatePath(runtime) {
@@ -3233,7 +3521,7 @@ async function runMandatoryChecksWithAutoFix(runtime, controls) {
   };
 }
 
-function createMandatoryCheckFailureGate(checkResult) {
+function createMandatoryCheckFailureGate(checkResult, visualPolicy = null) {
   const command = String((checkResult && checkResult.command) || "unknown command");
   const output = truncateForQueueNote(String((checkResult && checkResult.output) || "no output"), 500);
   const autoFix = checkResult && checkResult.autoFix && typeof checkResult.autoFix === "object"
@@ -3263,6 +3551,9 @@ function createMandatoryCheckFailureGate(checkResult) {
   const traceSummary = traceParts.length > 0
     ? ` | auto-fix: ${truncateForQueueNote(traceParts.join("; "), 380)}`
     : "";
+  const visualSummary = visualPolicy && typeof visualPolicy === "object"
+    ? ` | visual-policy: ${String(visualPolicy.reasonCode || "n/a")} (${String(visualPolicy.route || "n/a")})`
+    : "";
   return {
     status: "fail",
     summary: `mandatory check failed: ${command}${autoFixSuffix}`,
@@ -3271,10 +3562,13 @@ function createMandatoryCheckFailureGate(checkResult) {
       {
         severity: "P1",
         title: "Mandatory QA check failed",
-        details: `${command} :: ${output}${traceSummary}`,
+        details: `${command} :: ${output}${traceSummary}${visualSummary}`,
       },
     ],
     manual_uat: [],
+    failure_type: visualPolicy ? "visual_regression" : "technical_check",
+    baseline_policy_route: visualPolicy ? String(visualPolicy.route || "") : "",
+    baseline_policy_reason: visualPolicy ? String(visualPolicy.reasonCode || "") : "",
   };
 }
 
@@ -3341,9 +3635,24 @@ async function runQaBundle(runtime, controls) {
   if (strictQa && runtime.qa && runtime.qa.runChecksInRunner) {
     const checks = await runMandatoryChecksWithAutoFix(runtime, controls);
     if (!checks.ok) {
-      const gate = createMandatoryCheckFailureGate(checks);
+      const visualPolicy = isVisualSnapshotFailure(checks)
+        ? evaluateVisualBaselinePolicy(runtime, "qa")
+        : null;
+      const gate = createMandatoryCheckFailureGate(checks, visualPolicy);
       if (runtime.deliveryQuality.emitFollowupsOnFail) {
         applyGateOutcomes(runtime, controls, "qa", gate);
+      }
+      if (visualPolicy) {
+        const routed = handleVisualBaselineFailureRoute(runtime, controls, {
+          sourceQueue: "qa",
+          gateName: "qa",
+          gate,
+          checkResult: checks,
+          policy: visualPolicy,
+        });
+        if (routed) {
+          return routed;
+        }
       }
       return handleStrictGateFailure(runtime, controls, {
         gateName: "qa",
@@ -3417,7 +3726,7 @@ async function runQaBundle(runtime, controls) {
       result: "fail",
       reason: queueNote("qa gate fail", gate),
     });
-    if (escalateStageLoop(runtime, "qa", "qa", "strict gate fail", controls)) {
+    if (escalateStageLoop(runtime, "qa", "qa", strictGateLoopReason("qa", gate), controls)) {
       return {
         progressed: true,
         gate,
@@ -3527,7 +3836,7 @@ async function runUatBundle(runtime, controls) {
       result: "fail",
       reason: queueNote("uat gate fail", gate),
     });
-    if (escalateStageLoop(runtime, "uat", "deploy", "strict gate fail", controls)) {
+    if (escalateStageLoop(runtime, "uat", "deploy", strictGateLoopReason("uat", gate), controls)) {
       return {
         progressed: true,
         gate,
@@ -4009,9 +4318,28 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   if (runtime.qa && runtime.qa.runChecksInRunner) {
     const checks = await runMandatoryChecksWithAutoFix(runtime, controls);
     if (!checks.ok) {
-      const gate = createMandatoryCheckFailureGate(checks);
+      const visualPolicy = isVisualSnapshotFailure(checks)
+        ? evaluateVisualBaselinePolicy(runtime, "released")
+        : null;
+      const gate = createMandatoryCheckFailureGate(checks, visualPolicy);
       applyGateByPolicy(runtime, controls, "qa-full", gate, enforceStrictRouting);
       if (enforceStrictRouting) {
+        if (visualPolicy) {
+          const routed = handleVisualBaselineFailureRoute(runtime, controls, {
+            sourceQueue: "released",
+            gateName: "qa-full",
+            gate,
+            checkResult: checks,
+            policy: visualPolicy,
+          });
+          if (routed) {
+            return {
+              progressed: true,
+              passed: false,
+              reason: "mandatory-checks-failed",
+            };
+          }
+        }
         await strictGateFailRoute(runtime, controls, "qa-full", gate);
       } else if (trackFailuresWithoutRouting) {
         hasNonMutatingFailure = true;
@@ -4570,6 +4898,8 @@ function createReleaseConflictHumanInput(runtime, details) {
     "source: delivery-release-automation",
     "priority: P1",
     "implementation_scope: fullstack",
+    "visual_change_intent: false",
+    "baseline_decision: none",
     "---",
     "",
     "# Goal",

@@ -65,7 +65,7 @@ Global rules
 - Respect dev routing mode; set `implementation_scope` correctly (`frontend|backend|fullstack`).
 
 Required requirement shape
-- YAML front matter: `id`, `title`, `status`, `source`, `implementation_scope`.
+- YAML front matter: `id`, `title`, `status`, `source`, `implementation_scope`, `visual_change_intent`, `baseline_decision`.
 - Keep concise sections:
 - Goal
 - Scope
@@ -76,6 +76,16 @@ Required requirement shape
 - References
 - PO Results
 - In `PO Results`, always include one `Changes:` line.
+
+Visual baseline policy (mandatory)
+- Always keep these frontmatter fields explicit:
+  - `visual_change_intent: true|false`
+  - `baseline_decision: update_baseline|revert_ui|none`
+- Defaults:
+  - no intentional UI visual change -> `visual_change_intent: false`, `baseline_decision: none`
+  - intentional visual/UI change accepted -> `visual_change_intent: true`, `baseline_decision: update_baseline`
+  - intentional visual/UI change rejected (must match old baseline) -> `visual_change_intent: true`, `baseline_decision: revert_ui`
+- Do not move a frontend/UI requirement to `selected` with missing/ambiguous visual baseline fields.
 
 Vision decision file contract
 - In `PO mode: vision`, write JSON to `Vision decision file`:

@@ -78,6 +78,7 @@ Bundle behavior:
 - Default bundle range: 5-20 (configurable).
 - Agents run once per bundle in downstream phase.
 - DEV has a watchdog + recovery ladder (`same-thread retry -> fresh-thread retry -> route to to-clarify`) to prevent infinite loops on a single requirement.
+- Agent threads can auto-recover from compact/model errors and optionally rotate after N runs (`[thread_recovery]`) to avoid stale long-lived sessions.
 - Default quality mode is strict: QA and UAT must pass before deploy.
 - On QA/UAT fail, the same bundle is routed back to `dev` for rework (bounded by `delivery_quality.max_fix_cycles`), then retried.
 - If max fix cycles are exceeded, the bundle is routed to `blocked` to avoid endless loops.
@@ -91,6 +92,10 @@ Bundle behavior:
 - `P2/P3` findings are auto-routed to `backlog`.
 - Strict non-automatable critical UAT checks are auto-routed to `human-decision-needed` as manual check packages.
 - MAINT cleanup findings are auto-routed using the same severity routing (`P0/P1 -> selected`, `P2/P3 -> backlog`).
+- Visual screenshot diffs in QA mandatory checks use requirement frontmatter policy:
+  - `visual_change_intent=false` + `baseline_decision=none` -> route to `dev` as regression fix
+  - `visual_change_intent=true` + `baseline_decision=update_baseline|revert_ui` -> route to `dev` with explicit action
+  - missing/conflicting fields -> route to `human-decision-needed`
 
 Release automation flow (`[release_automation].enabled=true`):
 - Runs after successful deploy bundle and requires `[deploy].mode=commit_push`.
@@ -190,6 +195,7 @@ Important sections:
 - `[po].backlog_promote_*`: auto-promote sticky/high-value backlog items to `selected`
 - `[arch]`: trigger policy, risk/scope guards, docs digest behavior, retries
 - `[dev]`: watchdog timeout + recovery retries for stuck DEV runs
+- `[thread_recovery]`: cross-agent thread recovery/rotation (`rotate_after_runs`, `reset_on_compact_or_model_error`)
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)
 - `[deploy.pr]`: optional PR creation after deploy push (`enabled`, `provider`, `remote`, `base_branch`, `head_mode`, `head_branch`, templates). Template vars: `${type}` (`feat|fix|chore` inferred from branch), `${branch}`, `${base}`, `${remote}`
 - `[release_automation]`: optional release flow after deploy bundle (`enabled`, `base_branch`, `remote`, `branch_prefix`, `version_command`, `merge_mode=ff-only`, conflict auto-resolve, tag options)
@@ -198,6 +204,9 @@ Important sections:
 - `[qa]`: `mandatory_checks`, `run_checks_in_runner`, and optional `auto_fix_*` settings for deterministic pre-QA checks plus automatic repair on technical gate failures
 - `[memory]`: local agent memory behavior (`enabled`, `dir`, `include_in_prompt`, `update_on_auto`, `update_on_interactive`, limits)
   - Memory content guideline: keep durable rules plus short recent run context (`Path(s)` + `Decision` + `Outcome`).
+- Requirement frontmatter contract for visual gates:
+  - `visual_change_intent: true|false`
+  - `baseline_decision: update_baseline|revert_ui|none`
 - `[models]`
 - Include optional per-agent model overrides such as `[models].uat` and `[models].maint`.
 - `[codex]`: base Codex profile (`model`, `approval_policy`, `sandbox_mode`, `model_reasoning_effort`)

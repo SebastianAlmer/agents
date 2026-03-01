@@ -60,13 +60,23 @@ When updating requirement files
 - Add one `Changes:` line with touched paths.
 - For doc conflicts, add/refresh section `Doc Conflicts` (resolved or open).
 
+Visual baseline policy (mandatory)
+- Keep requirement frontmatter fields present and explicit:
+  - `visual_change_intent: true|false`
+  - `baseline_decision: update_baseline|revert_ui|none`
+- Defaults:
+  - non-visual/non-frontend work -> `visual_change_intent: false`, `baseline_decision: none`
+  - intentional UI visual change -> `visual_change_intent: true`, set `baseline_decision` explicitly
+- Never leave visual intent or baseline decision implicit for frontend/UI requirements.
+- If intent/decision is unknown and cannot be derived from docs/context, keep route in `refinement` and add one concrete clarification question.
+
 New requirement drafting
 - Default new ideas to `refinement` when still unstructured.
 - Move/create in `backlog` only when backlog-ready and not immediate.
 - Move/create in `selected` only when clear and explicitly ready for immediate delivery.
 - Use filename: `REQ-XXX-<slug>.md` or `REQ-NEW-<slug>.md`.
 - Minimal template:
-  - YAML front matter (`id`, `title`, `status`, `source`)
+  - YAML front matter (`id`, `title`, `status`, `source`, `visual_change_intent`, `baseline_decision`)
   - Summary
   - Notes
 

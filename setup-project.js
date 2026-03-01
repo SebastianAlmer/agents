@@ -597,6 +597,16 @@ function main() {
   const devFreshThreadRetries = Number.isFinite(baseDev.fresh_thread_retries)
     ? Math.max(0, baseDev.fresh_thread_retries)
     : 1;
+  const baseThreadRecovery = base.thread_recovery && typeof base.thread_recovery === "object"
+    ? base.thread_recovery
+    : {};
+  const threadRecoveryRotateAfterRuns = Number.isFinite(baseThreadRecovery.rotate_after_runs)
+    ? Math.max(0, baseThreadRecovery.rotate_after_runs)
+    : 120;
+  const threadRecoveryResetOnCompactOrModelError = normalizeBool(
+    baseThreadRecovery.reset_on_compact_or_model_error,
+    true
+  );
 
   const qaChecks = args.qaChecks.length > 0
     ? args.qaChecks
@@ -862,6 +872,10 @@ function main() {
     `same_thread_retries = ${toTomlInt(devSameThreadRetries)}`,
     `fresh_thread_retries = ${toTomlInt(devFreshThreadRetries)}`,
     "",
+    "[thread_recovery]",
+    `rotate_after_runs = ${toTomlInt(threadRecoveryRotateAfterRuns)}`,
+    `reset_on_compact_or_model_error = ${toTomlBool(threadRecoveryResetOnCompactOrModelError)}`,
+    "",
     "[qa]",
     `mandatory_checks = ${toTomlArray(qaChecks)}`,
     `run_checks_in_runner = ${toTomlBool(qaRunChecksInRunner)}`,
@@ -938,6 +952,7 @@ function main() {
   console.log(`- arch.routing_mode: ${archRoutingMode}`);
   console.log(`- dev_routing.mode: ${routingMode}`);
   console.log(`- dev_agents: fe=${useFe}, be=${useBe}, fs=${useFs}`);
+  console.log(`- thread_recovery: rotate_after_runs=${threadRecoveryRotateAfterRuns} reset_on_compact_or_model_error=${threadRecoveryResetOnCompactOrModelError}`);
   console.log(`- dev watchdog: timeout=${devRunTimeoutSeconds}s same_thread_retries=${devSameThreadRetries} fresh_thread_retries=${devFreshThreadRetries}`);
   console.log(`- models: po=${models.po}, arch=${models.arch}, reqeng=${models.reqeng}, sec=${models.sec}, dev_fe=${models.dev_fe}, dev_be=${models.dev_be}, dev_fs=${models.dev_fs}, qa=${models.qa}, uat=${models.uat}, maint=${models.maint}, ux=${models.ux}, deploy=${models.deploy}`);
   console.log("If you change dev_routing mode later, run setup-project again to realign defaults.");

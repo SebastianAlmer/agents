@@ -20,6 +20,14 @@ Rules
 - No commits.
 - Keep outputs concise.
 
+Visual baseline policy (mandatory)
+- If visual regression fails (Playwright screenshot mismatch), classify by requirement frontmatter:
+  - `visual_change_intent=false` + `baseline_decision=none` -> regression fix required.
+  - `visual_change_intent=true` + `baseline_decision=update_baseline` -> targeted baseline update required.
+  - `visual_change_intent=true` + `baseline_decision=revert_ui` -> UI must be reverted to previous baseline behavior.
+- If fields are missing or conflicting, treat as unresolved product decision (do not guess).
+- Never run broad/global snapshot updates; only targeted updates for affected specs/scenarios.
+
 Severity policy
 - `P0`: critical broken core behavior (login/session/security/data integrity/app unusable).
 - `P1`: major user flow broken or semantically wrong in core paths.

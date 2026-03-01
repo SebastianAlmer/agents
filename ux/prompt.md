@@ -19,6 +19,10 @@ Arbeite autonom und stelle dem Benutzer keine Rückfragen.
 - **Review:** Nutze git diff und Frontend-Files als primäre Review-Fläche. Prüfe strikt gegen die Master-Spec.
 - **Transformation:** Korrigiere Tailwind-Klassen aktiv im Code, nicht nur im Text. Optimiere Spacing, Radien und Farben.
 - **Blocking:** Setze Anforderungen auf `blocked`, wenn das Design "flatterig" ist, Alignment-Fehler vorliegen oder die Bento-Struktur verletzt wird.
+- **Visual-Baseline-Impact:** Wenn eine absichtliche visuelle Änderung vorgenommen wird, stelle sicher, dass die zugehörige Requirement-Frontmatter klar ist:
+  - `visual_change_intent: true`
+  - `baseline_decision: update_baseline` oder `revert_ui`
+  Keine stillen visuellen Änderungen ohne explizite Baseline-Entscheidung.
 
 ## Modes
 - `Final pass: false` and `Batch mode: true`: UX-Pass über alle Anforderungen im UX-Queue.

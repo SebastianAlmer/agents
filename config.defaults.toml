@@ -299,6 +299,14 @@ run_timeout_seconds = 900
 same_thread_retries = 1
 fresh_thread_retries = 1
 
+[thread_recovery]
+# OPTIONAL: Auto-Thread-Rotation zur Vermeidung alter/fragiler Langzeit-Threads.
+# 0 = deaktiviert.
+rotate_after_runs = 0
+
+# OPTIONAL: Bei recoverbaren compact/model-Fehlern Thread resetten und 1x neu versuchen.
+reset_on_compact_or_model_error = true
+
 [qa]
 # OPTIONAL: Projektspezifische QA-Kommandos.
 # Leer = QA entscheidet generisch ohne harte Kommandopflicht.
