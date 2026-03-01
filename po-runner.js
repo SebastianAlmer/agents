@@ -22,6 +22,8 @@ const {
   normalizeStatus,
   listQueueFiles,
   getActivePauseState,
+  readPauseState,
+  clearPauseState,
   readBundleRegistry,
   writeBundleRegistry,
   formatBundleId,
@@ -384,6 +386,21 @@ function log(controls, message) {
   if (controls.verbose) {
     process.stdout.write(`${timestampMinute()} PO-RUNNER: ${message}\n`);
   }
+}
+
+function resetGlobalPauseOnStartup(runtime, controls) {
+  const state = readPauseState(runtime.agentsRoot);
+  if (!state || !state.active) {
+    return;
+  }
+  const reason = String(state.reason || "unknown").replace(/_/g, "-");
+  const source = String(state.source || "unknown");
+  const resumeAfter = String(state.resumeAfter || "unknown");
+  clearPauseState(runtime.agentsRoot);
+  process.stdout.write(
+    `${timestampMinute()} PO-RUNNER: startup pause reset (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
+  );
+  log(controls, "global pause state cleared on startup");
 }
 
 function timestampMinute() {
@@ -2382,6 +2399,7 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
+  resetGlobalPauseOnStartup(runtime, controls);
 
   log(controls, `mode=${mode}`);
   log(controls, `selected watermark low=${lowWatermark} high=${highWatermark}`);

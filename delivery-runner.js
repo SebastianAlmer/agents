@@ -16,6 +16,8 @@ const {
   parseFrontMatter,
   normalizeStatus,
   getActivePauseState,
+  readPauseState,
+  clearPauseState,
   readBundleRegistry,
   writeBundleRegistry,
 } = require("./lib/flow-core");
@@ -511,6 +513,21 @@ function log(controls, message) {
   }
 }
 
+function resetGlobalPauseOnStartup(runtime, controls) {
+  const state = readPauseState(runtime.agentsRoot);
+  if (!state || !state.active) {
+    return;
+  }
+  const reason = String(state.reason || "unknown").replace(/_/g, "-");
+  const source = String(state.source || "unknown");
+  const resumeAfter = String(state.resumeAfter || "unknown");
+  clearPauseState(runtime.agentsRoot);
+  process.stdout.write(
+    `${timestampMinute()} DELIVERY: startup pause reset (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
+  );
+  log(controls, "global pause state cleared on startup");
+}
+
 async function sleepWithStopCheck(ms, controls) {
   let remaining = Math.max(0, Number.parseInt(String(ms || 0), 10));
   const step = 1000;
@@ -680,6 +697,141 @@ function removeDuplicateSourceIfTargetExists(sourcePath, targetPath, controls, s
     );
     return false;
   }
+}
+
+function queueSignature(runtime, queueNames) {
+  const names = Array.isArray(queueNames) ? queueNames : [];
+  const parts = [];
+  for (const queueName of names) {
+    const dir = runtime && runtime.queues ? runtime.queues[queueName] : "";
+    if (!dir) {
+      continue;
+    }
+    const files = listQueueFiles(dir);
+    parts.push(`${queueName}:${files.length}`);
+    for (const file of files) {
+      try {
+        const stat = fs.statSync(file);
+        parts.push(`${queueName}:${path.basename(file)}|${stat.size}|${Math.round(stat.mtimeMs)}`);
+      } catch {
+        parts.push(`${queueName}:${path.basename(file)}|missing`);
+      }
+    }
+  }
+  return parts.join("\n");
+}
+
+function firstQueueFile(runtime, queueName) {
+  const activeId = activeBundleId(runtime);
+  const scoped = listQueueFilesByBundle(runtime, queueName, activeId);
+  if (scoped.length > 0) {
+    return scoped[0];
+  }
+  const all = listQueueFiles(runtime.queues[queueName]);
+  return all[0] || "";
+}
+
+function resetAgentAutoThread(runtime, agentRoleDir, controls, reason) {
+  const roleDir = String(agentRoleDir || "").trim();
+  if (!roleDir) {
+    return false;
+  }
+  const agentRoot = path.join(runtime.agentsRoot, roleDir);
+  const threadFile = getThreadFilePath({
+    agentsRoot: runtime.agentsRoot,
+    agentRoot,
+    auto: true,
+  });
+  if (!fs.existsSync(threadFile)) {
+    log(controls, `${roleDir.toUpperCase()} recovery: no thread file to reset (${reason})`);
+    return false;
+  }
+
+  const threadId = readThreadId(threadFile);
+  if (!threadId) {
+    try {
+      fs.unlinkSync(threadFile);
+      log(controls, `${roleDir.toUpperCase()} recovery: removed empty thread file (${reason})`);
+      return true;
+    } catch (err) {
+      log(controls, `${roleDir.toUpperCase()} recovery: failed to remove empty thread file (${err.message || err})`);
+      return false;
+    }
+  }
+
+  clearThreadState({
+    threadFile,
+    threadId,
+    agentsRoot: runtime.agentsRoot,
+  });
+  log(controls, `${roleDir.toUpperCase()} recovery: reset auto thread (${reason})`);
+  return true;
+}
+
+function noProgressFallbackThreshold(runtime) {
+  const configured = Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.loopThreshold || 3), 10);
+  const normalized = Number.isFinite(configured) ? configured : 3;
+  return Math.max(2, Math.min(4, normalized));
+}
+
+function handleSuccessfulStageNoProgress(runtime, controls, options) {
+  const stageName = String(options && options.stageName || "stage").toLowerCase();
+  const queueName = String(options && options.queueName || "").trim();
+  const itemKey = String(options && options.itemKey || stageItemKey(runtime, queueName)).trim();
+  const agentRoleDir = String(options && options.agentRoleDir || "").trim();
+  const fallbackTargetQueue = String(options && options.fallbackTargetQueue || "").trim();
+  const fallbackStatus = String(options && options.fallbackStatus || fallbackTargetQueue).trim();
+  const fallbackLabel = String(options && options.fallbackLabel || "fallback route").trim();
+  const metricStage = stageName || "stage";
+  const counterStage = `${metricStage}-no-progress`;
+
+  const attempts = registerLoopFailure(runtime, counterStage, itemKey, "no-progress");
+  appendRunnerMetric(runtime, {
+    stage: metricStage,
+    queue: queueName,
+    item_key: itemKey,
+    result: "no-progress",
+    reason: "successful run without queue transition",
+  });
+  log(
+    controls,
+    `${stageName.toUpperCase()} no-progress detected item=${itemKey} attempt=${attempts}; applying recovery`
+  );
+
+  resetAgentAutoThread(runtime, agentRoleDir, controls, `no-progress attempt ${attempts}`);
+  const threshold = noProgressFallbackThreshold(runtime);
+  if (attempts < threshold) {
+    return false;
+  }
+
+  const sourceFile = firstQueueFile(runtime, queueName);
+  if (sourceFile && fallbackTargetQueue) {
+    const moved = moveToQueue(runtime, sourceFile, fallbackTargetQueue, fallbackStatus, [
+      `Delivery runner: ${stageName.toUpperCase()} no-progress auto-recovery`,
+      `- successful run produced no queue transition after ${attempts} attempt(s)`,
+      `- fallback route applied: ${fallbackLabel}`,
+    ]);
+    if (moved) {
+      resetLoopFailuresForItem(runtime, counterStage, itemKey);
+      appendRunnerMetric(runtime, {
+        stage: metricStage,
+        queue: queueName,
+        item_key: itemKey,
+        result: "auto-routed",
+        reason: fallbackLabel,
+      });
+      log(
+        controls,
+        `${stageName.toUpperCase()} no-progress fallback routed ${path.basename(sourceFile)} -> ${fallbackTargetQueue}`
+      );
+      return true;
+    }
+  }
+
+  if (escalateStageLoop(runtime, counterStage, queueName, "successful run without queue transition", controls)) {
+    return true;
+  }
+  return false;
 }
 
 function frontMatterTruthy(value) {
@@ -1462,6 +1614,16 @@ async function runUxBatch(runtime, controls) {
   if (countFiles(runtime.queues.ux) === 0) {
     return movedQa > 0;
   }
+  const uxItemKeyBefore = stageItemKey(runtime, "ux");
+  const uxSnapshotBefore = queueSignature(runtime, [
+    "ux",
+    "sec",
+    "qa",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
   log(controls, "UX batch start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
@@ -1493,13 +1655,7 @@ async function runUxBatch(runtime, controls) {
     moveAll(runtime, "ux", "blocked", "blocked", "Delivery runner: UX batch failed (technical) -> blocked");
     return true;
   }
-  resetPausedOccurrence(runtime, "ux", stageItemKey(runtime, "ux"));
-  appendRunnerMetric(runtime, {
-    stage: "ux",
-    queue: "ux",
-    item_key: stageItemKey(runtime, "ux"),
-    result: "pass",
-  });
+  resetPausedOccurrence(runtime, "ux", uxItemKeyBefore);
 
   const normalized = moveAll(
     runtime,
@@ -1511,7 +1667,34 @@ async function runUxBatch(runtime, controls) {
   if (normalized > 0) {
     log(controls, `UX normalize moved deploy->sec: ${normalized}`);
   }
+  const uxSnapshotAfter = queueSignature(runtime, [
+    "ux",
+    "sec",
+    "qa",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
+  if (uxSnapshotBefore === uxSnapshotAfter) {
+    return handleSuccessfulStageNoProgress(runtime, controls, {
+      stageName: "ux",
+      queueName: "ux",
+      itemKey: uxItemKeyBefore,
+      agentRoleDir: "ux",
+      fallbackTargetQueue: "sec",
+      fallbackStatus: "sec",
+      fallbackLabel: "ux -> sec",
+    });
+  }
 
+  resetLoopFailuresForItem(runtime, "ux-no-progress", uxItemKeyBefore);
+  appendRunnerMetric(runtime, {
+    stage: "ux",
+    queue: "ux",
+    item_key: uxItemKeyBefore,
+    result: "pass",
+  });
   return true;
 }
 
@@ -1519,6 +1702,16 @@ async function runSecBatch(runtime, controls) {
   if (countFiles(runtime.queues.sec) === 0) {
     return false;
   }
+  const secItemKeyBefore = stageItemKey(runtime, "sec");
+  const secSnapshotBefore = queueSignature(runtime, [
+    "sec",
+    "qa",
+    "ux",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
   log(controls, "SEC batch start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
@@ -1550,13 +1743,7 @@ async function runSecBatch(runtime, controls) {
     moveAll(runtime, "sec", "blocked", "blocked", "Delivery runner: SEC batch failed (technical) -> blocked");
     return true;
   }
-  resetPausedOccurrence(runtime, "sec", stageItemKey(runtime, "sec"));
-  appendRunnerMetric(runtime, {
-    stage: "sec",
-    queue: "sec",
-    item_key: stageItemKey(runtime, "sec"),
-    result: "pass",
-  });
+  resetPausedOccurrence(runtime, "sec", secItemKeyBefore);
 
   const normalized = moveAll(
     runtime,
@@ -1568,7 +1755,34 @@ async function runSecBatch(runtime, controls) {
   if (normalized > 0) {
     log(controls, `SEC normalize moved ux->qa: ${normalized}`);
   }
+  const secSnapshotAfter = queueSignature(runtime, [
+    "sec",
+    "qa",
+    "ux",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
+  if (secSnapshotBefore === secSnapshotAfter) {
+    return handleSuccessfulStageNoProgress(runtime, controls, {
+      stageName: "sec",
+      queueName: "sec",
+      itemKey: secItemKeyBefore,
+      agentRoleDir: "sec",
+      fallbackTargetQueue: "qa",
+      fallbackStatus: "qa",
+      fallbackLabel: "sec -> qa",
+    });
+  }
 
+  resetLoopFailuresForItem(runtime, "sec-no-progress", secItemKeyBefore);
+  appendRunnerMetric(runtime, {
+    stage: "sec",
+    queue: "sec",
+    item_key: secItemKeyBefore,
+    result: "pass",
+  });
   return true;
 }
 
@@ -4804,6 +5018,7 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
+  resetGlobalPauseOnStartup(runtime, controls);
 
   log(controls, `mode=${mode}`);
   log(controls, `bundle min=${minBundle} max=${maxBundle}`);

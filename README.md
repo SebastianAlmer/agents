@@ -139,6 +139,8 @@ Global pause guard:
 - PO and Delivery react to provider limit errors (`usage limit`, `rate limit`, `insufficient_quota`, `try again at ...`).
 - A shared pause state is written to `.runtime/pause-state.json`.
 - While active, runners pause processing (no queue failure rerouting) and resume automatically after `resume_after`.
+- On runner startup, any previously active global pause state is cleared so a fresh run starts immediately.
+- Delivery has downstream no-progress guards for UX/SEC: if an agent exits `ok` but queue state does not change, runner resets that agent thread and retries; on repeated no-progress, fallback routing is applied (`ux -> sec`, `sec -> qa`) to prevent infinite loops.
 
 ## Quick start
 
