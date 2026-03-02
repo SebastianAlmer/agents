@@ -97,7 +97,8 @@ Bundle behavior:
 - Visual screenshot diffs in QA mandatory checks use requirement frontmatter policy:
   - `visual_change_intent=false` + `baseline_decision=none` -> route to `dev` as regression fix
   - `visual_change_intent=true` + `baseline_decision=update_baseline|revert_ui` -> route to `dev` with explicit action
-  - missing/conflicting fields -> route to `dev` for local normalization and fix (no human hard-block)
+  - missing/conflicting fields -> route to `human-decision-needed` (explicit product decision required to prevent visual drift)
+- Technical gate orchestration failures (for example missing definitive gate artifact/pending gate after tool exit) are routed to `human-input` as process issues, not to `human-decision-needed`.
 
 Release automation flow (`[release_automation].enabled=true`):
 - Runs after successful deploy bundle and requires `[deploy].mode=commit_push`.

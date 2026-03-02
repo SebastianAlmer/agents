@@ -87,6 +87,63 @@ function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function dedupeByCanonical(values, canonicalize) {
+  const source = normalizeArray(values);
+  const seen = new Set();
+  const deduped = [];
+  for (const entry of source) {
+    const key = String(canonicalize(entry));
+    if (!key && key !== "0") {
+      continue;
+    }
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(entry);
+  }
+  return deduped;
+}
+
+function canonicalizeFindingEntry(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return String(entry || "").trim();
+  }
+  return [
+    String(entry.severity || entry.priority || "").trim(),
+    String(entry.title || entry.summary || entry.name || "").trim(),
+    String(entry.details || entry.description || entry.reason || "").trim(),
+    String(entry.source || "").trim(),
+  ].join("|");
+}
+
+function canonicalizeGenericValue(entry) {
+  if (entry === null || entry === undefined) {
+    return "";
+  }
+  if (typeof entry !== "object" || Array.isArray(entry)) {
+    return String(entry).trim();
+  }
+  const keys = Object.keys(entry).sort();
+  const normalized = {};
+  for (const key of keys) {
+    normalized[key] = entry[key];
+  }
+  return JSON.stringify(normalized);
+}
+
+function normalizeFinalPassPayload(parsed) {
+  const status = String(parsed.status || "").toLowerCase();
+  const summary = String(parsed.summary || "").trim();
+  return {
+    status,
+    summary,
+    blocking_findings: dedupeByCanonical(parsed.blocking_findings, canonicalizeGenericValue),
+    findings: dedupeByCanonical(parsed.findings, canonicalizeFindingEntry),
+    manual_uat: dedupeByCanonical(parsed.manual_uat, canonicalizeGenericValue),
+  };
+}
+
 function failurePayloadFromReasons(label, reasons, fallback = "") {
   const details = reasons.length > 0 ? reasons[0] : fallback;
   const normalizedDetails = String(details || "").trim() || "QA final gate did not produce a definitive artifact.";
@@ -113,7 +170,8 @@ function isDefinitiveFinalGatePayload(parsed) {
     };
   }
 
-  const status = String(parsed.status || "").toLowerCase();
+  const payload = normalizeFinalPassPayload(parsed);
+  const status = payload.status;
   if (!["pass", "fail"].includes(status)) {
     return {
       ok: false,
@@ -121,18 +179,20 @@ function isDefinitiveFinalGatePayload(parsed) {
     };
   }
 
-  const summary = String(parsed.summary || "").trim();
+  const summary = payload.summary;
   if (!summary) {
     return {
       ok: false,
       reasons: ["Missing final gate summary."],
     };
   }
+  const summaryLower = summary.toLowerCase();
 
-  const blockingFindings = normalizeArray(parsed.blocking_findings);
-  const findings = normalizeArray(parsed.findings);
-  const manualUat = normalizeArray(parsed.manual_uat);
+  const blockingFindings = payload.blocking_findings;
+  const findings = payload.findings;
+  const manualUat = payload.manual_uat;
   const hasArrays = Array.isArray(parsed.blocking_findings) && Array.isArray(parsed.findings) && Array.isArray(parsed.manual_uat);
+  const hasNoRemainingFindings = blockingFindings.length === 0 && findings.length === 0 && manualUat.length === 0;
 
   if (!hasArrays) {
     return {
@@ -141,22 +201,43 @@ function isDefinitiveFinalGatePayload(parsed) {
     };
   }
 
-  if (status === "pass" && summary.toLowerCase() === FINAL_GATE_PENDING_SUMMARY) {
+  if (status === "pass" && (blockingFindings.length > 0 || findings.length > 0)) {
     return {
       ok: false,
-      reasons: ["Pass result cannot keep pending summary."],
+      reasons: ["Pass result cannot contain any findings."],
+      payload: {
+        status,
+        summary,
+        blocking_findings: blockingFindings,
+        findings,
+        manual_uat: manualUat,
+      },
     };
   }
 
-  if (
-    status === "fail"
-    && summary.toLowerCase() === FINAL_GATE_PENDING_SUMMARY
-    && blockingFindings.length === 0
-    && findings.length === 0
-  ) {
+  if (summaryLower === FINAL_GATE_PENDING_SUMMARY) {
+    if (hasNoRemainingFindings) {
+      return {
+        ok: true,
+        payload: {
+          status: "pass",
+          summary: "Final QA checks passed.",
+          blocking_findings: blockingFindings,
+          findings,
+          manual_uat: manualUat,
+        },
+      };
+    }
     return {
       ok: false,
-      reasons: ["Final gate left in pending state without findings."],
+      reasons: ["Final gate remains pending with unresolved findings."],
+      payload: {
+        status,
+        summary,
+        blocking_findings: blockingFindings,
+        findings,
+        manual_uat: manualUat,
+      },
     };
   }
 
@@ -198,7 +279,7 @@ function validateFinalPassGateFile(gateFile) {
       ok: false,
       reasons: check.reasons || ["Final gate payload is invalid."],
       gate: failurePayloadFromReasons("final-pass", check.reasons || []),
-      gatePayload: parsed,
+      gatePayload: check.payload || null,
     };
   }
 
@@ -212,14 +293,17 @@ function applyFinalPassGateResult(gateFile, result, gateLabel = "final-pass") {
   if (!result || result.ok) {
     return result;
   }
-  const stableGate = {
-    ...(result.gate || failurePayloadFromReasons(gateLabel, result.reasons || [])),
-    summary: result.gate && result.gate.summary ? result.gate.summary : `QA ${gateLabel} final gate invalid`,
-  };
+  const stableReasons = Array.isArray(result.reasons) && result.reasons.length > 0
+    ? dedupeByCanonical(result.reasons, canonicalizeGenericValue)
+    : [`QA ${gateLabel} final gate invalid`];
+  const stableGate = failurePayloadFromReasons(gateLabel, stableReasons);
+  if (!result.gate || !result.gate.summary) {
+    stableGate.summary = `QA ${gateLabel} final gate invalid`;
+  }
   fs.writeFileSync(gateFile, JSON.stringify(stableGate, null, 2), "utf8");
   return {
     ok: false,
-    reasons: result.reasons || [`QA ${gateLabel} final gate invalid.`],
+    reasons: stableReasons,
     gate: stableGate,
   };
 }
@@ -262,6 +346,34 @@ function listRequirementFiles(dir) {
     .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
 }
 
+function terminalPassGate(summary) {
+  return {
+    status: "pass",
+    summary: String(summary || "").trim() || "Gate passed.",
+    blocking_findings: [],
+    findings: [],
+    manual_uat: [],
+  };
+}
+
+function writeGatePayload(gateFile, payload) {
+  if (!gateFile) {
+    throw new Error("QA gate file path is required");
+  }
+  const gate = payload && typeof payload === "object" ? payload : terminalPassGate("Gate passed.");
+  fs.writeFileSync(gateFile, `${JSON.stringify(gate, null, 2)}\n`, "utf8");
+}
+
+function writeNoItemsPassGate(gateFile, label, queueName) {
+  if (!gateFile) {
+    return false;
+  }
+  const queue = String(queueName || "").trim() || "queue";
+  const normalizedLabel = String(label || "batch").trim() || "batch";
+  writeGatePayload(gateFile, terminalPassGate(`QA ${normalizedLabel}: no items in queue (${queue}).`));
+  return true;
+}
+
 function resolveRequirementPath(requirement, candidateDirs) {
   if (!requirement) {
     return "";
@@ -294,6 +406,16 @@ function validateGateFile(gateFile, label) {
   const status = String(parsed.status || "").toLowerCase();
   if (!["pass", "fail"].includes(status)) {
     throw new Error(`QA ${label} gate file has invalid status: ${status || "<empty>"}`);
+  }
+  const summary = String(parsed.summary || "").trim();
+  if (!summary) {
+    throw new Error(`QA ${label} gate file requires non-empty summary`);
+  }
+  if (summary.toLowerCase() === FINAL_GATE_PENDING_SUMMARY) {
+    throw new Error(`QA ${label} gate file must not remain pending`);
+  }
+  if (!Array.isArray(parsed.blocking_findings) || !Array.isArray(parsed.findings) || !Array.isArray(parsed.manual_uat)) {
+    throw new Error(`QA ${label} gate file requires explicit arrays for blocking_findings, findings, manual_uat`);
   }
 }
 
@@ -380,8 +502,9 @@ async function main() {
       } else if (batchTargets.length > 0) {
         reqFile = batchTargets[0];
       } else {
-        console.log("QA: sec queue empty for batch tests");
+        console.log(`QA: ${batchQueueName} queue empty for batch tests`);
         if (auto) {
+          writeNoItemsPassGate(gateFile, "batch-tests", batchQueueName);
           process.exit(0);
         }
       }
@@ -398,6 +521,7 @@ async function main() {
         if (!firstFile) {
           console.log("QA: qa queue empty");
           if (auto) {
+            writeNoItemsPassGate(gateFile, "single", "qa");
             process.exit(0);
           }
         } else {
@@ -479,10 +603,6 @@ async function main() {
         autoMode: auto,
       });
 
-      if (batchTests) {
-        validateGateFile(gateFile, "batch-tests");
-      }
-      validateGateFile(gateFile, "final");
       const finalPassResult = validateFinalPassGateFile(gateFile);
       if (!finalPassResult.ok) {
         const applied = applyFinalPassGateResult(gateFile, finalPassResult, "final-pass");
@@ -491,6 +611,11 @@ async function main() {
           : "QA final pass gate failed";
         throw Object.assign(new Error(reason), { qaFinalPassGateHandled: true });
       }
+      writeGatePayload(gateFile, finalPassResult.gate);
+      if (batchTests) {
+        validateGateFile(gateFile, "batch-tests");
+      }
+      validateGateFile(gateFile, "final");
     } catch (error) {
       if (!error.qaFinalPassGateHandled) {
         const reason = persistFinalPassFailure(
@@ -542,8 +667,12 @@ if (require.main === module) {
 module.exports = {
   FINAL_GATE_PENDING_SUMMARY,
   normalizeArray,
+  terminalPassGate,
+  writeGatePayload,
+  writeNoItemsPassGate,
   isDefinitiveFinalGatePayload,
   validateFinalPassGateFile,
+  validateGateFile,
   applyFinalPassGateResult,
   persistFinalPassFailure,
   failurePayloadFromReasons,

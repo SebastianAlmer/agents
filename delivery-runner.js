@@ -740,11 +740,11 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const files = scopedQueueFiles(runtime, sourceQueue);
   if (files.length === 0) {
     return {
-      route: "dev",
+      route: "human-input",
       reasonCode: "no-source-files",
       summary: "Visual regression failure has no source requirements in scope.",
-      recommendation: "Requeue affected requirements and decide baseline action explicitly.",
-      question: "Should this visual change be accepted by updating baselines, or should UI be reverted?",
+      recommendation: "Repair queue/gate orchestration so affected requirements are in scope, then rerun QA.",
+      question: "Please triage runner/gate setup so visual policy can be evaluated against actual requirements.",
       files: [],
       details: [],
     };
@@ -765,7 +765,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const invalid = details.filter((item) => item.intent === null || !item.decision);
   if (invalid.length > 0) {
     return {
-      route: "dev",
+      route: "human-decision-needed",
       reasonCode: "missing-frontmatter",
       summary: "Visual regression requires explicit visual_change_intent and baseline_decision fields.",
       recommendation: "Set frontmatter fields per requirement, then rerun QA.",
@@ -778,7 +778,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const intents = new Set(details.map((item) => item.intent));
   if (intents.size > 1) {
     return {
-      route: "dev",
+      route: "human-decision-needed",
       reasonCode: "mixed-intent",
       summary: "Bundle contains mixed visual_change_intent values.",
       recommendation: "Align all requirements in the active bundle to one visual intent.",
@@ -793,7 +793,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
     const inconsistent = details.filter((item) => item.decision !== "none");
     if (inconsistent.length > 0) {
       return {
-        route: "dev",
+        route: "human-decision-needed",
         reasonCode: "inconsistent-regression-policy",
         summary: "visual_change_intent=false conflicts with non-none baseline_decision.",
         recommendation: "Set baseline_decision=none for regression requirements.",
@@ -816,7 +816,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const decisions = new Set(details.map((item) => item.decision));
   if (decisions.has("none")) {
     return {
-      route: "dev",
+      route: "human-decision-needed",
       reasonCode: "intent-without-decision",
       summary: "Intentional visual change requires baseline_decision update_baseline or revert_ui.",
       recommendation: "Set baseline_decision consistently across the bundle.",
@@ -828,7 +828,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
 
   if (decisions.size > 1) {
     return {
-      route: "dev",
+      route: "human-decision-needed",
       reasonCode: "mixed-baseline-decision",
       summary: "Bundle contains conflicting baseline_decision values.",
       recommendation: "Choose one baseline_decision for the active bundle.",
@@ -863,7 +863,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   }
 
   return {
-    route: "dev",
+    route: "human-decision-needed",
     reasonCode: "unknown-decision",
     summary: "Unknown baseline_decision value in active bundle.",
     recommendation: "Normalize baseline_decision to update_baseline, revert_ui, or none.",
@@ -942,6 +942,24 @@ function handleVisualBaselineFailureRoute(runtime, controls, options = {}) {
       progressed: moved > 0,
       gate,
       routedTo: "dev",
+    };
+  }
+
+  if (policy.route === "human-input") {
+    const moved = moveAll(runtime, sourceQueue, "humanInput", "human-input", `${note}; ${summary}`);
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: itemKey,
+      result: "fail",
+      reason: `${queueNote("visual baseline technical route human-input", gate)} | ${policy.reasonCode}`,
+      routed_to: "human-input",
+    });
+    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> human-input (${moved})`);
+    return {
+      progressed: moved > 0,
+      gate,
+      routedTo: "human-input",
     };
   }
 
@@ -2256,6 +2274,7 @@ function parseGate(filePath) {
       blocking_findings: ["invalid gate file"],
       findings: [],
       manual_uat: [],
+      failure_type: "technical_gate_invalid",
     };
   }
 }
@@ -2724,6 +2743,7 @@ function createGenericExecutionFailureGate({
   stderr = "",
   timedOut = false,
   fallbackDetails = "",
+  failureType = "technical_execution",
 }) {
   const parts = [];
   const commandText = String(command || "").trim();
@@ -2763,6 +2783,7 @@ function createGenericExecutionFailureGate({
       },
     ],
     manual_uat: [],
+    failure_type: String(failureType || "technical_execution"),
   };
 }
 
@@ -2775,6 +2796,7 @@ function createQaExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -2787,6 +2809,7 @@ function createUxExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -2799,6 +2822,7 @@ function createSecExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -2811,6 +2835,7 @@ function createUatExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -2823,6 +2848,7 @@ function createMaintExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails || "Runner could not complete repository hygiene analysis.",
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -2842,6 +2868,7 @@ function gateFromAgentResult({ result, parsedGate, createFailureGate, command, g
       exitCode: result && result.exitCode,
       stderr: result && result.stderr,
       timedOut: Boolean(result && result.timedOut),
+      failureType: "technical_runner_exit",
     });
   }
 
@@ -2851,6 +2878,7 @@ function gateFromAgentResult({ result, parsedGate, createFailureGate, command, g
       exitCode: result.exitCode,
       stderr: result.stderr,
       fallbackDetails: `${gateLabel} completed without writing a definitive gate result.`,
+      failureType: "technical_gate_pending",
     });
   }
 
@@ -2898,6 +2926,81 @@ function strictGateLoopReason(gateName, gate) {
   }
   const stage = String(gateName || "gate").toUpperCase();
   return `strict gate fail (${stage}): ${summary}`;
+}
+
+function isTechnicalGateFailure(gate) {
+  const failureType = String((gate && gate.failure_type) || "").trim().toLowerCase();
+  if (["technical_runner_exit", "technical_gate_pending", "technical_gate_invalid", "technical_execution"].includes(failureType)) {
+    return true;
+  }
+  if (failureType === "technical_check") {
+    return false;
+  }
+  const summary = String((gate && gate.summary) || "").toLowerCase();
+  if (!summary) {
+    return false;
+  }
+  return /execution failed|invalid gate file|definitive gate result|pending/.test(summary);
+}
+
+function technicalGateFailureFingerprint(gateName, gate) {
+  const normalizedType = String((gate && gate.failure_type) || "technical_unknown")
+    .trim()
+    .toLowerCase();
+  const normalizedSummary = truncateForQueueNote(String((gate && gate.summary) || "").trim().toLowerCase(), 320);
+  const normalizedFindings = Array.isArray(gate && gate.blocking_findings)
+    ? gate.blocking_findings.map((entry) => String(entry || "").trim().toLowerCase()).join("|")
+    : "";
+  return stableHash(`${String(gateName || "gate").toLowerCase()}|${normalizedType}|${normalizedSummary}|${normalizedFindings}`);
+}
+
+function routeTechnicalGateFailureToHumanInput(runtime, controls, options = {}) {
+  const gateName = String(options.gateName || "gate").trim().toLowerCase();
+  const sourceQueue = String(options.sourceQueue || "").trim();
+  const gate = options.gate && typeof options.gate === "object" ? options.gate : {};
+  if (!sourceQueue || !runtime.queues[sourceQueue]) {
+    return { progressed: false, gate, routedTo: "", repeatCount: 0 };
+  }
+
+  const bundleKey = queueBundleKey(runtime, sourceQueue);
+  const fingerprint = technicalGateFailureFingerprint(gateName, gate);
+  const repeatCount = registerLoopFailure(
+    runtime,
+    `${gateName}-technical-failure`,
+    `${bundleKey}:${fingerprint}`,
+    "fail"
+  );
+  const summary = truncateForQueueNote(
+    String(gate.summary || `${gateName.toUpperCase()} technical gate failure`),
+    240
+  );
+  const failureType = String(gate.failure_type || "technical_unknown").trim() || "technical_unknown";
+  const note = [
+    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> human-input`,
+    `- failure_type: ${failureType}`,
+    `- repeat_count: ${repeatCount}`,
+    `- summary: ${summary}`,
+    "- classification: process/tooling/gate-orchestration issue (not product decision)",
+  ].join(" ");
+
+  const moved = moveAll(runtime, sourceQueue, "humanInput", "human-input", note);
+  if (moved > 0) {
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: bundleKey,
+      result: "escalated",
+      escalated_to: "human-input",
+      reason: `${failureType}#${repeatCount}`,
+    });
+    log(
+      controls,
+      `${gateName.toUpperCase()} technical gate failure routed -> human-input moved=${moved} repeat=${repeatCount}`
+    );
+    return { progressed: true, gate, routedTo: "human-input", repeatCount };
+  }
+
+  return { progressed: false, gate, routedTo: "", repeatCount };
 }
 
 function deliveryQualityStatePath(runtime) {
@@ -3863,6 +3966,16 @@ async function runQaBundle(runtime, controls) {
       result: "fail",
       reason: queueNote("qa gate fail", gate),
     });
+    if (isTechnicalGateFailure(gate)) {
+      const routed = routeTechnicalGateFailureToHumanInput(runtime, controls, {
+        gateName: "qa",
+        sourceQueue: "qa",
+        gate,
+      });
+      if (routed.progressed) {
+        return routed;
+      }
+    }
     if (escalateStageLoop(runtime, "qa", "qa", strictGateLoopReason("qa", gate), controls)) {
       return {
         progressed: true,
@@ -3973,6 +4086,16 @@ async function runUatBundle(runtime, controls) {
       result: "fail",
       reason: queueNote("uat gate fail", gate),
     });
+    if (isTechnicalGateFailure(gate)) {
+      const routed = routeTechnicalGateFailureToHumanInput(runtime, controls, {
+        gateName: "uat",
+        sourceQueue: "deploy",
+        gate,
+      });
+      if (routed.progressed) {
+        return routed;
+      }
+    }
     if (escalateStageLoop(runtime, "uat", "deploy", strictGateLoopReason("uat", gate), controls)) {
       return {
         progressed: true,
@@ -5741,7 +5864,22 @@ async function main() {
   controls.cleanup();
 }
 
-main().catch((err) => {
-  console.error((err && err.stack) ? err.stack : (err.message || err));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error((err && err.stack) ? err.stack : (err.message || err));
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  qaGateTemplate,
+  parseGate,
+  gatePending,
+  gateFromAgentResult,
+  createQaExecutionFailureGate,
+  createUatExecutionFailureGate,
+  evaluateVisualBaselinePolicy,
+  handleVisualBaselineFailureRoute,
+  isTechnicalGateFailure,
+  routeTechnicalGateFailureToHumanInput,
+};
