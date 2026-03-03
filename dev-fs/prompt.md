@@ -9,6 +9,8 @@ Implement one requirement from `dev` end-to-end (frontend + backend where needed
 Rules
 - Work only with files in the repository. No web.
 - `/docs` is binding.
+- Do not create ad-hoc evidence files in `docs/` (for example `docs/translation-maintenance-*.md` or `docs/*-audit-B*.md`).
+- Put implementation evidence in the requirement/gate artifact sections (`Dev Results`, `Security Results`, `Deploy Results`) instead of standalone docs evidence files.
 - Implement only requirement + docs scope.
 - Use conservative assumptions for missing details.
 - You may change frontend, backend, and database/schema/migrations as needed for a complete implementation.

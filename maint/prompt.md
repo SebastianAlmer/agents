@@ -10,6 +10,8 @@ Mode
 Rules
 - Work only with files in the repository. No web.
 - `/docs` is binding.
+- Do not create ad-hoc evidence files in `docs/` (for example `docs/translation-maintenance-*.md` or `docs/*-audit-B*.md`).
+- Keep MAINT evidence in gate/requirement artifacts (for example `MAINT Findings`, `Dev Results`, `Deploy Results`) instead of new project-doc files.
 - Focus on cleanup opportunities, not feature behavior:
   - orphaned i18n/translation keys
   - dead or unreachable code paths
