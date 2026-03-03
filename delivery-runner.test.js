@@ -9,6 +9,8 @@ const {
   createQaExecutionFailureGate,
   isTechnicalGateFailure,
   routeTechnicalGateFailureToHumanInput,
+  findingsFingerprint,
+  shouldSkipMaintForReleasedBundle,
 } = require("./delivery-runner");
 
 function mkTempQueues() {
@@ -96,3 +98,76 @@ test("technical gate failure is routed to human-input", () => {
   assert.match(raw, /status:\s*human-input/i);
 });
 
+function mkTempReleasedQueue() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-maint-test-"));
+  const releasedDir = path.join(root, "requirements", "released");
+  fs.mkdirSync(releasedDir, { recursive: true });
+  return { root, releasedDir };
+}
+
+function writeReleasedReq(releasedDir, fileName, frontMatter) {
+  const lines = ["---"];
+  for (const [key, value] of Object.entries(frontMatter || {})) {
+    lines.push(`${key}: ${value}`);
+  }
+  lines.push("---", "", "# Goal", "test");
+  fs.writeFileSync(path.join(releasedDir, fileName), `${lines.join("\n")}\n`, "utf8");
+}
+
+test("shouldSkipMaintForReleasedBundle skips maint-only released bundles", () => {
+  const { releasedDir } = mkTempReleasedQueue();
+  writeReleasedReq(releasedDir, "A.md", {
+    id: "REQ-MAINT-HOTFIX-2026-03-03T06-20-54-077Z",
+    source: "maint-gate",
+    bundle_id: "B9999",
+  });
+  writeReleasedReq(releasedDir, "B.md", {
+    id: "REQ-MAINT-FOLLOWUP-2026-03-03T06-20-54-078Z",
+    source: "maint-gate",
+    bundle_id: "B9999",
+  });
+
+  const verdict = shouldSkipMaintForReleasedBundle({
+    queues: { released: releasedDir },
+  });
+  assert.equal(verdict.skip, true);
+  assert.equal(verdict.bundleId, "B9999");
+});
+
+test("shouldSkipMaintForReleasedBundle does not skip mixed-scope released bundles", () => {
+  const { releasedDir } = mkTempReleasedQueue();
+  writeReleasedReq(releasedDir, "A.md", {
+    id: "REQ-MAINT-HOTFIX-2026-03-03T06-20-54-077Z",
+    source: "maint-gate",
+    bundle_id: "B9998",
+  });
+  writeReleasedReq(releasedDir, "B.md", {
+    id: "REQ-NEW-user-facing-feature",
+    source: "reqeng-chat",
+    bundle_id: "B9998",
+  });
+
+  const verdict = shouldSkipMaintForReleasedBundle({
+    queues: { released: releasedDir },
+  });
+  assert.equal(verdict.skip, false);
+  assert.equal(verdict.bundleId, "B9998");
+});
+
+test("findingsFingerprint for maint ignores count-only churn", () => {
+  const a = findingsFingerprint("maint", "selected", [
+    {
+      severity: "P1",
+      title: "Unclassified i18n candidates (candidateCount=83)",
+      details: "web i18n:audit:auth enCount=1548 deCount=1548 enOnly=0 deOnly=0",
+    },
+  ]);
+  const b = findingsFingerprint("maint", "selected", [
+    {
+      severity: "P1",
+      title: "Unclassified i18n candidates (candidateCount=65)",
+      details: "web i18n:audit:auth enCount=1560 deCount=1560 enOnly=0 deOnly=0",
+    },
+  ]);
+  assert.equal(a, b);
+});

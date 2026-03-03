@@ -1392,6 +1392,242 @@ function wantsWontDo(decision) {
     .test(text);
 }
 
+function decisionTextForChecks(decision) {
+  const summary = String((decision && decision.summary) || "");
+  const findings = Array.isArray(decision && decision.findings)
+    ? decision.findings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const rawStatus = String((decision && decision.statusRaw) || "");
+  return `${rawStatus}\n${summary}\n${findings.join("\n")}`.toLowerCase();
+}
+
+function isAlreadyImplementedClaim(decision) {
+  if (!decision || typeof decision !== "object") {
+    return false;
+  }
+  const rawStatus = String(decision.statusRaw || "").trim().toLowerCase();
+  if (["already-implemented", "already_implemented", "alreadyimplemented"].includes(rawStatus)) {
+    return true;
+  }
+  const text = decisionTextForChecks(decision);
+  if (/\bnot\s+already\s+implemented\b/.test(text)) {
+    return false;
+  }
+  return /(already implemented|already done|bereits umgesetzt|bereits vorhanden)/i.test(text);
+}
+
+function readRequirementRaw(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return "";
+  }
+  return fs.readFileSync(filePath, "utf8");
+}
+
+function parseAcceptanceCriteriaFromRaw(raw) {
+  const text = String(raw || "");
+  const sectionMatch = text.match(
+    /(?:^|\n)#{2,6}\s*(Acceptance Criteria|Akzeptanzkriterien)\s*\n([\s\S]*?)(?=\n#{1,6}\s+[^\n]+|$)/i
+  );
+  if (!sectionMatch) {
+    return [];
+  }
+
+  const lines = String(sectionMatch[2] || "").split(/\r?\n/);
+  const seen = new Set();
+  const criteria = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*(\d+)\.\s+(.+?)\s*$/);
+    if (!match) {
+      continue;
+    }
+    const index = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(index) || index <= 0 || seen.has(index)) {
+      continue;
+    }
+    seen.add(index);
+    criteria.push({
+      index,
+      text: String(match[2] || "").trim(),
+    });
+  }
+  return criteria.sort((a, b) => a.index - b.index);
+}
+
+function parseAcEvidenceEntriesFromRaw(raw) {
+  const entries = new Map();
+  const lines = String(raw || "").split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s*AC-(\d+)\s*:\s*(.+?)\s*$/i);
+    if (!match) {
+      continue;
+    }
+    const index = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(index) || index <= 0) {
+      continue;
+    }
+    const rest = String(match[2] || "").trim();
+    const statusMatch = rest.match(/\b(not[- ]fulfilled|fulfilled)\b/i);
+    const evidenceMatch = rest.match(/\bevidence\s*:\s*(.+)$/i);
+    const normalizedStatus = statusMatch
+      ? statusMatch[1].toLowerCase().replace("not fulfilled", "not-fulfilled")
+      : "";
+    entries.set(index, {
+      index,
+      raw: line,
+      status: normalizedStatus,
+      evidence: evidenceMatch ? String(evidenceMatch[1] || "").trim() : "",
+      hasEvidenceLabel: Boolean(evidenceMatch),
+    });
+  }
+  return entries;
+}
+
+function isValidAcEvidenceReference(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return false;
+  }
+  if (
+    /(^|[\s`"'(])(?:[A-Za-z]:[\\/]|\/)?[A-Za-z0-9._\-\\/]+(?:\.[A-Za-z0-9._-]+)?:\d+(?::\d+)?([\s`"')]|$)/
+      .test(text)
+  ) {
+    return true;
+  }
+  if (/\b(test|tests|spec|playwright|cypress|screen|screenshot|snap(?:shot)?|video|recording)\b/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function evaluateAlreadyImplementedEvidence(filePath) {
+  const raw = readRequirementRaw(filePath);
+  const criteria = parseAcceptanceCriteriaFromRaw(raw);
+  const entries = parseAcEvidenceEntriesFromRaw(raw);
+  const normalizedEntries = [];
+  const gaps = [];
+  let fulfilledCount = 0;
+
+  if (criteria.length === 0) {
+    gaps.push("Acceptance Criteria section missing or empty.");
+  }
+
+  for (const criterion of criteria) {
+    const entry = entries.get(criterion.index) || null;
+    const status = entry && entry.status ? entry.status : "";
+    const evidence = entry && entry.evidence ? entry.evidence : "";
+    const hasEvidenceLabel = Boolean(entry && entry.hasEvidenceLabel);
+    const hasValidEvidence = hasEvidenceLabel && isValidAcEvidenceReference(evidence);
+    const isFulfilled = status === "fulfilled";
+
+    if (!entry) {
+      gaps.push(`AC-${criterion.index} missing required evidence line: \`- AC-${criterion.index}: fulfilled/not-fulfilled + Evidence: ...\`.`);
+    } else {
+      if (!status) {
+        gaps.push(`AC-${criterion.index} is missing status token (\`fulfilled\` or \`not-fulfilled\`).`);
+      } else if (status !== "fulfilled") {
+        gaps.push(`AC-${criterion.index} is \`${status}\` and therefore not fully implemented.`);
+      }
+      if (!hasEvidenceLabel || !evidence) {
+        gaps.push(`AC-${criterion.index} is missing \`Evidence:\` value.`);
+      } else if (!hasValidEvidence) {
+        gaps.push(`AC-${criterion.index} evidence must reference \`file:line\` or a test/screen artifact.`);
+      }
+    }
+
+    if (isFulfilled && hasValidEvidence) {
+      fulfilledCount += 1;
+    }
+
+    normalizedEntries.push({
+      index: criterion.index,
+      status: status || "not-fulfilled",
+      evidence: evidence || "missing",
+      hasEntry: Boolean(entry),
+      hasValidEvidence,
+      isFulfilled,
+    });
+  }
+
+  return {
+    acCount: criteria.length,
+    fulfilledCount,
+    gaps,
+    complete: criteria.length > 0 && gaps.length === 0,
+    entries: normalizedEntries,
+  };
+}
+
+function upsertAcEvidenceSection(filePath, evidenceReport) {
+  if (!filePath || !fs.existsSync(filePath) || !evidenceReport || !Array.isArray(evidenceReport.entries)) {
+    return;
+  }
+  if (evidenceReport.entries.length === 0) {
+    return;
+  }
+  const lines = evidenceReport.entries.map((entry) => (
+    `- AC-${entry.index}: ${entry.status} + Evidence: ${entry.evidence}`
+  ));
+  upsertMarkdownSection(filePath, "AC Evidence", lines);
+}
+
+function upsertOpenGapsSection(filePath, gaps) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const list = Array.isArray(gaps)
+    ? gaps.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (list.length === 0) {
+    upsertMarkdownSection(filePath, "Open Gaps", ["- none"]);
+    return;
+  }
+  const unique = [];
+  const seen = new Set();
+  for (const item of list) {
+    if (seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    unique.push(item);
+  }
+  upsertMarkdownSection(filePath, "Open Gaps", unique.map((item) => `- ${item}`));
+}
+
+function writeCanonicalPoResults(filePath, payload) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const data = payload && typeof payload === "object" ? payload : {};
+  const lines = [];
+  const status = String(data.status || "unknown").trim() || "unknown";
+  const targetQueue = String(data.targetQueue || "").trim() || "toClarify";
+  const sourceQueue = String(data.sourceQueue || "").trim();
+  const summary = String(data.summary || "").trim();
+  const alreadyImplemented = Boolean(data.alreadyImplementedClaim);
+  const report = data.evidenceReport && typeof data.evidenceReport === "object"
+    ? data.evidenceReport
+    : null;
+
+  lines.push(`- status: ${status}`);
+  lines.push(`- target: ${targetQueue}`);
+  if (sourceQueue) {
+    lines.push(`- source: ${sourceQueue}`);
+  }
+  if (summary) {
+    lines.push(`- summary: ${summary}`);
+  }
+  if (alreadyImplemented) {
+    if (report && report.complete) {
+      lines.push(`- already-implemented check: pass (${report.fulfilledCount}/${report.acCount} ACs fulfilled with evidence).`);
+    } else {
+      lines.push("- already-implemented check: fail; rerouted to backlog until all AC evidence entries are complete.");
+    }
+    lines.push("- required AC evidence format: `- AC-<n>: fulfilled/not-fulfilled + Evidence: <file:line|test|screen>`.");
+  }
+  lines.push("- canonical PO closeout block; previous PO closure statements are superseded.");
+  upsertMarkdownSection(filePath, "PO Results", lines);
+}
+
 function ensureHumanDecisionRequest(filePath, decision) {
   if (!filePath || !fs.existsSync(filePath)) {
     return;
@@ -1950,6 +2186,32 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     ]);
   }
 
+  const alreadyImplementedClaim = targetQueue === "wontDo" && isAlreadyImplementedClaim(decision);
+  let acEvidenceReport = null;
+  if (alreadyImplementedClaim) {
+    acEvidenceReport = evaluateAlreadyImplementedEvidence(currentPath);
+    upsertAcEvidenceSection(currentPath, acEvidenceReport);
+    if (!acEvidenceReport.complete) {
+      targetQueue = "backlog";
+      appendQueueSection(currentPath, [
+        "PO runner already-implemented AC-evidence guard",
+        `- AC evidence incomplete (${acEvidenceReport.fulfilledCount}/${acEvidenceReport.acCount}); routed to backlog`,
+      ]);
+      upsertOpenGapsSection(currentPath, acEvidenceReport.gaps);
+    } else {
+      upsertOpenGapsSection(currentPath, []);
+    }
+  }
+
+  writeCanonicalPoResults(currentPath, {
+    status,
+    targetQueue,
+    sourceQueue,
+    summary: decision.summary || "",
+    alreadyImplementedClaim,
+    evidenceReport: acEvidenceReport,
+  });
+
   const targetStatus = queueStatusByTarget(targetQueue);
 
   moveWithFallback(runtime, currentPath, targetQueue, targetStatus, [
@@ -2405,7 +2667,19 @@ async function main() {
   controls.cleanup();
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  __test: {
+    isAlreadyImplementedClaim,
+    parseAcceptanceCriteriaFromRaw,
+    parseAcEvidenceEntriesFromRaw,
+    isValidAcEvidenceReference,
+    evaluateAlreadyImplementedEvidence,
+  },
+};

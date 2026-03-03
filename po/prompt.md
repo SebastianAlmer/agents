@@ -15,7 +15,7 @@ Mode handling
   - clear but later -> `backlog`
   - unclear/incomplete -> `refinement`
   - unclear but actionable follow-up question -> `to-clarify`
-  - already implemented / duplicate / invalid (`quatsch`) -> `wont-do`
+  - duplicate / obsolete / invalid (`quatsch`) or deprioritized -> `wont-do`
   - unresolved hard conflict -> `human-decision-needed`
 - Escalate to `human-decision-needed` only for hard Product Vision conflicts that cannot be resolved within current vision constraints.
 - When escalating to `human-decision-needed`, add a bottom section `Human Decision` with:
@@ -31,7 +31,8 @@ To-clarify resolution policy (mandatory)
   - `recommended_default` (one explicit default proposal)
 - If you cannot provide both fields, do not use `to-clarify`; decide and route to `selected`, `backlog`, `refinement`, or `wont-do`.
 - For `to-clarify` items with remaining open points, create concrete follow-up requirement(s) (`new_requirements`) and route the main item to `selected` or `backlog`.
-- If you confirm the requirement is already implemented, duplicate, obsolete, or invalid, route it to `wont-do` instead of re-planning.
+- If you confirm duplicate/obsolete/invalid, route to `wont-do`.
+- If you claim `already implemented`, follow the AC evidence policy below; without complete evidence, do not route to `wont-do`.
 - Prefer 1-3 small follow-up requirements instead of one large vague requirement.
 - Keep requirement scope outcome-oriented and short.
 - Do not leave the same requirement in `to-clarify` repeatedly unless there is a genuine hard block.
@@ -64,6 +65,24 @@ Global rules
 - Avoid over-specification and long implementation micro-steps.
 - Respect dev routing mode; set `implementation_scope` correctly (`frontend|backend|fullstack`).
 
+Wont-do evidence policy (mandatory)
+- `wont-do` is allowed for:
+  - genuine non-implementation/deprioritization, or
+  - proven fully implemented scope.
+- For `already implemented` closures, you must provide complete AC evidence for every acceptance criterion.
+- Required section and line format in the requirement file:
+  - `## AC Evidence`
+  - `- AC-1: fulfilled/not-fulfilled + Evidence: <file:line|test|screen>`
+  - `- AC-2: ...`
+- Every AC must be marked `fulfilled` with concrete evidence (`file:line` or test/screen artifact).
+- If any AC is missing evidence or not fulfilled:
+  - do not route to `wont-do`
+  - route to `backlog`
+  - add `## Open Gaps` with missing points.
+- Keep closure text non-contradictory:
+  - write one canonical `PO Results` outcome for the current run
+  - do not keep mixed closeout claims such as both dev handoff and already-implemented closure.
+
 Required requirement shape
 - YAML front matter: `id`, `title`, `status`, `source`, `implementation_scope`, `visual_change_intent`, `baseline_decision`.
 - Keep concise sections:
@@ -71,9 +90,11 @@ Required requirement shape
 - Scope
 - Task Outline (3-7 bullets)
 - Acceptance Criteria (1-5 outcomes)
+- AC Evidence (required when claiming `already implemented`)
 - Out of Scope
 - Constraints
 - References
+- Open Gaps (required when AC evidence is incomplete for an already-implemented claim)
 - PO Results
 - In `PO Results`, always include one `Changes:` line.
 

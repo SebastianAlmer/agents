@@ -32,6 +32,7 @@ const {
 } = require("./lib/agent");
 
 const DELIVERY_IDLE_WAIT_MS = 5 * 60 * 1000;
+const MAINT_FOLLOWUP_ID_RE = /^REQ-MAINT-(HOTFIX|FOLLOWUP)-/i;
 
 function parseArgs(argv) {
   const args = {
@@ -2406,6 +2407,26 @@ function stableHash(input) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+function normalizeFindingTextForFingerprint(sourceLabel, text) {
+  let normalized = String(text || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized) {
+    return "";
+  }
+  if (String(sourceLabel || "").trim().toLowerCase() !== "maint") {
+    return normalized;
+  }
+  normalized = normalized
+    .replace(/candidatecount\s*=\s*\d+/g, "candidatecount=#")
+    .replace(/\b(en|de)count\s*=\s*\d+\b/g, "$1count=#")
+    .replace(/\b(en|de)only\s*=\s*\d+\b/g, "$1only=#")
+    .replace(/\bb\d{4,}\b/gi, "b####")
+    .replace(/\b\d{4}-\d{2}-\d{2}t\d{2}[:\-]\d{2}[:\-]\d{2}(?:\.\d+)?z\b/gi, "<ts>")
+    .replace(/\b\d+\b/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized;
+}
+
 function findByFrontMatterFingerprint(runtime, key, fingerprint, queueNames) {
   const target = String(fingerprint || "").trim();
   if (!target) {
@@ -2428,7 +2449,11 @@ function findByFrontMatterFingerprint(runtime, key, fingerprint, queueNames) {
 
 function findingsFingerprint(sourceLabel, queueName, findings) {
   const canonical = (findings || [])
-    .map((item) => `${normalizeSeverity(item.severity, "P2")}|${String(item.title || "").trim()}|${String(item.details || "").trim()}`)
+    .map((item) => {
+      const title = normalizeFindingTextForFingerprint(sourceLabel, item && item.title);
+      const details = normalizeFindingTextForFingerprint(sourceLabel, item && item.details);
+      return `${normalizeSeverity(item && item.severity, "P2")}|${title}|${details}`;
+    })
     .sort()
     .join("\n");
   return stableHash(`${sourceLabel}|${queueName}|${canonical}`);
@@ -4824,6 +4849,22 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
     };
   }
 
+  const skipDecision = shouldSkipMaintForReleasedBundle(runtime);
+  if (skipDecision.skip) {
+    const sourceList = skipDecision.sources.length > 0
+      ? skipDecision.sources.join(",")
+      : "maint-gate";
+    log(
+      controls,
+      `MAINT skip: latest released bundle ${skipDecision.bundleId} is maint-only follow-up/hotfix (sources=${sourceList}); preventing self-loop`
+    );
+    return {
+      progressed: false,
+      signature,
+      gate: null,
+    };
+  }
+
   const decisionPath = maintDecisionPath(runtime);
   fs.writeFileSync(decisionPath, gateTemplateJson(), "utf8");
 
@@ -5552,6 +5593,88 @@ function releasedSignature(runtime) {
   return parts.sort().join("\n");
 }
 
+function latestReleasedBundle(runtime) {
+  const files = listQueueFiles(runtime.queues.released);
+  let latestBundleId = "";
+  let latestMtime = 0;
+  for (const filePath of files) {
+    const fm = parseFrontMatter(filePath);
+    const bundleId = String(fm.bundle_id || "").trim();
+    if (!bundleId) {
+      continue;
+    }
+    const stat = fs.statSync(filePath);
+    if (stat.mtimeMs > latestMtime) {
+      latestMtime = stat.mtimeMs;
+      latestBundleId = bundleId;
+    }
+  }
+  if (!latestBundleId) {
+    return {
+      bundleId: "",
+      files: [],
+      sources: [],
+    };
+  }
+
+  const bundleFiles = [];
+  const sourceSet = new Set();
+  for (const filePath of files) {
+    const fm = parseFrontMatter(filePath);
+    const bundleId = String(fm.bundle_id || "").trim();
+    if (bundleId !== latestBundleId) {
+      continue;
+    }
+    const source = String(fm.source || "").trim().toLowerCase() || "unknown";
+    sourceSet.add(source);
+    bundleFiles.push({
+      path: filePath,
+      frontMatter: fm,
+      source,
+    });
+  }
+
+  return {
+    bundleId: latestBundleId,
+    files: bundleFiles,
+    sources: Array.from(sourceSet).sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+function isMaintFollowUpRequirement(frontMatter) {
+  const fm = frontMatter && typeof frontMatter === "object" ? frontMatter : {};
+  const source = String(fm.source || "").trim().toLowerCase();
+  const reqId = String(fm.id || "").trim();
+  return source === "maint-gate" && MAINT_FOLLOWUP_ID_RE.test(reqId);
+}
+
+function shouldSkipMaintForReleasedBundle(runtime) {
+  const latest = latestReleasedBundle(runtime);
+  if (!latest.bundleId || !Array.isArray(latest.files) || latest.files.length === 0) {
+    return {
+      skip: false,
+      bundleId: "",
+      sources: [],
+      reason: "no-bundle",
+    };
+  }
+  const allMaintFollowUps = latest.files.every((entry) => isMaintFollowUpRequirement(entry.frontMatter));
+  if (!allMaintFollowUps) {
+    return {
+      skip: false,
+      bundleId: latest.bundleId,
+      sources: latest.sources,
+      reason: "contains-non-maint-scope",
+    };
+  }
+  return {
+    skip: true,
+    bundleId: latest.bundleId,
+    sources: latest.sources,
+    reason: "maint-only-released-bundle",
+  };
+}
+
 async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
   if (countFiles(runtime.queues.released) === 0) {
     return {
@@ -5882,4 +6005,8 @@ module.exports = {
   handleVisualBaselineFailureRoute,
   isTechnicalGateFailure,
   routeTechnicalGateFailureToHumanInput,
+  normalizeFindingTextForFingerprint,
+  findingsFingerprint,
+  shouldSkipMaintForReleasedBundle,
+  isMaintFollowUpRequirement,
 };

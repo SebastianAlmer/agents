@@ -61,6 +61,7 @@ PO vision rules:
 
 Modes:
 - `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> UAT -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan. When Product Vision is marked complete and queues are drained, runner auto-triggers one comprehensive final test over `released` (UX final + SEC final + QA final + optional deterministic E2E + UAT full regression).
+- MAINT loop guard: if the latest released bundle contains only MAINT-generated follow-up/hotfix requirements, the delivery runner skips the immediate MAINT post-deploy scan to prevent self-triggered MAINT bundle loops.
 - `fast`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream gates.
 - `test`: quality/regression mode. Runs delivery quality gates without deploy git actions and then performs a comprehensive full-system test over `released`. If `[e2e].required_in_test_mode=true`, deterministic E2E is a mandatory gate. This mode is non-mutating for `released` (no automatic `released -> dev` reroute on fails); findings are emitted as follow-up requirements.
 
@@ -240,6 +241,10 @@ Intake recommendation:
 - ARCH/DEV/QA/SEC/UX/DEPLOY route unresolved items to `to-clarify`.
 - PO intake ownership is `to-clarify`, `human-input`, `backlog`, `refinement`.
 - PO resolves `to-clarify` when possible and escalates only hard unresolved conflicts to `human-decision-needed`.
+- `wont-do` policy:
+  - valid for deprioritized/non-delivery scope, duplicate, obsolete, or invalid requirements.
+  - `already implemented` is allowed only with full AC evidence (`AC Evidence` lines for every acceptance criterion with concrete evidence).
+  - if AC evidence is incomplete, item must route to `backlog` with `Open Gaps`.
 - Delivery owns `blocked`: technical items auto-recover in `dev`; business-ambiguous items route to `to-clarify` for PO; only exhausted technical retries escalate to `human-decision-needed`.
 - Items in `human-decision-needed` are human-owned and must not be moved by autonomous runners.
 - After manual evaluation, move items to `human-input`; PO ingests `human-input` in the next iteration.
