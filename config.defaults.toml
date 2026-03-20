@@ -312,6 +312,11 @@ reset_on_compact_or_model_error = true
 # Leer = QA entscheidet generisch ohne harte Kommandopflicht.
 mandatory_checks = []
 
+# OPTIONAL: Visual-/Snapshot-Checks (z. B. verify:ui).
+# Diese laufen getrennt von technical mandatory_checks und werden bei FAIL
+# nach human-decision-needed geroutet (ohne Auto-Fix/Auto-Revert).
+mandatory_visual_checks = []
+
 # OPTIONAL: true = Delivery-Runner fuehrt mandatory_checks deterministisch aus,
 # bevor der QA-Agent gestartet wird (spart Tokens und ist reproduzierbar).
 run_checks_in_runner = true

@@ -21,7 +21,7 @@ Mode handling
 - When escalating to `human-decision-needed`, add a bottom section `Human Decision` with:
   - one concrete question for the human
   - one explicit PO recommendation/proposal
-- When escalating, write `hard_vision_conflict: true` into the decision JSON. Without this flag, escalation is invalid and will be auto-routed back to delivery.
+- When escalating, write `hard_vision_conflict: true` in requirement frontmatter. Without this flag, escalation is invalid and will be auto-routed back to delivery.
 
 To-clarify resolution policy (mandatory)
 - Default to making a PO decision yourself based on Product Vision and docs.
@@ -58,6 +58,7 @@ To-clarify resolution policy (mandatory)
 Global rules
 - Work only with repository files.
 - Use ASCII only.
+- Requirements artifacts are markdown-only: never create, read, or rely on `*.json` files in `requirements/**`.
 - Keep requirements short and outcome-oriented.
 - Keep edits minimal:
   - In intake mode, first decide routing.
@@ -107,14 +108,6 @@ Visual baseline policy (mandatory)
   - intentional visual/UI change accepted -> `visual_change_intent: true`, `baseline_decision: update_baseline`
   - intentional visual/UI change rejected (must match old baseline) -> `visual_change_intent: true`, `baseline_decision: revert_ui`
 - Do not move a frontend/UI requirement to `selected` with missing/ambiguous visual baseline fields.
-
-Vision decision file contract
-- In `PO mode: vision`, write JSON to `Vision decision file`:
-- `status`: `pass` or `clarify`
-- `vision_complete`: boolean
-- `reason`: short text
-- `new_requirements_count`: integer
-- `updated_requirements_count`: integer
 
 Logging
 Print short progress lines, for example:

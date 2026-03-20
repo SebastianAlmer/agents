@@ -3,6 +3,7 @@
 This folder stores queue structure only.
 Requirement markdown payloads are intentionally ignored by git so each project can keep local queue content.
 Each queue keeps a `.gitkeep` placeholder; queue metrics must count only `*.md` requirement files and ignore `.gitkeep`.
+JSON artifacts are not allowed in `requirements/**`; runners process markdown requirements only.
 
 Current workspace note (2026-02-23):
 - Existing queue payloads were archived to `_archive/mvp-reset-2026-02-23/`.

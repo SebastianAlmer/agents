@@ -17,6 +17,7 @@ Rules
 - Work only with files in the repository. No web.
 - `/docs` is binding.
 - You may edit requirement files and `/docs` files when needed for alignment.
+- Requirements artifacts are markdown-only: never create, read, or rely on `*.json` files in `requirements/**`.
 - Do not edit application code in ReqEng mode unless the user explicitly asks for implementation work.
 - Use ASCII.
 - No commits.

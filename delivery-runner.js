@@ -3,6 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const readline = require("readline");
 const { execSync, spawnSync } = require("child_process");
 const {
@@ -455,6 +456,27 @@ function activateReadyBundle(runtime, controls) {
   if (!readyId) {
     return { started: false, bundleId: "", reason: "no-ready-bundle" };
   }
+  const readyEntry = registry.bundles[readyId] && typeof registry.bundles[readyId] === "object"
+    ? registry.bundles[readyId]
+    : {};
+  const sourceReqIds = Array.isArray(readyEntry.sourceReqIds)
+    ? readyEntry.sourceReqIds.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const selectedFiles = listQueueFilesByBundle(runtime, "selected", readyId);
+  if (sourceReqIds.length === 0 && selectedFiles.length === 0) {
+    registry.ready_bundle_id = "";
+    registry.bundles[readyId] = {
+      ...readyEntry,
+      id: readyId,
+      status: "aborted",
+      finishedAt: new Date().toISOString(),
+    };
+    writeBundleRegistryForRuntime(runtime, registry);
+    process.stdout.write(
+      `${timestampMinute()} DELIVERY: startup/safety cleared empty ready bundle id=${readyId} (no sourceReqIds and no selected files)\n`
+    );
+    return { started: false, bundleId: "", reason: "ready-bundle-empty-cleared" };
+  }
   const now = new Date().toISOString();
   registry.active_bundle_id = readyId;
   registry.ready_bundle_id = "";
@@ -509,6 +531,127 @@ function activeBundleDrained(runtime) {
   return true;
 }
 
+function collectExecutionBundleIds(runtime) {
+  const queues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy"];
+  const ids = new Set();
+  for (const queueName of queues) {
+    for (const filePath of listQueueFiles(runtime.queues[queueName])) {
+      const id = String(fileBundleId(filePath) || "").trim();
+      if (id) {
+        ids.add(id);
+      }
+    }
+  }
+  return Array.from(ids).sort();
+}
+
+function hasBundleFilesInExecutionQueues(runtime, bundleId) {
+  const id = String(bundleId || "").trim();
+  if (!id) {
+    return false;
+  }
+  const queues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy"];
+  for (const queueName of queues) {
+    if (countFilesByBundle(runtime, queueName, id) > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function sanitizeBundleRegistryState(runtime, controls, reason = "startup") {
+  const registry = readBundleRegistryForRuntime(runtime);
+  let changed = false;
+  const notes = [];
+
+  const readyId = String(registry.ready_bundle_id || "").trim();
+  if (readyId) {
+    const readyEntry = registry.bundles[readyId] && typeof registry.bundles[readyId] === "object"
+      ? registry.bundles[readyId]
+      : {};
+    const sourceReqIds = Array.isArray(readyEntry.sourceReqIds)
+      ? readyEntry.sourceReqIds.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const selectedFiles = listQueueFilesByBundle(runtime, "selected", readyId);
+    if (sourceReqIds.length === 0 && selectedFiles.length === 0) {
+      registry.ready_bundle_id = "";
+      registry.bundles[readyId] = {
+        ...readyEntry,
+        id: readyId,
+        status: "aborted",
+        finishedAt: new Date().toISOString(),
+      };
+      changed = true;
+      notes.push(`cleared empty ready bundle ${readyId}`);
+    }
+  }
+
+  const activeId = String(registry.active_bundle_id || "").trim();
+  const executionIds = collectExecutionBundleIds(runtime);
+  if (activeId) {
+    const activeHasFiles = hasBundleFilesInExecutionQueues(runtime, activeId);
+    if (!activeHasFiles) {
+      if (executionIds.length === 1) {
+        registry.active_bundle_id = executionIds[0];
+        const current = registry.bundles[executionIds[0]] && typeof registry.bundles[executionIds[0]] === "object"
+          ? registry.bundles[executionIds[0]]
+          : {};
+        registry.bundles[executionIds[0]] = {
+          ...current,
+          id: executionIds[0],
+          status: "active",
+          startedAt: String(current.startedAt || new Date().toISOString()).trim() || new Date().toISOString(),
+        };
+        changed = true;
+        notes.push(`reassigned stale active bundle ${activeId} -> ${executionIds[0]}`);
+      } else {
+        registry.active_bundle_id = "";
+        const current = registry.bundles[activeId] && typeof registry.bundles[activeId] === "object"
+          ? registry.bundles[activeId]
+          : {};
+        registry.bundles[activeId] = {
+          ...current,
+          id: activeId,
+          status: String(current.status || "aborted").trim() || "aborted",
+          finishedAt: String(current.finishedAt || new Date().toISOString()).trim() || new Date().toISOString(),
+        };
+        changed = true;
+        notes.push(`cleared stale active bundle ${activeId}`);
+      }
+    }
+  } else if (executionIds.length === 1) {
+    registry.active_bundle_id = executionIds[0];
+    const current = registry.bundles[executionIds[0]] && typeof registry.bundles[executionIds[0]] === "object"
+      ? registry.bundles[executionIds[0]]
+      : {};
+    registry.bundles[executionIds[0]] = {
+      ...current,
+      id: executionIds[0],
+      status: "active",
+      startedAt: String(current.startedAt || new Date().toISOString()).trim() || new Date().toISOString(),
+    };
+    changed = true;
+    notes.push(`restored missing active bundle ${executionIds[0]}`);
+  }
+
+  const activeAfter = String(registry.active_bundle_id || "").trim();
+  const readyAfter = String(registry.ready_bundle_id || "").trim();
+  if (activeAfter && readyAfter && activeAfter === readyAfter) {
+    registry.ready_bundle_id = "";
+    changed = true;
+    notes.push(`cleared duplicate ready bundle ${readyAfter} matching active`);
+  }
+
+  if (changed) {
+    writeBundleRegistryForRuntime(runtime, registry);
+    process.stdout.write(
+      `${timestampMinute()} DELIVERY: bundle-registry sanity repair (${reason}) -> ${notes.join("; ")}\n`
+    );
+  } else {
+    log(controls, `bundle-registry sanity check (${reason}) no changes`);
+  }
+}
+
 function log(controls, message) {
   if (controls.verbose) {
     process.stdout.write(`${timestampMinute()} DELIVERY: ${message}\n`);
@@ -554,12 +697,141 @@ function formatPauseLine(pauseState) {
   return `global pause active reason=${reason} source=${source} resume_after=${resumeAfter || "unknown"} remaining~${remainingMin}m`;
 }
 
+function isEscalationPauseReason(reason) {
+  return new Set([
+    "auth_forbidden",
+    "usage_limit",
+    "rate_limit",
+    "insufficient_quota",
+    "quota_exceeded",
+    "too_many_requests",
+    "retry_later",
+  ]).has(String(reason || ""));
+}
+
+function writePauseEscalationForHumanDecision(runtime, pauseState, runnerLabel) {
+  const targetDir = runtime && runtime.queues ? runtime.queues.humanDecisionNeeded : "";
+  if (!targetDir) {
+    return "";
+  }
+  try {
+    const reason = String((pauseState && pauseState.reason) || "limit").trim() || "limit";
+    const resumeAfter = String((pauseState && pauseState.resumeAfter) || "").trim() || "unknown";
+    const hash = crypto
+      .createHash("sha1")
+      .update(`${runnerLabel}|${reason}|${resumeAfter}`)
+      .digest("hex")
+      .slice(0, 10)
+      .toUpperCase();
+    const id = `REQ-OPS-${String(runnerLabel || "RUNNER").toUpperCase()}-LIMIT-${hash}`;
+    const filePath = path.join(targetDir, `${id}.md`);
+    if (fs.existsSync(filePath)) {
+      return filePath;
+    }
+    const source = String((pauseState && pauseState.source) || "unknown");
+    const excerpt = String((pauseState && pauseState.rawExcerpt) || "").trim();
+    const lines = [
+      "---",
+      `id: ${id}`,
+      `title: ${runnerLabel} blocked by model usage/auth limit`,
+      "status: human-decision-needed",
+      `source: ${String(runnerLabel || "runner").toLowerCase()}`,
+      "implementation_scope: backend",
+      "visual_change_intent: false",
+      "baseline_decision: none",
+      "---",
+      "",
+      "# Goal",
+      "Human decision needed because runner cannot continue due to model access/usage limits.",
+      "",
+      "## Incident",
+      `- runner: ${runnerLabel}`,
+      `- reason: ${reason}`,
+      `- source: ${source}`,
+      `- resume_after: ${resumeAfter}`,
+      excerpt ? `- excerpt: ${excerpt}` : "- excerpt: (none)",
+      "",
+      "## Decision needed",
+      "- Provide model capacity/access (or switch model) and restart the affected runner.",
+      "- Optional: pause all automated runs until capacity is restored.",
+      "",
+      "## Delivery Results",
+      "- routed to human-decision-needed due to runner blocking limit condition.",
+      "",
+    ];
+    fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf8");
+    return filePath;
+  } catch {
+    return "";
+  }
+}
+
+function cleanupRequirementJsonArtifacts(runtime, controls, phase = "") {
+  const root = runtime && runtime.requirementsRoot ? runtime.requirementsRoot : "";
+  if (!root || !fs.existsSync(root)) {
+    return 0;
+  }
+  const removed = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      if (!/\.json(?:\..*)?$/i.test(entry.name)) {
+        continue;
+      }
+      try {
+        fs.unlinkSync(fullPath);
+        removed.push(path.relative(root, fullPath));
+      } catch {
+        // ignore per-file cleanup failures
+      }
+    }
+  }
+  if (removed.length > 0) {
+    log(
+      controls,
+      `requirements json cleanup${phase ? ` (${phase})` : ""}: removed=${removed.length} [${removed.slice(0, 8).join(", ")}${removed.length > 8 ? ", ..." : ""}]`
+    );
+  }
+  return removed.length;
+}
+
 async function waitIfGloballyPaused(runtime, controls) {
   const pauseState = getActivePauseState(runtime.agentsRoot);
   if (!pauseState) {
     return false;
   }
   process.stdout.write(`${timestampMinute()} DELIVERY: ${formatPauseLine(pauseState)}\n`);
+  const reason = String((pauseState && pauseState.reason) || "");
+  if (isEscalationPauseReason(reason)) {
+    const escalationPath = writePauseEscalationForHumanDecision(runtime, pauseState, "DELIVERY-RUNNER");
+    if (escalationPath) {
+      process.stdout.write(
+        `${timestampMinute()} DELIVERY: escalated global pause to human-decision-needed (${path.basename(escalationPath)})\n`
+      );
+    }
+    if (controls && typeof controls.requestStop === "function") {
+      controls.requestStop(`global pause escalation (${reason})`);
+    }
+    return true;
+  }
   const fallbackMs = Math.max(1, runtime.loops.deliveryPollSeconds) * 1000;
   const waitMs = Number.isFinite(pauseState.remainingMs)
     ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
@@ -741,7 +1013,7 @@ function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
   const files = scopedQueueFiles(runtime, sourceQueue);
   if (files.length === 0) {
     return {
-      route: "human-input",
+      route: "human-decision-needed",
       reasonCode: "no-source-files",
       summary: "Visual regression failure has no source requirements in scope.",
       recommendation: "Repair queue/gate orchestration so affected requirements are in scope, then rerun QA.",
@@ -947,20 +1219,20 @@ function handleVisualBaselineFailureRoute(runtime, controls, options = {}) {
   }
 
   if (policy.route === "human-input") {
-    const moved = moveAll(runtime, sourceQueue, "humanInput", "human-input", `${note}; ${summary}`);
+    const moved = moveAll(runtime, sourceQueue, "humanDecisionNeeded", "human-decision-needed", `${note}; ${summary}`);
     appendRunnerMetric(runtime, {
       stage: gateName,
       queue: sourceQueue,
       item_key: itemKey,
       result: "fail",
-      reason: `${queueNote("visual baseline technical route human-input", gate)} | ${policy.reasonCode}`,
-      routed_to: "human-input",
+      reason: `${queueNote("visual baseline technical route human-decision-needed", gate)} | ${policy.reasonCode}`,
+      routed_to: "human-decision-needed",
     });
-    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> human-input (${moved})`);
+    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> human-decision-needed (${moved})`);
     return {
       progressed: moved > 0,
       gate,
-      routedTo: "human-input",
+      routedTo: "human-decision-needed",
     };
   }
 
@@ -1730,28 +2002,13 @@ function enforceBlockedQueuePolicy(runtime, controls) {
 }
 
 function readPoVisionDecision(runtime) {
-  const filePath = path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw);
-    return {
-      status: String(parsed.status || "").toLowerCase(),
-      visionComplete: Boolean(parsed.vision_complete),
-      newRequirementsCount: Number.isFinite(Number(parsed.new_requirements_count))
-        ? Number(parsed.new_requirements_count)
-        : 0,
-      updatedRequirementsCount: Number.isFinite(Number(parsed.updated_requirements_count))
-        ? Number(parsed.updated_requirements_count)
-        : 0,
-    };
-  } catch {
-    return {
-      status: "",
-      visionComplete: false,
-      newRequirementsCount: 0,
-      updatedRequirementsCount: 0,
-    };
-  }
+  const visionComplete = !hasOpenPlanningOrClarification(runtime);
+  return {
+    status: visionComplete ? "pass" : "clarify",
+    visionComplete,
+    newRequirementsCount: 0,
+    updatedRequirementsCount: 0,
+  };
 }
 
 function shouldForceUnderfilledFromVision(runtime) {
@@ -2262,7 +2519,7 @@ function qaFinalGatePath(runtime) {
 function maintDecisionPath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "maint");
   fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, "post-deploy-decision.json");
+  return path.join(dir, "post-deploy-gate.json");
 }
 
 function parseGate(filePath) {
@@ -3001,28 +3258,28 @@ function routeTechnicalGateFailureToHumanInput(runtime, controls, options = {}) 
   );
   const failureType = String(gate.failure_type || "technical_unknown").trim() || "technical_unknown";
   const note = [
-    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> human-input`,
+    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> human-decision-needed`,
     `- failure_type: ${failureType}`,
     `- repeat_count: ${repeatCount}`,
     `- summary: ${summary}`,
     "- classification: process/tooling/gate-orchestration issue (not product decision)",
   ].join(" ");
 
-  const moved = moveAll(runtime, sourceQueue, "humanInput", "human-input", note);
+  const moved = moveAll(runtime, sourceQueue, "humanDecisionNeeded", "human-decision-needed", note);
   if (moved > 0) {
     appendRunnerMetric(runtime, {
       stage: gateName,
       queue: sourceQueue,
       item_key: bundleKey,
       result: "escalated",
-      escalated_to: "human-input",
+      escalated_to: "human-decision-needed",
       reason: `${failureType}#${repeatCount}`,
     });
     log(
       controls,
-      `${gateName.toUpperCase()} technical gate failure routed -> human-input moved=${moved} repeat=${repeatCount}`
+      `${gateName.toUpperCase()} technical gate failure routed -> human-decision-needed moved=${moved} repeat=${repeatCount}`
     );
-    return { progressed: true, gate, routedTo: "human-input", repeatCount };
+    return { progressed: true, gate, routedTo: "human-decision-needed", repeatCount };
   }
 
   return { progressed: false, gate, routedTo: "", repeatCount };
@@ -3618,19 +3875,56 @@ function parseEnvPairs(value) {
   return env;
 }
 
-function runRunnerMandatoryChecks(runtime, controls) {
-  const checks = Array.isArray(runtime.qa && runtime.qa.mandatoryChecks)
-    ? runtime.qa.mandatoryChecks
+function isLikelyVisualCheckCommand(command) {
+  const normalized = String(command || "").toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /(verify:ui|e2e:ui:gates|visual-regression|tohavescreenshot|screenshot)/i.test(normalized);
+}
+
+function qaMandatoryCheckLists(runtime) {
+  const qa = runtime && runtime.qa ? runtime.qa : {};
+  const technicalChecks = Array.isArray(qa.mandatoryChecks) ? qa.mandatoryChecks : [];
+  const visualChecksConfigured = Array.isArray(qa.mandatoryVisualChecks) ? qa.mandatoryVisualChecks : [];
+  if (visualChecksConfigured.length > 0) {
+    return {
+      technicalChecks,
+      visualChecks: visualChecksConfigured,
+    };
+  }
+  const visualChecks = [];
+  const technicalOnlyChecks = [];
+  for (const entry of technicalChecks) {
+    const cmd = String(entry || "").trim();
+    if (!cmd) {
+      continue;
+    }
+    if (isLikelyVisualCheckCommand(cmd)) {
+      visualChecks.push(cmd);
+    } else {
+      technicalOnlyChecks.push(cmd);
+    }
+  }
+  return {
+    technicalChecks: technicalOnlyChecks,
+    visualChecks,
+  };
+}
+
+function runRunnerMandatoryChecks(runtime, controls, checks, phaseLabel = "QA precheck") {
+  const checkList = Array.isArray(checks)
+    ? checks
     : [];
-  if (checks.length === 0) {
+  if (checkList.length === 0) {
     return { ok: true, skipped: true };
   }
-  for (const check of checks) {
+  for (const check of checkList) {
     const cmd = String(check || "").trim();
     if (!cmd) {
       continue;
     }
-    log(controls, `QA precheck: ${cmd}`);
+    log(controls, `${phaseLabel}: ${cmd}`);
     const result = runShellCheckCommand(runtime, cmd);
     if (!result.ok) {
       return {
@@ -3719,8 +4013,8 @@ function runShellMandatoryAutoFixCommands(runtime, controls, commands, attempt) 
   return results;
 }
 
-async function runMandatoryChecksWithAutoFix(runtime, controls) {
-  const initial = runRunnerMandatoryChecks(runtime, controls);
+async function runMandatoryChecksWithAutoFix(runtime, controls, checks) {
+  const initial = runRunnerMandatoryChecks(runtime, controls, checks, "QA technical precheck");
   if (initial.ok || initial.skipped) {
     return initial;
   }
@@ -3752,7 +4046,7 @@ async function runMandatoryChecksWithAutoFix(runtime, controls) {
       codexRun = await runCodexMandatoryCheckAutoFix(runtime, controls, lastFailure, attempt);
     }
 
-    const recheck = runRunnerMandatoryChecks(runtime, controls);
+    const recheck = runRunnerMandatoryChecks(runtime, controls, checks, "QA technical precheck");
     traces.push({
       attempt,
       shellRuns,
@@ -3761,7 +4055,7 @@ async function runMandatoryChecksWithAutoFix(runtime, controls) {
       recheckCommand: String(recheck.command || ""),
     });
     if (recheck.ok) {
-      log(controls, `QA precheck auto-fix recovered on attempt ${attempt}/${maxAttempts}`);
+    log(controls, `QA technical precheck auto-fix recovered on attempt ${attempt}/${maxAttempts}`);
       return {
         ...recheck,
         autoFix: {
@@ -3898,7 +4192,8 @@ async function runQaBundle(runtime, controls) {
   const bundleKey = queueBundleKey(runtime, "qa");
 
   if (strictQa && runtime.qa && runtime.qa.runChecksInRunner) {
-    const checks = await runMandatoryChecksWithAutoFix(runtime, controls);
+    const { technicalChecks, visualChecks } = qaMandatoryCheckLists(runtime);
+    const checks = await runMandatoryChecksWithAutoFix(runtime, controls, technicalChecks);
     if (!checks.ok) {
       const visualPolicy = isVisualSnapshotFailure(checks)
         ? evaluateVisualBaselinePolicy(runtime, "qa")
@@ -3924,6 +4219,35 @@ async function runQaBundle(runtime, controls) {
         sourceQueue: "qa",
         gate,
       });
+    }
+
+    const visualChecksResult = runRunnerMandatoryChecks(runtime, controls, visualChecks, "QA visual precheck");
+    if (!visualChecksResult.ok) {
+      const visualPolicy = {
+        route: "human-decision-needed",
+        reasonCode: "visual-check-failed",
+        summary: "Visual QA check failed and requires product decision (no auto-fix/no auto-revert).",
+        recommendation: "Decide baseline update vs. UI revert, then rerun visual checks.",
+        question: "Should this visual diff be accepted via baseline update, or should UI be reverted?",
+      };
+      const gate = createMandatoryCheckFailureGate(visualChecksResult, visualPolicy);
+      if (runtime.deliveryQuality.emitFollowupsOnFail) {
+        applyGateOutcomes(runtime, controls, "qa", gate);
+      }
+      const routed = handleVisualBaselineFailureRoute(runtime, controls, {
+        sourceQueue: "qa",
+        gateName: "qa",
+        gate,
+        checkResult: visualChecksResult,
+        policy: visualPolicy,
+      });
+      if (routed) {
+        return routed;
+      }
+      return {
+        progressed: false,
+        gate,
+      };
     }
   }
 
@@ -5171,8 +5495,8 @@ function readUnmergedConflictFiles(repoRoot) {
     .slice(0, 50);
 }
 
-function createReleaseConflictHumanInput(runtime, details) {
-  const targetDir = runtime.queues.humanInput || runtime.queues.toClarify;
+function createReleaseConflictHumanDecision(runtime, details) {
+  const targetDir = runtime.queues.humanDecisionNeeded || runtime.queues.toClarify;
   if (!targetDir) {
     return "";
   }
@@ -5195,7 +5519,7 @@ function createReleaseConflictHumanInput(runtime, details) {
     "---",
     `id: ${id}`,
     "title: Release automation merge conflict needs human resolution",
-    "status: human-input",
+    "status: human-decision-needed",
     "source: delivery-release-automation",
     "priority: P1",
     "implementation_scope: fullstack",
@@ -5263,7 +5587,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
   const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
   const currentBranch = getCurrentBranch(runtime.repoRoot);
   if (!currentBranch) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch: "",
       baseBranch,
@@ -5272,13 +5596,13 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
   }
   if (currentBranch === baseBranch) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch: currentBranch,
       baseBranch,
@@ -5287,7 +5611,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5295,7 +5619,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
 
   const versionFilePath = resolveVersionFilePath(runtime, releaseCfg);
   if (!versionFilePath || !fs.existsSync(versionFilePath)) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch: "",
       baseBranch,
@@ -5304,7 +5628,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5312,7 +5636,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
 
   const oldVersion = readPackageVersion(versionFilePath);
   if (!oldVersion) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch: "",
       baseBranch,
@@ -5321,7 +5645,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5333,7 +5657,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     cwd: runtime.repoRoot,
   });
   if (!versionResult.ok) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch: "",
       baseBranch,
@@ -5342,7 +5666,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5350,7 +5674,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
 
   const newVersion = readPackageVersion(versionFilePath);
   if (!newVersion || newVersion === oldVersion) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch: "",
       baseBranch,
@@ -5359,7 +5683,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5374,7 +5698,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
   const commitMessage = `chore(release): ${bundleLabel} v${newVersion}`;
   const commit = runGit(runtime.repoRoot, ["commit", "-m", commitMessage]);
   if (!commit.ok) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch,
       baseBranch,
@@ -5383,7 +5707,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5395,7 +5719,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
   runGit(runtime.repoRoot, ["fetch", remote]);
   let checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
   if (!checkoutBase.ok) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch,
       baseBranch,
@@ -5404,14 +5728,14 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
   }
   const pullBase = runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
   if (!pullBase.ok) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch,
       baseBranch,
@@ -5420,7 +5744,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5453,7 +5777,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     }
     if (!merge.ok && !resolved) {
       const conflictFiles = readUnmergedConflictFiles(runtime.repoRoot);
-      const humanPath = createReleaseConflictHumanInput(runtime, {
+      const humanPath = createReleaseConflictHumanDecision(runtime, {
         bundleId: context.bundleId,
         releaseBranch,
         baseBranch,
@@ -5462,7 +5786,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
         conflictFiles,
       });
       if (humanPath) {
-        log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+        log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
         outcome.conflictEscalation = humanPath;
       }
       return outcome;
@@ -5472,7 +5796,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
 
   const pushBase = runGit(runtime.repoRoot, ["push", remote, baseBranch]);
   if (!pushBase.ok) {
-    const humanPath = createReleaseConflictHumanInput(runtime, {
+    const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch,
       baseBranch,
@@ -5481,7 +5805,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
       conflictFiles: [],
     });
     if (humanPath) {
-      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
       outcome.conflictEscalation = humanPath;
     }
     return outcome;
@@ -5841,7 +6165,9 @@ async function main() {
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
   resetGlobalPauseOnStartup(runtime, controls);
+  cleanupRequirementJsonArtifacts(runtime, controls, "startup");
   pruneStaleWorkspaceBranches(runtime, controls, "startup");
+  sanitizeBundleRegistryState(runtime, controls, "startup");
 
   log(controls, `mode=${mode}`);
   log(controls, `bundle min=${minBundle} max=${maxBundle}`);
@@ -5862,6 +6188,7 @@ async function main() {
       }
       continue;
     }
+    cleanupRequirementJsonArtifacts(runtime, controls, "cycle");
 
     enforceClarifyQueuePolicy(runtime, controls);
     enforceBlockedQueuePolicy(runtime, controls);

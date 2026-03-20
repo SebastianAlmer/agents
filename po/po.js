@@ -31,7 +31,6 @@ function parseArgs(argv) {
     requirement: "",
     auto: false,
     mode: "intake",
-    visionDecisionFile: "",
     runner: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -57,15 +56,6 @@ function parseArgs(argv) {
     }
     if (normalized.startsWith("--mode=")) {
       args.mode = String(raw.split("=", 2)[1] || "");
-      continue;
-    }
-    if (normalized === "--vision-decision-file") {
-      args.visionDecisionFile = String(argv[i + 1] || "");
-      i++;
-      continue;
-    }
-    if (normalized.startsWith("--vision-decision-file=")) {
-      args.visionDecisionFile = String(raw.split("=", 2)[1] || "");
       continue;
     }
   }
@@ -160,12 +150,6 @@ async function main() {
   const humanDecisionNeededDir = runtime.queues.humanDecisionNeeded;
   const humanInputDir = runtime.queues.humanInput;
 
-  const visionDecisionFile = parsed.visionDecisionFile
-    ? (path.isAbsolute(parsed.visionDecisionFile)
-      ? parsed.visionDecisionFile
-      : path.resolve(runtime.agentsRoot, parsed.visionDecisionFile))
-    : path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
-
   console.log(`PO: mode ${mode}`);
   console.log("PO: scan intake queues");
 
@@ -210,7 +194,7 @@ async function main() {
   console.log(`PO: human-input dir ${humanInputDir}`);
   console.log(`PO: human-decision-needed dir ${humanDecisionNeededDir}`);
   if (mode === "vision") {
-    console.log(`PO: vision decision file ${visionDecisionFile}`);
+    console.log("PO: vision reconciliation run");
   }
 
   const promptPath = path.join(agentRoot, "prompt.md");
@@ -233,7 +217,7 @@ async function main() {
   const productVisionList = productVisionFiles.length > 0
     ? productVisionFiles.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- none";
-  const context = `# Context\nPO mode: ${mode}\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nBacklog dir: ${backlogDir}\nRefinement dir: ${refinementDir}\nSelected dir: ${selectedDir}\nArch dir: ${archDir}\nReleased dir: ${releasedDir}\nReleased files:\n${releasedListText}\nTo-clarify dir: ${toClarifyDir}\nHuman-input dir: ${humanInputDir}\nHuman-decision-needed dir: ${humanDecisionNeededDir}\nDocs dir: ${docsDir}\nProduct vision dir: ${productVisionDir || "missing"}\nProduct vision files:\n${productVisionList}\nProduct vision priority: Product Vision files override other docs on conflict.\nVision file: ${posDocs.vision || "missing"}\nBlueprint file: ${posDocs.blueprint || "missing"}\nEpic matrix file: ${posDocs.epicMatrix || "missing"}\nNot-building file: ${posDocs.notBuilding || "missing"}\nVision achieved file: ${posDocs.visionAchieved || "missing"}\nVision decision file: ${visionDecisionFile}\nDev routing mode: ${runtime.devRouting.mode}\nDefault implementation scope: ${runtime.devRouting.defaultScope}\nAllowed implementation_scope values: frontend | backend | fullstack\nEnabled dev agents: fe=${runtime.devAgents.useFe}, be=${runtime.devAgents.useBe}, fs=${runtime.devAgents.useFs}\n`;
+  const context = `# Context\nPO mode: ${mode}\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nBacklog dir: ${backlogDir}\nRefinement dir: ${refinementDir}\nSelected dir: ${selectedDir}\nArch dir: ${archDir}\nReleased dir: ${releasedDir}\nReleased files:\n${releasedListText}\nTo-clarify dir: ${toClarifyDir}\nHuman-input dir: ${humanInputDir}\nHuman-decision-needed dir: ${humanDecisionNeededDir}\nDocs dir: ${docsDir}\nProduct vision dir: ${productVisionDir || "missing"}\nProduct vision files:\n${productVisionList}\nProduct vision priority: Product Vision files override other docs on conflict.\nVision file: ${posDocs.vision || "missing"}\nBlueprint file: ${posDocs.blueprint || "missing"}\nEpic matrix file: ${posDocs.epicMatrix || "missing"}\nNot-building file: ${posDocs.notBuilding || "missing"}\nVision achieved file: ${posDocs.visionAchieved || "missing"}\nDev routing mode: ${runtime.devRouting.mode}\nDefault implementation scope: ${runtime.devRouting.defaultScope}\nAllowed implementation_scope values: frontend | backend | fullstack\nEnabled dev agents: fe=${runtime.devAgents.useFe}, be=${runtime.devAgents.useBe}, fs=${runtime.devAgents.useFs}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("PO"));

@@ -12,6 +12,7 @@
     "delivery-runner": "node delivery-runner.js",
     "delivery-fast": "node delivery-runner.js --mode fast",
     "delivery-test": "node delivery-runner.js --mode test",
+    "runner-heal": "node scripts/runner-heal.js",
     "setup": "node setup-project.js",
     "reqeng": "node reqeng-cli.js",
     "reqeng-cli": "node reqeng-cli.js",

@@ -11,7 +11,6 @@ const {
   countFiles,
   moveRequirementFile,
   parseFrontMatter,
-  parseDecisionFile,
   routeByStatus,
   setFrontMatterStatus,
   appendQueueSection,
@@ -32,6 +31,22 @@ const {
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
 
 const PO_IDLE_WAIT_MS = 5 * 60 * 1000;
+const ALLOWED_WONT_DO_DECISION_REASONS = new Set([
+  "duplicate",
+  "obsolete",
+  "invalid",
+  "deprioritized",
+  "already_implemented",
+]);
+const DEFAULT_DECISION_REASON_BY_TARGET = {
+  selected: "selected_ready_now",
+  backlog: "backlog_deferred",
+  refinement: "refinement_default",
+  toClarify: "to_clarify_default",
+  humanInput: "human_input_default",
+  humanDecisionNeeded: "human_decision_default",
+  wontDo: "wont_do_unspecified",
+};
 
 function normalizePoMode(value, fallback = "vision") {
   const normalized = String(value || fallback || "").trim().toLowerCase();
@@ -437,12 +452,141 @@ function formatPauseLine(pauseState) {
   return `global pause active reason=${reason} source=${source} resume_after=${resumeAfter || "unknown"} remaining~${remainingMin}m`;
 }
 
+function isEscalationPauseReason(reason) {
+  return new Set([
+    "auth_forbidden",
+    "usage_limit",
+    "rate_limit",
+    "insufficient_quota",
+    "quota_exceeded",
+    "too_many_requests",
+    "retry_later",
+  ]).has(String(reason || ""));
+}
+
+function writePauseEscalationForHumanDecision(runtime, pauseState, runnerLabel) {
+  const targetDir = runtime && runtime.queues ? runtime.queues.humanDecisionNeeded : "";
+  if (!targetDir) {
+    return "";
+  }
+  try {
+    const reason = String((pauseState && pauseState.reason) || "limit").trim() || "limit";
+    const resumeAfter = String((pauseState && pauseState.resumeAfter) || "").trim() || "unknown";
+    const hash = crypto
+      .createHash("sha1")
+      .update(`${runnerLabel}|${reason}|${resumeAfter}`)
+      .digest("hex")
+      .slice(0, 10)
+      .toUpperCase();
+    const id = `REQ-OPS-${String(runnerLabel || "RUNNER").toUpperCase()}-LIMIT-${hash}`;
+    const filePath = path.join(targetDir, `${id}.md`);
+    if (fs.existsSync(filePath)) {
+      return filePath;
+    }
+    const source = String((pauseState && pauseState.source) || "unknown");
+    const excerpt = String((pauseState && pauseState.rawExcerpt) || "").trim();
+    const lines = [
+      "---",
+      `id: ${id}`,
+      `title: ${runnerLabel} blocked by model usage/auth limit`,
+      "status: human-decision-needed",
+      `source: ${String(runnerLabel || "runner").toLowerCase()}`,
+      "implementation_scope: backend",
+      "visual_change_intent: false",
+      "baseline_decision: none",
+      "---",
+      "",
+      "# Goal",
+      "Human decision needed because runner cannot continue due to model access/usage limits.",
+      "",
+      "## Incident",
+      `- runner: ${runnerLabel}`,
+      `- reason: ${reason}`,
+      `- source: ${source}`,
+      `- resume_after: ${resumeAfter}`,
+      excerpt ? `- excerpt: ${excerpt}` : "- excerpt: (none)",
+      "",
+      "## Decision needed",
+      "- Provide model capacity/access (or switch model) and restart the affected runner.",
+      "- Optional: pause all automated runs until capacity is restored.",
+      "",
+      "## PO Results",
+      "- routed to human-decision-needed due to runner blocking limit condition.",
+      "",
+    ];
+    fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf8");
+    return filePath;
+  } catch {
+    return "";
+  }
+}
+
+function cleanupRequirementJsonArtifacts(runtime, controls, phase = "") {
+  const root = runtime && runtime.requirementsRoot ? runtime.requirementsRoot : "";
+  if (!root || !fs.existsSync(root)) {
+    return 0;
+  }
+  const removed = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      if (!/\.json(?:\..*)?$/i.test(entry.name)) {
+        continue;
+      }
+      try {
+        fs.unlinkSync(fullPath);
+        removed.push(path.relative(root, fullPath));
+      } catch {
+        // ignore per-file cleanup failures
+      }
+    }
+  }
+  if (removed.length > 0) {
+    log(
+      controls,
+      `requirements json cleanup${phase ? ` (${phase})` : ""}: removed=${removed.length} [${removed.slice(0, 8).join(", ")}${removed.length > 8 ? ", ..." : ""}]`
+    );
+  }
+  return removed.length;
+}
+
 async function waitIfGloballyPaused(runtime, controls) {
   const pauseState = getActivePauseState(runtime.agentsRoot);
   if (!pauseState) {
     return false;
   }
   process.stdout.write(`${timestampMinute()} PO-RUNNER: ${formatPauseLine(pauseState)}\n`);
+  const reason = String((pauseState && pauseState.reason) || "");
+  if (isEscalationPauseReason(reason)) {
+    const escalationPath = writePauseEscalationForHumanDecision(runtime, pauseState, "PO-RUNNER");
+    if (escalationPath) {
+      process.stdout.write(
+        `${timestampMinute()} PO-RUNNER: escalated global pause to human-decision-needed (${path.basename(escalationPath)})\n`
+      );
+    }
+    if (controls && typeof controls.requestStop === "function") {
+      controls.requestStop(`global pause escalation (${reason})`);
+    }
+    return true;
+  }
   const fallbackMs = Math.max(1, runtime.loops.poPollSeconds) * 1000;
   const waitMs = Number.isFinite(pauseState.remainingMs)
     ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
@@ -1089,35 +1233,28 @@ function countNewRequirementsSince(baseSnapshot, currentSnapshot) {
   return delta;
 }
 
-function readVisionDecision(filePath) {
-  if (!filePath || !fs.existsSync(filePath)) {
-    return {
-      status: "",
-      visionComplete: false,
-      reason: "",
-      newRequirements: 0,
-      updatedRequirements: 0,
-    };
-  }
-
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    return {
-      status: normalizeStatus(parsed.status || ""),
-      visionComplete: Boolean(parsed.vision_complete),
-      reason: String(parsed.reason || parsed.summary || "").trim(),
-      newRequirements: normalizePositiveInt(parsed.new_requirements_count, 0, 0),
-      updatedRequirements: normalizePositiveInt(parsed.updated_requirements_count, 0, 0),
-    };
-  } catch (err) {
-    return {
-      status: "",
-      visionComplete: false,
-      reason: `invalid decision file: ${err.message}`,
-      newRequirements: 0,
-      updatedRequirements: 0,
-    };
-  }
+function deriveVisionDecision(runtime, result, beforeSnapshot) {
+  const current = buildPlanningSnapshot(runtime);
+  const newRequirements = countNewRequirementsSince(beforeSnapshot, current);
+  const updatedRequirements = current.hash !== beforeSnapshot.hash ? 1 : 0;
+  const visionHint = findVisionOpenDecisionHint(runtime);
+  const intakeCandidates = listIntakeCandidates(runtime).length;
+  const visionComplete = Boolean(result && result.ok) && visionHint.count === 0 && intakeCandidates === 0;
+  const status = !result || !result.ok
+    ? "clarify"
+    : (visionHint.count > 0 ? "clarify" : "pass");
+  const reason = !result || !result.ok
+    ? "vision run failed"
+    : (visionComplete
+      ? "vision complete (no open intake candidates)"
+      : "vision planning still active");
+  return {
+    status,
+    visionComplete,
+    reason,
+    newRequirements,
+    updatedRequirements,
+  };
 }
 
 function writeVisionClarification(runtime, reason) {
@@ -1277,31 +1414,22 @@ function inferPoTargetFromText(text) {
     return "";
   }
 
-  if (
-    /\bhuman[- ]decision[- ]needed\b/.test(raw) ||
-    /\btarget\s*:\s*human[- ]decision[- ]needed\b/.test(raw)
-  ) {
+  if (/\btarget(?:[_ ]queue)?\s*:\s*human[- ]decision[- ]needed\b/.test(raw)) {
     return "humanDecisionNeeded";
   }
-  if (
-    /\bto[- ]clarify\b/.test(raw) ||
-    /\btarget\s*:\s*to[- ]clarify\b/.test(raw)
-  ) {
+  if (/\btarget(?:[_ ]queue)?\s*:\s*to[- ]clarify\b/.test(raw)) {
     return "toClarify";
   }
-  if (
-    /\bwont[- ]do\b/.test(raw) ||
-    /\btarget\s*:\s*wont[- ]do\b/.test(raw)
-  ) {
+  if (/\btarget(?:[_ ]queue)?\s*:\s*wont[- ]do\b/.test(raw)) {
     return "wontDo";
   }
-  if (/\bselected\b/.test(raw) || /\btarget\s*:\s*selected\b/.test(raw)) {
+  if (/\btarget(?:[_ ]queue)?\s*:\s*selected\b/.test(raw)) {
     return "selected";
   }
-  if (/\bbacklog\b/.test(raw) || /\btarget\s*:\s*backlog\b/.test(raw)) {
+  if (/\btarget(?:[_ ]queue)?\s*:\s*backlog\b/.test(raw)) {
     return "backlog";
   }
-  if (/\brefinement\b/.test(raw) || /\btarget\s*:\s*refinement\b/.test(raw)) {
+  if (/\btarget(?:[_ ]queue)?\s*:\s*refinement\b/.test(raw)) {
     return "refinement";
   }
   return "";
@@ -1310,6 +1438,12 @@ function inferPoTargetFromText(text) {
 function inferPoTargetFromDecision(decision) {
   if (!decision || typeof decision !== "object") {
     return "";
+  }
+  const fromTarget = normalizePoTarget(
+    decision.targetQueue || decision.target_queue || decision.target || ""
+  );
+  if (fromTarget) {
+    return fromTarget;
   }
   const fromStatusRaw = normalizePoTarget(decision.statusRaw);
   if (fromStatusRaw) {
@@ -1327,6 +1461,13 @@ function inferPoTargetFromRequirementFile(filePath) {
   if (!filePath || !fs.existsSync(filePath)) {
     return "";
   }
+  const fm = parseFrontMatter(filePath);
+  const fromFrontMatter = normalizePoTarget(
+    fm.target_queue || fm.targetQueue || fm.target || fm.next_queue || fm.nextQueue || ""
+  );
+  if (fromFrontMatter) {
+    return fromFrontMatter;
+  }
   const raw = fs.readFileSync(filePath, "utf8");
   const poResultsMatch = raw.match(/\n##\s+PO Results\b([\s\S]*?)(?=\n##\s+|$)/i);
   if (poResultsMatch) {
@@ -1336,6 +1477,190 @@ function inferPoTargetFromRequirementFile(filePath) {
     }
   }
   return inferPoTargetFromText(raw);
+}
+
+function normalizeRoutingDecisionReason(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
+  if (!normalized) {
+    return "";
+  }
+  return normalized;
+}
+
+function normalizeWontDoDecisionReason(value) {
+  const normalized = normalizeRoutingDecisionReason(value);
+  if (!normalized) {
+    return "";
+  }
+  const map = {
+    duplicate: "duplicate",
+    dupe: "duplicate",
+    obsolete: "obsolete",
+    invalid: "invalid",
+    deprioritized: "deprioritized",
+    deprioritised: "deprioritized",
+    already_implemented: "already_implemented",
+    "already-implemented": "already_implemented",
+    alreadyimplemented: "already_implemented",
+  };
+  return map[normalized] || "";
+}
+
+function defaultDecisionReasonForTarget(targetQueue) {
+  return DEFAULT_DECISION_REASON_BY_TARGET[targetQueue] || "routing_default";
+}
+
+function extractDecisionReasonFromRequirement(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return "";
+  }
+  const fm = parseFrontMatter(filePath);
+  const fmReason = normalizeRoutingDecisionReason(
+    fm.decision_reason || fm.decisionReason || fm.wont_do_reason || fm.wontDoReason || ""
+  );
+  if (fmReason) {
+    return fmReason;
+  }
+  const raw = readRequirementRaw(filePath);
+  const match = raw.match(/(?:^|\n)\s*-\s*decision_reason\s*:\s*([a-zA-Z0-9_-]+)/i);
+  if (!match) {
+    return "";
+  }
+  return normalizeRoutingDecisionReason(match[1] || "");
+}
+
+function extractDecisionReasonFromDecisionArtifact(artifact) {
+  if (!artifact || typeof artifact !== "object") {
+    return "";
+  }
+  const explicit = normalizeRoutingDecisionReason(
+    artifact.decision_reason
+    || artifact.decisionReason
+    || artifact.wont_do_reason
+    || artifact.wontDoReason
+    || artifact.reason
+    || ""
+  );
+  if (explicit) {
+    return explicit;
+  }
+  return "";
+}
+
+function extractPoResultsStatusFromRequirement(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return "";
+  }
+  const raw = readRequirementRaw(filePath);
+  const poResultsMatch = raw.match(/\n##\s+PO Results\b([\s\S]*?)(?=\n##\s+|$)/i);
+  if (!poResultsMatch) {
+    return "";
+  }
+  const statusMatch = poResultsMatch[1].match(/(?:^|\n)\s*-\s*status\s*:\s*([a-zA-Z0-9_-]+)/i);
+  if (!statusMatch) {
+    return "";
+  }
+  return String(statusMatch[1] || "").trim().toLowerCase();
+}
+
+function normalizeRequirementKey(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized;
+}
+
+function canonicalRequirementKeyFromPath(filePath) {
+  if (!filePath) {
+    return "";
+  }
+  if (fs.existsSync(filePath) && path.extname(filePath).toLowerCase() === ".md") {
+    const fm = parseFrontMatter(filePath);
+    const id = normalizeRequirementKey(fm.id || "");
+    if (id) {
+      return id;
+    }
+  }
+  const name = path.basename(String(filePath || ""));
+  return canonicalRequirementKeyFromFileName(name);
+}
+
+function canonicalRequirementKeyFromFileName(fileName) {
+  let stem = String(fileName || "").trim();
+  if (!stem) {
+    return "";
+  }
+  if (stem.endsWith(".decision.json")) {
+    stem = stem.slice(0, -".decision.json".length);
+  }
+  if (stem.toLowerCase().endsWith(".md")) {
+    stem = stem.slice(0, -".md".length);
+  }
+  const canonical = stripCarryoverSuffix(stripBundleSuffix(stem));
+  return normalizeRequirementKey(canonical);
+}
+
+function listDecisionArtifacts(dir) {
+  if (!dir || !fs.existsSync(dir)) {
+    return [];
+  }
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith(".") && entry.name.endsWith(".decision.json"))
+    .map((entry) => path.join(dir, entry.name))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
+
+function intakeQueueEntries(runtime) {
+  return [
+    ["toClarify", runtime.queues.toClarify],
+    ["humanInput", runtime.queues.humanInput],
+    ["refinement", runtime.queues.refinement],
+    ["backlog", runtime.queues.backlog],
+  ];
+}
+
+function findDecisionArtifactForRequirement(runtime, requirementPath) {
+  return { state: "missing", path: "", data: null, reason: "decision_artifacts_disabled" };
+}
+
+function detectRequirementConflictSignals(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return { conflict: false, reason: "" };
+  }
+  const fm = parseFrontMatter(filePath);
+  const explicitFlag = String(
+    fm.hard_vision_conflict
+    || fm.hardVisionConflict
+    || fm.requirement_conflict
+    || fm.requirementConflict
+    || fm.docs_conflict
+    || fm.docsConflict
+    || fm.policy_conflict
+    || fm.policyConflict
+    || ""
+  ).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(explicitFlag)) {
+    return { conflict: true, reason: "frontmatter-conflict-flag" };
+  }
+
+  const raw = readRequirementRaw(filePath).toLowerCase();
+  const explicitConflictReason = /(?:^|\n)\s*-\s*decision_reason\s*:\s*(conflict|contradiction|docs_conflict|policy_conflict|requirement_conflict)\b/i
+    .test(raw);
+  if (explicitConflictReason) {
+    return { conflict: true, reason: "decision-reason-conflict" };
+  }
+
+  const conflictLanguage = /(widerspruch|konflikt|contradict(?:ion|s|ory)?|inconsistent|conflicting requirements?|docs conflict|policy conflict|requirement conflict)/i;
+  if (conflictLanguage.test(raw)) {
+    return { conflict: true, reason: "text-conflict-signal" };
+  }
+  return { conflict: false, reason: "" };
 }
 
 function routeFromPo(runtime, filePath, status) {
@@ -1602,6 +1927,7 @@ function writeCanonicalPoResults(filePath, payload) {
   const status = String(data.status || "unknown").trim() || "unknown";
   const targetQueue = String(data.targetQueue || "").trim() || "toClarify";
   const sourceQueue = String(data.sourceQueue || "").trim();
+  const decisionReason = String(data.decisionReason || "").trim() || defaultDecisionReasonForTarget(targetQueue);
   const summary = String(data.summary || "").trim();
   const alreadyImplemented = Boolean(data.alreadyImplementedClaim);
   const report = data.evidenceReport && typeof data.evidenceReport === "object"
@@ -1610,6 +1936,8 @@ function writeCanonicalPoResults(filePath, payload) {
 
   lines.push(`- status: ${status}`);
   lines.push(`- target: ${targetQueue}`);
+  lines.push(`- target_queue: ${targetQueue}`);
+  lines.push(`- decision_reason: ${decisionReason}`);
   if (sourceQueue) {
     lines.push(`- source: ${sourceQueue}`);
   }
@@ -1682,11 +2010,29 @@ function stalePlanningDuplicateTargets(originQueue) {
   return [];
 }
 
+function hasCanonicalDuplicateInQueue(queueDir, sourcePath, sourceKey) {
+  if (!queueDir || !sourceKey) {
+    return false;
+  }
+  const sourceResolved = path.resolve(sourcePath);
+  for (const candidate of listQueueFiles(queueDir)) {
+    if (path.resolve(candidate) === sourceResolved) {
+      continue;
+    }
+    const candidateKey = canonicalRequirementKeyFromPath(candidate);
+    if (candidateKey && candidateKey === sourceKey) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function removeStalePlanningDuplicate(runtime, sourcePath, originQueue, controls) {
   if (!sourcePath || !fs.existsSync(sourcePath)) {
     return false;
   }
   const fileName = path.basename(sourcePath);
+  const sourceKey = canonicalRequirementKeyFromPath(sourcePath);
   const targets = stalePlanningDuplicateTargets(originQueue);
   if (targets.length === 0) {
     return false;
@@ -1698,12 +2044,21 @@ function removeStalePlanningDuplicate(runtime, sourcePath, originQueue, controls
       continue;
     }
     const candidate = path.join(queueDir, fileName);
-    if (!fs.existsSync(candidate)) {
+    const exactExists = fs.existsSync(candidate);
+    const canonicalExists = hasCanonicalDuplicateInQueue(queueDir, sourcePath, sourceKey);
+    if (!exactExists && !canonicalExists) {
       continue;
     }
     try {
       fs.unlinkSync(sourcePath);
-      log(controls, `removed stale ${originQueue} duplicate ${fileName}; canonical in ${queueName}`);
+      if (canonicalExists && !exactExists) {
+        log(
+          controls,
+          `removed stale ${originQueue} duplicate ${fileName}; canonical id ${sourceKey || "unknown"} already in ${queueName}`
+        );
+      } else {
+        log(controls, `removed stale ${originQueue} duplicate ${fileName}; canonical in ${queueName}`);
+      }
       return true;
     } catch (err) {
       log(controls, `failed removing stale duplicate ${fileName}: ${err.message || err}`);
@@ -1711,6 +2066,46 @@ function removeStalePlanningDuplicate(runtime, sourcePath, originQueue, controls
     }
   }
   return false;
+}
+
+function findRequirementPathByCanonicalKey(runtime, canonicalKey) {
+  const key = normalizeRequirementKey(canonicalKey);
+  if (!key) {
+    return "";
+  }
+  const queueNames = Object.keys(runtime.queues || {});
+  for (const queueName of queueNames) {
+    const queueDir = runtime.queues[queueName];
+    for (const filePath of listQueueFiles(queueDir)) {
+      const currentKey = canonicalRequirementKeyFromPath(filePath);
+      if (currentKey && currentKey === key) {
+        return filePath;
+      }
+    }
+  }
+  return "";
+}
+
+function artifactToDecision(artifact) {
+  const data = artifact && typeof artifact === "object" ? artifact : {};
+  return {
+    status: String(data.status || "").trim(),
+    statusRaw: String(data.statusRaw || data.status_raw || data.status || "").trim(),
+    summary: String(data.summary || "").trim(),
+    findings: Array.isArray(data.findings)
+      ? data.findings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
+    new_requirements: Array.isArray(data.new_requirements) ? data.new_requirements : [],
+    wontDo: Boolean(data.wontDo === true),
+    hardVisionConflict: Boolean(data.hardVisionConflict === true || data.hard_vision_conflict === true),
+    clarifyQuestion: String(data.clarifyQuestion || data.clarify_question || "").trim(),
+    recommendedDefault: String(data.recommendedDefault || data.recommended_default || "").trim(),
+    targetQueue: normalizePoTarget(data.targetQueue || data.target_queue || data.target || ""),
+  };
+}
+
+function recoverOrphanDecisionArtifacts(runtime, controls) {
+  return { recovered: 0, deduped: 0 };
 }
 
 function buildFallbackFollowUpItem(decision, frontMatter, currentPath) {
@@ -2082,9 +2477,9 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     }
   }
 
-  const decision = parseDecisionFile(`${currentPath}.decision.json`, "PO");
+  const decision = artifactToDecision(null);
   const frontMatter = parseFrontMatter(currentPath);
-  const status = normalizeStatus(decision.status || frontMatter.status || (result.ok ? "pass" : "clarify"));
+  const status = normalizeStatus(frontMatter.status || (result.ok ? "pass" : "clarify"));
   const sourceQueue = originQueue || queueNameFromPath(sourceBefore, runtime.queues) || "";
 
   let forcedEscalationQueue = "";
@@ -2110,25 +2505,53 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     appendQueueSection(currentPath, [
       "PO runner: execution failure",
       `- reason: ${(result.stderr || "execution failed").slice(0, 700)}`,
-      "- action: route to to-clarify",
+      "- action: defensive fallback routing (refinement unless forced escalation applies)",
     ]);
   }
 
-  const explicitTarget = normalizePoTarget(decision.targetQueue);
-  let targetQueue = forcedEscalationQueue || explicitTarget || routeFromPo(runtime, currentPath, status);
-  const hardVisionConflict = isHardVisionConflict(decision);
-  const inferredTarget = inferPoTargetFromDecision(decision) || inferPoTargetFromRequirementFile(currentPath);
+  const explicitTargetFromRequirement = inferPoTargetFromRequirementFile(currentPath);
+  let targetQueue = forcedEscalationQueue || explicitTargetFromRequirement;
+  const forcedEscalationActive = Boolean(forcedEscalationQueue);
+  let decisionReason = extractDecisionReasonFromRequirement(currentPath);
 
-  if (!explicitTarget && wantsWontDo(decision)) {
-    targetQueue = "wontDo";
+  if (!forcedEscalationActive && !result.ok) {
+    targetQueue = "refinement";
+    decisionReason = "po_execution_failed";
     appendQueueSection(currentPath, [
-      "PO runner wont-do guard",
-      "- detected duplicate/already-implemented/invalid requirement signal; routed to wont-do",
+      "PO runner execution-failure guard",
+      "- PO intake execution failed; enforcing markdown-only defensive routing",
+      "- routed defensively to refinement",
     ]);
+  }
+
+  if (!targetQueue) {
+    targetQueue = "refinement";
+    if (!decisionReason) {
+      decisionReason = "no_explicit_target";
+    }
+    appendRunnerMetric(runtime, {
+      stage: "po-intake",
+      item_key: requirementKey(currentPath),
+      result: "decision-fallback",
+      reason: "no-explicit-target",
+      source_queue: sourceQueue || "unknown",
+      target_queue: targetQueue,
+    });
+    appendQueueSection(currentPath, [
+      "PO runner defensive routing fallback",
+      "- no explicit target found in decision artifact or requirement file",
+      `- routed defensively to ${targetQueue}`,
+    ]);
+  }
+  const hardVisionConflict = isHardVisionConflict(decision);
+  const inferredTarget = explicitTargetFromDecision;
+  const conflictCheck = detectRequirementConflictSignals(currentPath);
+  if (!decisionReason) {
+    decisionReason = defaultDecisionReasonForTarget(targetQueue);
   }
 
   if (
-    !explicitTarget &&
+    result.ok &&
     inferredTarget &&
     inferredTarget !== targetQueue &&
     (
@@ -2144,9 +2567,44 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     ]);
   }
 
+  if (targetQueue === "wontDo" && conflictCheck.conflict) {
+    targetQueue = "humanDecisionNeeded";
+    decisionReason = "conflict_guard";
+    appendQueueSection(currentPath, [
+      "PO runner wont-do conflict guard",
+      `- detected contradiction/conflict (${conflictCheck.reason})`,
+      "- conflicting requirements/docs/policy must be routed to human-decision-needed, not wont-do",
+    ]);
+  }
+
+  if (targetQueue === "wontDo") {
+    const normalizedWontDoReason = normalizeWontDoDecisionReason(decisionReason);
+    if (!normalizedWontDoReason || !ALLOWED_WONT_DO_DECISION_REASONS.has(normalizedWontDoReason)) {
+      targetQueue = "refinement";
+      decisionReason = "invalid_wont_do_reason";
+      appendQueueSection(currentPath, [
+        "PO runner wont-do decision-reason guard",
+        "- invalid or missing decision_reason for wont-do",
+        "- allowed: duplicate | obsolete | invalid | deprioritized | already_implemented",
+        "- routed to refinement",
+      ]);
+    } else {
+      decisionReason = normalizedWontDoReason;
+      appendQueueSection(currentPath, [
+        "PO runner wont-do decision-reason",
+        `- decision_reason: ${decisionReason}`,
+      ]);
+    }
+  }
+
+  if (!decisionReason) {
+    decisionReason = defaultDecisionReasonForTarget(targetQueue);
+  }
+
   // To-clarify requires an actionable question + recommendation.
   if (targetQueue === "toClarify" && !hardVisionConflict && !isActionableClarifyDecision(decision)) {
     targetQueue = sourceQueue === "toClarify" ? "backlog" : "refinement";
+    decisionReason = "clarify_contract_guard";
     appendQueueSection(currentPath, [
       "PO runner clarify contract guard",
       "- to-clarify requested without actionable question+recommended_default; PO routed decisively instead",
@@ -2156,6 +2614,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
   // Resolve to-clarify decisively: do not keep the same requirement in to-clarify forever.
   if (sourceQueue === "toClarify" && targetQueue === "toClarify") {
     targetQueue = "backlog";
+    decisionReason = "to_clarify_decisiveness_guard";
     appendQueueSection(currentPath, [
       "PO runner decisiveness guard",
       "- source queue was to-clarify and target stayed to-clarify; routed to backlog with PO decision",
@@ -2163,22 +2622,26 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
   }
 
   // Escalate to human only for hard vision conflicts.
-  if (targetQueue === "humanDecisionNeeded" && !hardVisionConflict) {
+  if (targetQueue === "humanDecisionNeeded" && !hardVisionConflict && !forcedEscalationActive) {
     targetQueue = "selected";
+    decisionReason = "escalation_guard_autonomous_resolution";
     appendQueueSection(currentPath, [
       "PO runner escalation guard",
       "- escalation requested without hard vision conflict; PO resolved autonomously and routed to selected",
     ]);
   }
-  if (targetQueue === "humanDecisionNeeded" && hardVisionConflict) {
+  if (targetQueue === "humanDecisionNeeded" && (hardVisionConflict || forcedEscalationActive)) {
     appendQueueSection(currentPath, [
       "PO runner escalation confirmed",
-      "- hard vision conflict confirmed; awaiting explicit human decision",
+      forcedEscalationActive
+        ? "- repeated execution failures exceeded loop policy threshold; awaiting explicit human decision"
+        : "- hard vision conflict confirmed; awaiting explicit human decision",
     ]);
   }
 
   if (targetQueue === "selected" && !canPrepareBundle(runtime)) {
     targetQueue = "backlog";
+    decisionReason = "bundle_slot_guard";
     appendQueueSection(currentPath, [
       "PO runner bundle slot guard",
       "- selected routing deferred because a ready bundle is already waiting for delivery",
@@ -2186,27 +2649,44 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     ]);
   }
 
-  const alreadyImplementedClaim = targetQueue === "wontDo" && isAlreadyImplementedClaim(decision);
+  const poResultsStatus = extractPoResultsStatusFromRequirement(currentPath);
+  const alreadyImplementedClaim = targetQueue === "wontDo" && decisionReason === "already_implemented";
   let acEvidenceReport = null;
   if (alreadyImplementedClaim) {
-    acEvidenceReport = evaluateAlreadyImplementedEvidence(currentPath);
-    upsertAcEvidenceSection(currentPath, acEvidenceReport);
-    if (!acEvidenceReport.complete) {
+    if (poResultsStatus !== "closed") {
       targetQueue = "backlog";
+      decisionReason = "already_implemented_requires_closed_status";
       appendQueueSection(currentPath, [
-        "PO runner already-implemented AC-evidence guard",
-        `- AC evidence incomplete (${acEvidenceReport.fulfilledCount}/${acEvidenceReport.acCount}); routed to backlog`,
+        "PO runner already-implemented status guard",
+        `- PO Results status is '${poResultsStatus || "missing"}'; required: closed`,
+        "- routed to backlog",
       ]);
-      upsertOpenGapsSection(currentPath, acEvidenceReport.gaps);
     } else {
-      upsertOpenGapsSection(currentPath, []);
+      acEvidenceReport = evaluateAlreadyImplementedEvidence(currentPath);
+      upsertAcEvidenceSection(currentPath, acEvidenceReport);
+      if (!acEvidenceReport.complete) {
+        targetQueue = "backlog";
+        decisionReason = "already_implemented_ac_evidence_incomplete";
+        appendQueueSection(currentPath, [
+          "PO runner already-implemented AC-evidence guard",
+          `- AC evidence incomplete (${acEvidenceReport.fulfilledCount}/${acEvidenceReport.acCount}); routed to backlog`,
+        ]);
+        upsertOpenGapsSection(currentPath, acEvidenceReport.gaps);
+      } else {
+        upsertOpenGapsSection(currentPath, []);
+      }
     }
+  }
+
+  if (!decisionReason) {
+    decisionReason = defaultDecisionReasonForTarget(targetQueue);
   }
 
   writeCanonicalPoResults(currentPath, {
     status,
     targetQueue,
     sourceQueue,
+    decisionReason,
     summary: decision.summary || "",
     alreadyImplementedClaim,
     evidenceReport: acEvidenceReport,
@@ -2218,6 +2698,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     "PO runner routing",
     `- status: ${status}`,
     `- target: ${targetQueue}`,
+    `- decision_reason: ${decisionReason}`,
   ]);
 
   if (targetQueue === "humanDecisionNeeded") {
@@ -2291,15 +2772,11 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
 }
 
 async function runVisionCycle(runtime, controls) {
-  const decisionPath = path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
-  fs.mkdirSync(path.dirname(decisionPath), { recursive: true });
-  if (fs.existsSync(decisionPath)) {
-    fs.unlinkSync(decisionPath);
-  }
+  const beforeSnapshot = buildPlanningSnapshot(runtime);
 
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "po", "po.js"),
-    args: ["--auto", "--mode", "vision", "--vision-decision-file", decisionPath],
+    args: ["--auto", "--mode", "vision"],
     cwd: runtime.agentsRoot,
     maxRetries: retryMaxForPoStage(runtime, "vision", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
@@ -2307,7 +2784,7 @@ async function runVisionCycle(runtime, controls) {
     noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
-  const decision = readVisionDecision(decisionPath);
+  const decision = deriveVisionDecision(runtime, result, beforeSnapshot);
   if (!result.ok) {
     log(controls, `vision cycle failed: ${(result.stderr || "").slice(0, 400)}`);
   }
@@ -2434,6 +2911,8 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
     const cycle = state.cycle;
     const before = snapshotHash(runtime);
 
+    cleanupRequirementJsonArtifacts(runtime, controls, "intake-cycle");
+
     enforceBlockedQueuePolicy(runtime, controls);
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
@@ -2500,6 +2979,8 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
     state.cycle = Math.max(0, Number.parseInt(String(state.cycle || 0), 10)) + 1;
     const cycle = state.cycle;
     const before = snapshotHash(runtime);
+
+    cleanupRequirementJsonArtifacts(runtime, controls, "vision-cycle");
 
     enforceBlockedQueuePolicy(runtime, controls);
     await processToClarify(runtime, controls, state, cycle);
@@ -2654,6 +3135,7 @@ async function main() {
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
   resetGlobalPauseOnStartup(runtime, controls);
+  cleanupRequirementJsonArtifacts(runtime, controls, "startup");
 
   log(controls, `mode=${mode}`);
   log(controls, `selected watermark low=${lowWatermark} high=${highWatermark}`);
@@ -2677,6 +3159,16 @@ if (require.main === module) {
 module.exports = {
   __test: {
     isAlreadyImplementedClaim,
+    normalizeRoutingDecisionReason,
+    normalizeWontDoDecisionReason,
+    defaultDecisionReasonForTarget,
+    canonicalRequirementKeyFromPath,
+    canonicalRequirementKeyFromFileName,
+    findDecisionArtifactForRequirement,
+    recoverOrphanDecisionArtifacts,
+    extractDecisionReasonFromRequirement,
+    extractPoResultsStatusFromRequirement,
+    artifactToDecision,
     parseAcceptanceCriteriaFromRaw,
     parseAcEvidenceEntriesFromRaw,
     isValidAcEvidenceReference,
