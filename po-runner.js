@@ -2544,7 +2544,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     ]);
   }
   const hardVisionConflict = isHardVisionConflict(decision);
-  const inferredTarget = explicitTargetFromDecision;
+  const inferredTarget = inferPoTargetFromDecision(decision);
   const conflictCheck = detectRequirementConflictSignals(currentPath);
   if (!decisionReason) {
     decisionReason = defaultDecisionReasonForTarget(targetQueue);
