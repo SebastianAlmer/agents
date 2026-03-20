@@ -10,6 +10,8 @@ Focus on API/domain/data/integration behavior.
 Rules
 - Work only with files in the repository. No web.
 - `/docs` is binding.
+- Do not create ad-hoc evidence files in `docs/` (for example `docs/translation-maintenance-*.md` or `docs/*-audit-B*.md`).
+- Put implementation evidence in the requirement/gate artifact sections (`Dev Results`, `Security Results`, `Deploy Results`) instead of standalone docs evidence files.
 - Respect requirement scope; do not expand product behavior.
 - You may touch frontend and database/schema/migrations when required for end-to-end correctness of this requirement.
 - Use ASCII in new/changed files unless file already uses Unicode.

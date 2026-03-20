@@ -22,6 +22,12 @@ const {
   normalizeStatus,
   listQueueFiles,
   getActivePauseState,
+  readPauseState,
+  clearPauseState,
+  readBundleRegistry,
+  writeBundleRegistry,
+  formatBundleId,
+  parseBundleSequence,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
 
@@ -160,6 +166,88 @@ function normalizeNonNegativeInt(value, fallback) {
   return parsed;
 }
 
+function runnerAgentTimeoutSeconds(runtime) {
+  const parsed = Number.parseInt(
+    String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.agentTimeoutSeconds || 0),
+    10
+  );
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function runnerNoOutputTimeoutSeconds(runtime) {
+  const parsed = Number.parseInt(
+    String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.noOutputTimeoutSeconds || 0),
+    10
+  );
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function retryMaxForPoStage(runtime, stageName, fallback = 0) {
+  const policy = runtime && runtime.retryPolicy ? runtime.retryPolicy : {};
+  const map = {
+    intake: policy.poIntakeRetryMax,
+    vision: policy.poVisionRetryMax,
+  };
+  const value = map[String(stageName || "").toLowerCase()];
+  if (!Number.isFinite(value)) {
+    return Math.max(0, Number.parseInt(String(fallback || 0), 10) || 0);
+  }
+  return Math.max(0, Number.parseInt(String(value), 10) || 0);
+}
+
+function runnerMetricsDir(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "runner-metrics");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function appendRunnerMetric(runtime, event) {
+  try {
+    const dir = runnerMetricsDir(runtime);
+    const eventPath = path.join(dir, "events.jsonl");
+    const summaryPath = path.join(dir, "summary.json");
+    const payload = {
+      ts: new Date().toISOString(),
+      runner: "po",
+      ...event,
+    };
+    fs.appendFileSync(eventPath, `${JSON.stringify(payload)}\n`, "utf8");
+
+    let summary = { totals: { events: 0 }, byRunner: {}, byStage: {}, byResult: {} };
+    if (fs.existsSync(summaryPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+        if (parsed && typeof parsed === "object") {
+          summary = parsed;
+        }
+      } catch {
+        // keep defaults
+      }
+    }
+    summary.totals = summary.totals && typeof summary.totals === "object" ? summary.totals : { events: 0 };
+    summary.byRunner = summary.byRunner && typeof summary.byRunner === "object" ? summary.byRunner : {};
+    summary.byStage = summary.byStage && typeof summary.byStage === "object" ? summary.byStage : {};
+    summary.byResult = summary.byResult && typeof summary.byResult === "object" ? summary.byResult : {};
+    summary.totals.events = Math.max(0, Number.parseInt(String(summary.totals.events || 0), 10)) + 1;
+    const runnerKey = String(payload.runner || "po");
+    const stageKey = String(payload.stage || "unknown");
+    const resultKey = String(payload.result || "unknown");
+    summary.byRunner[runnerKey] = Math.max(0, Number.parseInt(String(summary.byRunner[runnerKey] || 0), 10)) + 1;
+    summary.byStage[stageKey] = Math.max(0, Number.parseInt(String(summary.byStage[stageKey] || 0), 10)) + 1;
+    summary.byResult[resultKey] = Math.max(0, Number.parseInt(String(summary.byResult[resultKey] || 0), 10)) + 1;
+    summary.updatedAt = new Date().toISOString();
+    fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+  } catch {
+    // best effort only
+  }
+}
+
 function queueSummary(runtime) {
   return {
     refinement: countFiles(runtime.queues.refinement),
@@ -203,6 +291,7 @@ function createControls(initialVerbose, runtime) {
   const controls = {
     verbose: Boolean(initialVerbose),
     stopRequested: false,
+    drainRequested: false,
     onStop(callback) {
       if (typeof callback !== "function") {
         return () => {};
@@ -227,6 +316,17 @@ function createControls(initialVerbose, runtime) {
           // ignore hook errors during shutdown
         }
       }
+    },
+    requestDrain(reason = "q") {
+      if (controls.stopRequested) {
+        return;
+      }
+      if (controls.drainRequested) {
+        controls.requestStop(`${reason} (force)`);
+        return;
+      }
+      controls.drainRequested = true;
+      process.stdout.write("\nPO-RUNNER: graceful stop requested (finish current item, then exit)\n");
     },
     cleanup() {},
   };
@@ -264,7 +364,7 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if ((key.name || "").toLowerCase() === "q") {
-      controls.requestStop("q");
+      controls.requestDrain("q");
       return;
     }
   };
@@ -284,8 +384,33 @@ function createControls(initialVerbose, runtime) {
 
 function log(controls, message) {
   if (controls.verbose) {
-    process.stdout.write(`PO-RUNNER: ${message}\n`);
+    process.stdout.write(`${timestampMinute()} PO-RUNNER: ${message}\n`);
   }
+}
+
+function resetGlobalPauseOnStartup(runtime, controls) {
+  const state = readPauseState(runtime.agentsRoot);
+  if (!state || !state.active) {
+    return;
+  }
+  const reason = String(state.reason || "unknown").replace(/_/g, "-");
+  const source = String(state.source || "unknown");
+  const resumeAfter = String(state.resumeAfter || "unknown");
+  clearPauseState(runtime.agentsRoot);
+  process.stdout.write(
+    `${timestampMinute()} PO-RUNNER: startup pause reset (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
+  );
+  log(controls, "global pause state cleared on startup");
+}
+
+function timestampMinute() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${y}-${m}-${d} ${hh}:${mm}`;
 }
 
 async function sleepWithStopCheck(ms, controls) {
@@ -317,7 +442,7 @@ async function waitIfGloballyPaused(runtime, controls) {
   if (!pauseState) {
     return false;
   }
-  process.stdout.write(`PO-RUNNER: ${formatPauseLine(pauseState)}\n`);
+  process.stdout.write(`${timestampMinute()} PO-RUNNER: ${formatPauseLine(pauseState)}\n`);
   const fallbackMs = Math.max(1, runtime.loops.poPollSeconds) * 1000;
   const waitMs = Number.isFinite(pauseState.remainingMs)
     ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
@@ -331,6 +456,13 @@ function planningQueuesBusy(runtime) {
 }
 
 function shouldFillSelected(runtime, highWatermark, state, controls) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const readyBundleId = String(registry.ready_bundle_id || "").trim();
+  if (readyBundleId) {
+    log(controls, `bundle prep paused: ready bundle waiting (${readyBundleId})`);
+    return false;
+  }
+
   const selectedCount = countFiles(runtime.queues.selected);
   const planningBusy = planningQueuesBusy(runtime);
 
@@ -347,13 +479,14 @@ function shouldFillSelected(runtime, highWatermark, state, controls) {
     return false;
   }
 
-  if (selectedCount >= highWatermark) {
+  const bundleTarget = Math.max(highWatermark, Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1));
+  if (selectedCount >= bundleTarget) {
     state.bundleLocked = true;
-    log(controls, `bundle lock engaged at selected=${selectedCount} (target=${highWatermark})`);
+    log(controls, `bundle lock engaged at selected=${selectedCount} (target=${bundleTarget})`);
     return false;
   }
 
-  return selectedCount < highWatermark;
+  return selectedCount < bundleTarget;
 }
 
 function logWaitCheck(runtime, state, controls, highWatermark) {
@@ -364,13 +497,17 @@ function logWaitCheck(runtime, state, controls, highWatermark) {
   const archCount = countFiles(runtime.queues.arch);
   const devCount = countFiles(runtime.queues.dev);
   const planningBusy = archCount > 0 || devCount > 0;
+  const registry = readBundleRegistryForRuntime(runtime);
+  const readyBundleId = String(registry.ready_bundle_id || "").trim();
 
   let reason = "no-intake-needed";
   if (state && state.bundleLocked) {
     reason = "bundle-locked";
+  } else if (readyBundleId) {
+    reason = `bundle-ready(${readyBundleId})`;
   } else if (planningBusy) {
     reason = "planning-busy";
-  } else if (selectedCount >= highWatermark) {
+  } else if (selectedCount >= Math.max(highWatermark, Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1))) {
     reason = "selected-at-target";
   }
 
@@ -414,6 +551,10 @@ function findVisionOpenDecisionHint(runtime) {
 
 function waitReason(runtime, state, highWatermark, mode) {
   const selected = countFiles(runtime.queues.selected);
+  const minBundle = Math.max(
+    1,
+    Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1
+  );
   const arch = countFiles(runtime.queues.arch);
   const dev = countFiles(runtime.queues.dev);
   const planningBusy = arch > 0 || dev > 0;
@@ -423,14 +564,21 @@ function waitReason(runtime, state, highWatermark, mode) {
   const refinement = countFiles(runtime.queues.refinement);
   const humanDecisionNeeded = countFiles(runtime.queues.humanDecisionNeeded);
   const intakeCandidates = listIntakeCandidates(runtime).length;
+  const registry = readBundleRegistryForRuntime(runtime);
+  const readyBundleId = String(registry.ready_bundle_id || "").trim();
+  const activeBundleId = String(registry.active_bundle_id || "").trim();
 
   let reason = "no actionable intake work right now";
   if (planningBusy) {
     reason = `planning busy (arch=${arch}, dev=${dev})`;
+  } else if (readyBundleId) {
+    reason = `ready bundle waiting for delivery start (${readyBundleId})`;
   } else if (state && state.bundleLocked) {
     reason = `bundle locked while delivery drains (selected=${selected})`;
-  } else if (selected >= highWatermark) {
-    reason = `selected buffer at target (${selected}/${highWatermark})`;
+  } else if (selected >= Math.max(highWatermark, minBundle)) {
+    reason = `selected buffer at target (${selected}/${Math.max(highWatermark, minBundle)})`;
+  } else if (selected > 0) {
+    reason = `waiting for full bundle (${selected}/${minBundle})`;
   } else if (mode === "vision") {
     const visionHint = findVisionOpenDecisionHint(runtime);
     if (intakeCandidates > 0) {
@@ -462,6 +610,12 @@ function waitReason(runtime, state, highWatermark, mode) {
   if (humanDecisionNeeded > 0) {
     extras.push(`human-decision-needed=${humanDecisionNeeded}`);
   }
+  if (activeBundleId) {
+    extras.push(`active-bundle=${activeBundleId}`);
+  }
+  if (readyBundleId) {
+    extras.push(`ready-bundle=${readyBundleId}`);
+  }
   return {
     reason,
     extras,
@@ -472,14 +626,75 @@ async function sleepWithWaitInfo(runtime, controls, state, highWatermark, mode) 
   const info = waitReason(runtime, state, highWatermark, mode);
   const minutes = Math.max(1, Math.round(PO_IDLE_WAIT_MS / 60000));
   const suffix = info.extras.length > 0 ? ` | ${info.extras.join(" ")}` : "";
-  process.stdout.write(`PO-RUNNER: waiting ${minutes}m - ${info.reason}${suffix}\n`);
+  process.stdout.write(`${timestampMinute()} PO-RUNNER: waiting ${minutes}m - ${info.reason}${suffix}\n`);
   await sleepWithStopCheck(PO_IDLE_WAIT_MS, controls);
 }
 
-function buildBundleId() {
-  const now = new Date();
-  const pad = (v) => String(v).padStart(2, "0");
-  return `BUNDLE-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+function readBundleRegistryForRuntime(runtime) {
+  return readBundleRegistry(runtime.agentsRoot);
+}
+
+function writeBundleRegistryForRuntime(runtime, registry) {
+  return writeBundleRegistry(runtime.agentsRoot, registry);
+}
+
+function bundleIdOptions(runtime) {
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  return {
+    prefix: String(cfg.idPrefix || "B").trim() || "B",
+    pad: Math.max(1, Number.parseInt(String(cfg.idPad || 4), 10) || 4),
+  };
+}
+
+function reserveNextBundle(runtime) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const seq = Math.max(1, Number.parseInt(String(registry.next_bundle_seq || 1), 10) || 1);
+  const id = formatBundleId(seq, bundleIdOptions(runtime));
+  const now = new Date().toISOString();
+  registry.next_bundle_seq = seq + 1;
+  if (!registry.bundles[id]) {
+    registry.bundles[id] = {
+      id,
+      seq,
+      status: "drafting",
+      createdAt: now,
+      startedAt: "",
+      finishedAt: "",
+      sourceReqIds: [],
+      carryoversIn: [],
+      carryoversOut: [],
+    };
+  }
+  writeBundleRegistryForRuntime(runtime, registry);
+  return { id, seq };
+}
+
+function updateBundleRegistryReady(runtime, bundleId, sourceReqIds = []) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const seq = parseBundleSequence(bundleId, bundleIdOptions(runtime));
+  const now = new Date().toISOString();
+  const entry = registry.bundles[bundleId] && typeof registry.bundles[bundleId] === "object"
+    ? registry.bundles[bundleId]
+    : {};
+  registry.bundles[bundleId] = {
+    ...entry,
+    id: bundleId,
+    seq: seq || entry.seq || 0,
+    status: "ready",
+    createdAt: entry.createdAt || now,
+    sourceReqIds: Array.isArray(sourceReqIds) ? sourceReqIds : [],
+  };
+  registry.ready_bundle_id = bundleId;
+  writeBundleRegistryForRuntime(runtime, registry);
+}
+
+function canPrepareBundle(runtime) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const readyId = String(registry.ready_bundle_id || "").trim();
+  if (readyId) {
+    return false;
+  }
+  return true;
 }
 
 function setFrontMatterField(filePath, key, value) {
@@ -500,17 +715,158 @@ function setFrontMatterField(filePath, key, value) {
   return true;
 }
 
-function assignBundleIdToSelected(runtime, bundleId) {
+function stripBundleSuffix(stem) {
+  return String(stem || "")
+    .replace(/^B\d{4}-/i, "")
+    .replace(/-B\d{4}(?:-carry-\d{2}-from-B\d{4})?$/i, "")
+    .replace(/-carry-\d{2}-from-B\d{4}$/i, "");
+}
+
+function renameRequirementForBundle(filePath, bundleId) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return filePath;
+  }
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath) || ".md";
+  const stem = path.basename(filePath, ext);
+  const normalizedStem = stripBundleSuffix(stem);
+  const nextName = `${bundleId}-${normalizedStem}${ext}`;
+  const target = path.join(dir, nextName);
+  if (path.resolve(target) === path.resolve(filePath)) {
+    return filePath;
+  }
+  if (fs.existsSync(target)) {
+    fs.unlinkSync(target);
+  }
+  fs.renameSync(filePath, target);
+  return target;
+}
+
+function stripCarryoverSuffix(stem) {
+  return String(stem || "")
+    .replace(/^carry-\d{2}-from-B\d{4}-/i, "")
+    .replace(/-carry-\d{2}-from-B\d{4}$/i, "");
+}
+
+function renameRequirementAsCarryover(filePath, oldBundleId, carryoverCount) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return filePath;
+  }
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath) || ".md";
+  const stem = path.basename(filePath, ext);
+  const normalizedStem = stripCarryoverSuffix(stripBundleSuffix(stem));
+  const nextName = `carry-${String(Math.max(1, carryoverCount)).padStart(2, "0")}-from-${oldBundleId}-${normalizedStem}${ext}`;
+  const target = path.join(dir, nextName);
+  if (path.resolve(target) === path.resolve(filePath)) {
+    return filePath;
+  }
+  if (fs.existsSync(target)) {
+    fs.unlinkSync(target);
+  }
+  fs.renameSync(filePath, target);
+  return target;
+}
+
+function readCarryoverList(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return [];
+  }
+  return text
+    .split(",")
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function markRequirementAsCarryover(filePath, controls, reasonLabel = "bundle-exit") {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return filePath;
+  }
+  const fm = parseFrontMatter(filePath);
+  const oldBundleId = String(fm.bundle_id || "").trim();
+  if (!oldBundleId) {
+    return filePath;
+  }
+  const prevCount = Number.parseInt(String(fm.carryover_count || 0), 10);
+  const carryoverCount = Number.isFinite(prevCount) && prevCount > 0 ? prevCount + 1 : 1;
+  const existingFrom = readCarryoverList(fm.carryover_from_bundle_ids);
+  const mergedFrom = Array.from(new Set([...existingFrom, oldBundleId]));
+
+  let currentPath = renameRequirementAsCarryover(filePath, oldBundleId, carryoverCount);
+  setFrontMatterField(currentPath, "carryover_count", carryoverCount);
+  setFrontMatterField(currentPath, "carryover_from_bundle_ids", mergedFrom.join(", "));
+  setFrontMatterField(currentPath, "bundle_id", "");
+  setFrontMatterField(currentPath, "bundle_seq", 0);
+  upsertMarkdownSection(currentPath, "Bundle History", [
+    `- carryover_count: ${carryoverCount}`,
+    `- carryover_from_bundle_ids: ${mergedFrom.join(", ")}`,
+    `- carryover_reason: ${reasonLabel}`,
+  ]);
+  log(controls, `carryover marked ${path.basename(currentPath)} from=${oldBundleId} count=${carryoverCount}`);
+  return currentPath;
+}
+
+function assignBundleIdToSelected(runtime, bundleId, bundleSeq) {
   if (!bundleId) {
     return 0;
   }
   let updated = 0;
-  for (const filePath of listQueueFiles(runtime.queues.selected)) {
-    if (setFrontMatterField(filePath, "bundle_id", bundleId)) {
+  for (const sourcePath of listQueueFiles(runtime.queues.selected)) {
+    const filePath = renameRequirementForBundle(sourcePath, bundleId);
+    const okBundle = setFrontMatterField(filePath, "bundle_id", bundleId);
+    const okSeq = setFrontMatterField(filePath, "bundle_seq", bundleSeq);
+    const bundleHistoryLines = [
+      `- Current bundle: ${bundleId} (seq=${bundleSeq})`,
+      "- This requirement is part of the currently prepared static delivery bundle.",
+    ];
+    upsertMarkdownSection(filePath, "Bundle Assignment", bundleHistoryLines);
+    if (okBundle || okSeq) {
       updated += 1;
     }
   }
   return updated;
+}
+
+function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
+  if (!canPrepareBundle(runtime)) {
+    return false;
+  }
+  const selectedCount = countFiles(runtime.queues.selected);
+  if (selectedCount <= 0) {
+    state.underfilledSelectedCycles = 0;
+    return false;
+  }
+  const minBundle = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1);
+  const target = Math.max(highWatermark, minBundle);
+  const underfilled = selectedCount < minBundle;
+  const forceAfter = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.forceUnderfilledAfterCycles || 1), 10) || 1);
+
+  if (underfilled) {
+    state.underfilledSelectedCycles = Math.max(0, Number.parseInt(String(state.underfilledSelectedCycles || 0), 10) || 0) + 1;
+  } else {
+    state.underfilledSelectedCycles = 0;
+  }
+
+  const allowUnderfilled = underfilled && state.underfilledSelectedCycles >= forceAfter;
+  if (selectedCount < target && !allowUnderfilled) {
+    log(controls, `bundle readiness wait selected=${selectedCount} target=${target} min=${minBundle} underfilled_cycles=${state.underfilledSelectedCycles}/${forceAfter}`);
+    return false;
+  }
+
+  if (underfilled && allowUnderfilled) {
+    log(controls, `bundle readiness forced underfilled selected=${selectedCount} min=${minBundle} after ${state.underfilledSelectedCycles} cycle(s)`);
+  }
+
+  const nextBundle = reserveNextBundle(runtime);
+  const tagged = assignBundleIdToSelected(runtime, nextBundle.id, nextBundle.seq);
+  const sourceReqIds = listQueueFiles(runtime.queues.selected)
+    .map((filePath) => String(parseFrontMatter(filePath).id || "").trim())
+    .filter(Boolean);
+  updateBundleRegistryReady(runtime, nextBundle.id, sourceReqIds);
+  state.underfilledSelectedCycles = 0;
+  log(controls, `bundle prepared id=${nextBundle.id} selected_tagged=${tagged}`);
+  return true;
 }
 
 function validateProductVision(runtime) {
@@ -564,21 +920,24 @@ function poRunnerStatePath(runtime) {
 function readPoRunnerState(runtime) {
   const filePath = poRunnerStatePath(runtime);
   if (!fs.existsSync(filePath)) {
-    return { version: 1, cycle: 0, bundleLocked: false, items: {} };
+    return { version: 1, cycle: 0, bundleLocked: false, underfilledSelectedCycles: 0, items: {}, pausedCounts: {}, loopCounters: {} };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || typeof parsed !== "object") {
-      return { version: 1, cycle: 0, bundleLocked: false, items: {} };
+      return { version: 1, cycle: 0, bundleLocked: false, underfilledSelectedCycles: 0, items: {}, pausedCounts: {}, loopCounters: {} };
     }
     return {
       version: 1,
       cycle: Number.isInteger(parsed.cycle) ? parsed.cycle : 0,
       bundleLocked: parsed.bundleLocked === true,
+      underfilledSelectedCycles: Number.isInteger(parsed.underfilledSelectedCycles) ? Math.max(0, parsed.underfilledSelectedCycles) : 0,
       items: parsed.items && typeof parsed.items === "object" ? parsed.items : {},
+      pausedCounts: parsed.pausedCounts && typeof parsed.pausedCounts === "object" ? parsed.pausedCounts : {},
+      loopCounters: parsed.loopCounters && typeof parsed.loopCounters === "object" ? parsed.loopCounters : {},
     };
   } catch {
-    return { version: 1, cycle: 0, bundleLocked: false, items: {} };
+    return { version: 1, cycle: 0, bundleLocked: false, underfilledSelectedCycles: 0, items: {}, pausedCounts: {}, loopCounters: {} };
   }
 }
 
@@ -594,6 +953,66 @@ function requirementKey(filePath) {
     return id.toUpperCase();
   }
   return path.basename(filePath).toUpperCase();
+}
+
+function pausedKey(stageName, itemKey) {
+  return `${String(stageName || "po").toLowerCase()}:${String(itemKey || "unknown")}`;
+}
+
+function registerPausedOccurrence(state, stageName, itemKey) {
+  if (!state.pausedCounts || typeof state.pausedCounts !== "object") {
+    state.pausedCounts = {};
+  }
+  const key = pausedKey(stageName, itemKey);
+  const next = Math.max(1, Number.parseInt(String(state.pausedCounts[key] || 0), 10) + 1);
+  state.pausedCounts[key] = next;
+  return next;
+}
+
+function resetPausedOccurrence(state, stageName, itemKey) {
+  if (!state.pausedCounts || typeof state.pausedCounts !== "object") {
+    return;
+  }
+  const key = pausedKey(stageName, itemKey);
+  if (Object.prototype.hasOwnProperty.call(state.pausedCounts, key)) {
+    delete state.pausedCounts[key];
+  }
+}
+
+function loopCounterKey(stageName, itemKey, failureClass = "fail") {
+  return `${String(stageName || "po").toLowerCase()}:${String(itemKey || "unknown")}:${String(failureClass)}`;
+}
+
+function registerLoopFailure(state, stageName, itemKey, failureClass = "fail") {
+  if (!state.loopCounters || typeof state.loopCounters !== "object") {
+    state.loopCounters = {};
+  }
+  const key = loopCounterKey(stageName, itemKey, failureClass);
+  const next = Math.max(1, Number.parseInt(String(state.loopCounters[key] || 0), 10) + 1);
+  state.loopCounters[key] = next;
+  return next;
+}
+
+function resetLoopFailures(state, stageName, itemKey) {
+  if (!state.loopCounters || typeof state.loopCounters !== "object") {
+    return;
+  }
+  const prefix = `${String(stageName || "po").toLowerCase()}:${String(itemKey || "unknown")}:`;
+  for (const key of Object.keys(state.loopCounters)) {
+    if (key.startsWith(prefix)) {
+      delete state.loopCounters[key];
+    }
+  }
+}
+
+function pausedLimit(runtime) {
+  return Math.max(
+    1,
+    Number.parseInt(
+      String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.maxPausedCyclesPerItem || 2),
+      10
+    ) || 2
+  );
 }
 
 function fileHash(filePath) {
@@ -973,6 +1392,242 @@ function wantsWontDo(decision) {
     .test(text);
 }
 
+function decisionTextForChecks(decision) {
+  const summary = String((decision && decision.summary) || "");
+  const findings = Array.isArray(decision && decision.findings)
+    ? decision.findings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const rawStatus = String((decision && decision.statusRaw) || "");
+  return `${rawStatus}\n${summary}\n${findings.join("\n")}`.toLowerCase();
+}
+
+function isAlreadyImplementedClaim(decision) {
+  if (!decision || typeof decision !== "object") {
+    return false;
+  }
+  const rawStatus = String(decision.statusRaw || "").trim().toLowerCase();
+  if (["already-implemented", "already_implemented", "alreadyimplemented"].includes(rawStatus)) {
+    return true;
+  }
+  const text = decisionTextForChecks(decision);
+  if (/\bnot\s+already\s+implemented\b/.test(text)) {
+    return false;
+  }
+  return /(already implemented|already done|bereits umgesetzt|bereits vorhanden)/i.test(text);
+}
+
+function readRequirementRaw(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return "";
+  }
+  return fs.readFileSync(filePath, "utf8");
+}
+
+function parseAcceptanceCriteriaFromRaw(raw) {
+  const text = String(raw || "");
+  const sectionMatch = text.match(
+    /(?:^|\n)#{2,6}\s*(Acceptance Criteria|Akzeptanzkriterien)\s*\n([\s\S]*?)(?=\n#{1,6}\s+[^\n]+|$)/i
+  );
+  if (!sectionMatch) {
+    return [];
+  }
+
+  const lines = String(sectionMatch[2] || "").split(/\r?\n/);
+  const seen = new Set();
+  const criteria = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*(\d+)\.\s+(.+?)\s*$/);
+    if (!match) {
+      continue;
+    }
+    const index = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(index) || index <= 0 || seen.has(index)) {
+      continue;
+    }
+    seen.add(index);
+    criteria.push({
+      index,
+      text: String(match[2] || "").trim(),
+    });
+  }
+  return criteria.sort((a, b) => a.index - b.index);
+}
+
+function parseAcEvidenceEntriesFromRaw(raw) {
+  const entries = new Map();
+  const lines = String(raw || "").split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s*AC-(\d+)\s*:\s*(.+?)\s*$/i);
+    if (!match) {
+      continue;
+    }
+    const index = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(index) || index <= 0) {
+      continue;
+    }
+    const rest = String(match[2] || "").trim();
+    const statusMatch = rest.match(/\b(not[- ]fulfilled|fulfilled)\b/i);
+    const evidenceMatch = rest.match(/\bevidence\s*:\s*(.+)$/i);
+    const normalizedStatus = statusMatch
+      ? statusMatch[1].toLowerCase().replace("not fulfilled", "not-fulfilled")
+      : "";
+    entries.set(index, {
+      index,
+      raw: line,
+      status: normalizedStatus,
+      evidence: evidenceMatch ? String(evidenceMatch[1] || "").trim() : "",
+      hasEvidenceLabel: Boolean(evidenceMatch),
+    });
+  }
+  return entries;
+}
+
+function isValidAcEvidenceReference(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return false;
+  }
+  if (
+    /(^|[\s`"'(])(?:[A-Za-z]:[\\/]|\/)?[A-Za-z0-9._\-\\/]+(?:\.[A-Za-z0-9._-]+)?:\d+(?::\d+)?([\s`"')]|$)/
+      .test(text)
+  ) {
+    return true;
+  }
+  if (/\b(test|tests|spec|playwright|cypress|screen|screenshot|snap(?:shot)?|video|recording)\b/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function evaluateAlreadyImplementedEvidence(filePath) {
+  const raw = readRequirementRaw(filePath);
+  const criteria = parseAcceptanceCriteriaFromRaw(raw);
+  const entries = parseAcEvidenceEntriesFromRaw(raw);
+  const normalizedEntries = [];
+  const gaps = [];
+  let fulfilledCount = 0;
+
+  if (criteria.length === 0) {
+    gaps.push("Acceptance Criteria section missing or empty.");
+  }
+
+  for (const criterion of criteria) {
+    const entry = entries.get(criterion.index) || null;
+    const status = entry && entry.status ? entry.status : "";
+    const evidence = entry && entry.evidence ? entry.evidence : "";
+    const hasEvidenceLabel = Boolean(entry && entry.hasEvidenceLabel);
+    const hasValidEvidence = hasEvidenceLabel && isValidAcEvidenceReference(evidence);
+    const isFulfilled = status === "fulfilled";
+
+    if (!entry) {
+      gaps.push(`AC-${criterion.index} missing required evidence line: \`- AC-${criterion.index}: fulfilled/not-fulfilled + Evidence: ...\`.`);
+    } else {
+      if (!status) {
+        gaps.push(`AC-${criterion.index} is missing status token (\`fulfilled\` or \`not-fulfilled\`).`);
+      } else if (status !== "fulfilled") {
+        gaps.push(`AC-${criterion.index} is \`${status}\` and therefore not fully implemented.`);
+      }
+      if (!hasEvidenceLabel || !evidence) {
+        gaps.push(`AC-${criterion.index} is missing \`Evidence:\` value.`);
+      } else if (!hasValidEvidence) {
+        gaps.push(`AC-${criterion.index} evidence must reference \`file:line\` or a test/screen artifact.`);
+      }
+    }
+
+    if (isFulfilled && hasValidEvidence) {
+      fulfilledCount += 1;
+    }
+
+    normalizedEntries.push({
+      index: criterion.index,
+      status: status || "not-fulfilled",
+      evidence: evidence || "missing",
+      hasEntry: Boolean(entry),
+      hasValidEvidence,
+      isFulfilled,
+    });
+  }
+
+  return {
+    acCount: criteria.length,
+    fulfilledCount,
+    gaps,
+    complete: criteria.length > 0 && gaps.length === 0,
+    entries: normalizedEntries,
+  };
+}
+
+function upsertAcEvidenceSection(filePath, evidenceReport) {
+  if (!filePath || !fs.existsSync(filePath) || !evidenceReport || !Array.isArray(evidenceReport.entries)) {
+    return;
+  }
+  if (evidenceReport.entries.length === 0) {
+    return;
+  }
+  const lines = evidenceReport.entries.map((entry) => (
+    `- AC-${entry.index}: ${entry.status} + Evidence: ${entry.evidence}`
+  ));
+  upsertMarkdownSection(filePath, "AC Evidence", lines);
+}
+
+function upsertOpenGapsSection(filePath, gaps) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const list = Array.isArray(gaps)
+    ? gaps.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (list.length === 0) {
+    upsertMarkdownSection(filePath, "Open Gaps", ["- none"]);
+    return;
+  }
+  const unique = [];
+  const seen = new Set();
+  for (const item of list) {
+    if (seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    unique.push(item);
+  }
+  upsertMarkdownSection(filePath, "Open Gaps", unique.map((item) => `- ${item}`));
+}
+
+function writeCanonicalPoResults(filePath, payload) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const data = payload && typeof payload === "object" ? payload : {};
+  const lines = [];
+  const status = String(data.status || "unknown").trim() || "unknown";
+  const targetQueue = String(data.targetQueue || "").trim() || "toClarify";
+  const sourceQueue = String(data.sourceQueue || "").trim();
+  const summary = String(data.summary || "").trim();
+  const alreadyImplemented = Boolean(data.alreadyImplementedClaim);
+  const report = data.evidenceReport && typeof data.evidenceReport === "object"
+    ? data.evidenceReport
+    : null;
+
+  lines.push(`- status: ${status}`);
+  lines.push(`- target: ${targetQueue}`);
+  if (sourceQueue) {
+    lines.push(`- source: ${sourceQueue}`);
+  }
+  if (summary) {
+    lines.push(`- summary: ${summary}`);
+  }
+  if (alreadyImplemented) {
+    if (report && report.complete) {
+      lines.push(`- already-implemented check: pass (${report.fulfilledCount}/${report.acCount} ACs fulfilled with evidence).`);
+    } else {
+      lines.push("- already-implemented check: fail; rerouted to backlog until all AC evidence entries are complete.");
+    }
+    lines.push("- required AC evidence format: `- AC-<n>: fulfilled/not-fulfilled + Evidence: <file:line|test|screen>`.");
+  }
+  lines.push("- canonical PO closeout block; previous PO closure statements are superseded.");
+  upsertMarkdownSection(filePath, "PO Results", lines);
+}
+
 function ensureHumanDecisionRequest(filePath, decision) {
   if (!filePath || !fs.existsSync(filePath)) {
     return;
@@ -1262,9 +1917,86 @@ function promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark
   return promoted;
 }
 
+function topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, highWatermark) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  if (String(registry.ready_bundle_id || "").trim()) {
+    return 0;
+  }
+  if (planningQueuesBusy(runtime)) {
+    return 0;
+  }
+
+  const minBundle = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1);
+  const target = Math.max(highWatermark, minBundle);
+  let selectedCount = countFiles(runtime.queues.selected);
+  if (selectedCount <= 0 || selectedCount >= target) {
+    return 0;
+  }
+
+  const backlogFiles = listQueueFiles(runtime.queues.backlog)
+    .sort((a, b) => {
+      const scoreDelta = parseBusinessScoreFromRequirement(b) - parseBusinessScoreFromRequirement(a);
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+      return path.basename(a).localeCompare(path.basename(b));
+    });
+
+  let movedCount = 0;
+  for (const candidate of backlogFiles) {
+    if (controls.stopRequested || controls.drainRequested) {
+      break;
+    }
+    if (selectedCount >= target) {
+      break;
+    }
+    const moved = moveWithFallback(
+      runtime,
+      candidate,
+      "selected",
+      "selected",
+      [
+        "PO runner bundle top-up",
+        `- selected below bundle target (${selectedCount}/${target})`,
+        "- moved backlog item to selected to complete bundle and unblock delivery",
+      ]
+    );
+    if (!moved) {
+      continue;
+    }
+    updatePoStateAfterDirectMove({
+      runtime,
+      state,
+      cycle,
+      sourcePath: candidate,
+      sourceQueue: "backlog",
+      targetQueue: "selected",
+    });
+    movedCount += 1;
+    selectedCount += 1;
+    log(controls, `bundle top-up promoted ${path.basename(candidate)} backlog->selected (${selectedCount}/${target})`);
+  }
+
+  return movedCount;
+}
+
+function enforceBlockedQueuePolicy(runtime, controls) {
+  const blockedCount = countFiles(runtime.queues.blocked);
+  if (blockedCount > 0) {
+    log(
+      controls,
+      `blocked policy: ${blockedCount} item(s) pending; PO leaves blocked untouched (delivery handles auto-recovery/escalation)`
+    );
+  }
+  return false;
+}
+
 async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", state = null, cycle = 0) {
-  const sourceBefore = resolveSourcePath(runtime, filePath) || filePath;
+  let sourceBefore = resolveSourcePath(runtime, filePath) || filePath;
   const originQueue = sourceHint || queueNameFromPath(sourceBefore, runtime.queues) || "";
+  if (originQueue === "toClarify") {
+    sourceBefore = markRequirementAsCarryover(sourceBefore, controls, "to-clarify-to-next-bundle");
+  }
   if (removeStalePlanningDuplicate(runtime, sourceBefore, originQueue, controls)) {
     return true;
   }
@@ -1298,12 +2030,37 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     scriptPath: path.join(runtime.agentsRoot, "po", "po.js"),
     args: ["--auto", "--mode", "intake", "--requirement", sourceBefore],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForPoStage(runtime, "intake", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.paused) {
     log(controls, `PO intake paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    if (state && state.items) {
+      const key = requirementKey(sourceBefore);
+      const pausedCount = registerPausedOccurrence(state, "po-intake", key);
+      appendRunnerMetric(runtime, {
+        stage: "po-intake",
+        item_key: key,
+        result: "paused",
+        attempt: pausedCount,
+      });
+      if (pausedCount >= pausedLimit(runtime)) {
+        const targetQueue = runtime.loopPolicy && runtime.loopPolicy.escalateBusinessLoopToHumanDecision
+          ? "humanDecisionNeeded"
+          : "refinement";
+        moveWithFallback(runtime, sourceBefore, targetQueue, targetQueue === "humanDecisionNeeded" ? "human-decision-needed" : "refinement", [
+          "PO runner pause escalation",
+          `- paused too often (${pausedCount}/${pausedLimit(runtime)})`,
+          "- escalated to avoid infinite token-guard waiting",
+        ]);
+        writePoRunnerState(runtime, state);
+        return true;
+      }
+      writePoRunnerState(runtime, state);
+    }
     return false;
   }
 
@@ -1312,11 +2069,42 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     log(controls, `intake item vanished during PO run: ${path.basename(filePath)}`);
     return true;
   }
+  if (state && state.items) {
+    const key = requirementKey(currentPath);
+    resetPausedOccurrence(state, "po-intake", key);
+    if (result.ok) {
+      resetLoopFailures(state, "po-intake", key);
+      appendRunnerMetric(runtime, {
+        stage: "po-intake",
+        item_key: key,
+        result: "pass",
+      });
+    }
+  }
 
   const decision = parseDecisionFile(`${currentPath}.decision.json`, "PO");
   const frontMatter = parseFrontMatter(currentPath);
   const status = normalizeStatus(decision.status || frontMatter.status || (result.ok ? "pass" : "clarify"));
   const sourceQueue = originQueue || queueNameFromPath(sourceBefore, runtime.queues) || "";
+
+  let forcedEscalationQueue = "";
+  if (!result.ok && state && state.items) {
+    const key = requirementKey(currentPath);
+    const loopCount = registerLoopFailure(state, "po-intake", key, result.timedOut ? "timeout" : "fail");
+    const threshold = Math.max(2, Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.loopThreshold || 3), 10));
+    const maxAttempts = Math.max(1, Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.maxTotalAttemptsPerReq || 5), 10));
+    appendRunnerMetric(runtime, {
+      stage: "po-intake",
+      item_key: key,
+      result: result.timedOut ? "timeout" : "fail",
+      attempt: loopCount,
+    });
+    if (loopCount >= threshold || loopCount >= maxAttempts) {
+      forcedEscalationQueue = runtime.loopPolicy && runtime.loopPolicy.escalateBusinessLoopToHumanDecision
+        ? "humanDecisionNeeded"
+        : "refinement";
+    }
+  }
 
   if (!result.ok) {
     appendQueueSection(currentPath, [
@@ -1327,7 +2115,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
   }
 
   const explicitTarget = normalizePoTarget(decision.targetQueue);
-  let targetQueue = explicitTarget || routeFromPo(runtime, currentPath, status);
+  let targetQueue = forcedEscalationQueue || explicitTarget || routeFromPo(runtime, currentPath, status);
   const hardVisionConflict = isHardVisionConflict(decision);
   const inferredTarget = inferPoTargetFromDecision(decision) || inferPoTargetFromRequirementFile(currentPath);
 
@@ -1388,6 +2176,41 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
       "- hard vision conflict confirmed; awaiting explicit human decision",
     ]);
   }
+
+  if (targetQueue === "selected" && !canPrepareBundle(runtime)) {
+    targetQueue = "backlog";
+    appendQueueSection(currentPath, [
+      "PO runner bundle slot guard",
+      "- selected routing deferred because a ready bundle is already waiting for delivery",
+      "- routed to backlog; will be included in a later bundle",
+    ]);
+  }
+
+  const alreadyImplementedClaim = targetQueue === "wontDo" && isAlreadyImplementedClaim(decision);
+  let acEvidenceReport = null;
+  if (alreadyImplementedClaim) {
+    acEvidenceReport = evaluateAlreadyImplementedEvidence(currentPath);
+    upsertAcEvidenceSection(currentPath, acEvidenceReport);
+    if (!acEvidenceReport.complete) {
+      targetQueue = "backlog";
+      appendQueueSection(currentPath, [
+        "PO runner already-implemented AC-evidence guard",
+        `- AC evidence incomplete (${acEvidenceReport.fulfilledCount}/${acEvidenceReport.acCount}); routed to backlog`,
+      ]);
+      upsertOpenGapsSection(currentPath, acEvidenceReport.gaps);
+    } else {
+      upsertOpenGapsSection(currentPath, []);
+    }
+  }
+
+  writeCanonicalPoResults(currentPath, {
+    status,
+    targetQueue,
+    sourceQueue,
+    summary: decision.summary || "",
+    alreadyImplementedClaim,
+    evidenceReport: acEvidenceReport,
+  });
 
   const targetStatus = queueStatusByTarget(targetQueue);
 
@@ -1478,8 +2301,10 @@ async function runVisionCycle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "po", "po.js"),
     args: ["--auto", "--mode", "vision", "--vision-decision-file", decisionPath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForPoStage(runtime, "vision", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   const decision = readVisionDecision(decisionPath);
@@ -1523,7 +2348,16 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
   let progressed = false;
   let processed = 0;
   const perCycleCap = Math.max(1, runtime.po.intakeMaxPerCycle || 3);
-  while (!controls.stopRequested && countFiles(runtime.queues.selected) < highWatermark && processed < perCycleCap) {
+  const targetSelected = Math.max(
+    highWatermark,
+    Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1)
+  );
+  while (
+    !controls.stopRequested
+    && !controls.drainRequested
+    && countFiles(runtime.queues.selected) < targetSelected
+    && processed < perCycleCap
+  ) {
     const candidates = listIntakeCandidatesFair(runtime, perCycleCap - processed);
     if (candidates.length === 0) {
       break;
@@ -1531,7 +2365,12 @@ async function fillSelected(runtime, highWatermark, controls, state, cycle) {
 
     let handledAny = false;
     for (const source of candidates) {
-      if (controls.stopRequested || countFiles(runtime.queues.selected) >= highWatermark || processed >= perCycleCap) {
+      if (
+        controls.stopRequested
+        || controls.drainRequested
+        || countFiles(runtime.queues.selected) >= targetSelected
+        || processed >= perCycleCap
+      ) {
         break;
       }
       const handled = await runPoIntakeOnFile(runtime, source.path, controls, source.queue, state, cycle);
@@ -1578,7 +2417,12 @@ function releasedSignature(runtime) {
 
 async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, once) {
   const state = readPoRunnerState(runtime);
+  state.underfilledSelectedCycles = 0;
   while (!controls.stopRequested) {
+    if (controls.drainRequested) {
+      log(controls, "graceful stop: no new intake work will be started");
+      return;
+    }
     if (await waitIfGloballyPaused(runtime, controls)) {
       if (once) {
         return;
@@ -1590,16 +2434,18 @@ async function runIntakeMode(runtime, controls, lowWatermark, highWatermark, onc
     const cycle = state.cycle;
     const before = snapshotHash(runtime);
 
+    enforceBlockedQueuePolicy(runtime, controls);
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
+    const toppedUp = topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, highWatermark);
+    if (toppedUp > 0) {
+      log(controls, `bundle top-up moved ${toppedUp} item(s) backlog->selected`);
+    }
 
-    if (shouldFillSelected(runtime, highWatermark, state, controls)) {
-      const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
-      if (filled && countFiles(runtime.queues.selected) > 0) {
-        const bundleId = buildBundleId();
-        const tagged = assignBundleIdToSelected(runtime, bundleId);
-        log(controls, `bundle prepared id=${bundleId} selected_tagged=${tagged}`);
-      }
+    const preparedBeforeFill = tryPrepareReadyBundle(runtime, controls, state, highWatermark);
+    if (!preparedBeforeFill && shouldFillSelected(runtime, highWatermark, state, controls)) {
+      await fillSelected(runtime, highWatermark, controls, state, cycle);
+      tryPrepareReadyBundle(runtime, controls, state, highWatermark);
     } else {
       logWaitCheck(runtime, state, controls, highWatermark);
     }
@@ -1637,8 +2483,13 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
   let visionComplete = false;
   let lastReleased = releasedSignature(runtime);
   const state = readPoRunnerState(runtime);
+  state.underfilledSelectedCycles = 0;
 
   while (!controls.stopRequested) {
+    if (controls.drainRequested) {
+      log(controls, "graceful stop: no new vision work will be started");
+      return;
+    }
     if (await waitIfGloballyPaused(runtime, controls)) {
       if (once) {
         return;
@@ -1650,6 +2501,7 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
     const cycle = state.cycle;
     const before = snapshotHash(runtime);
 
+    enforceBlockedQueuePolicy(runtime, controls);
     await processToClarify(runtime, controls, state, cycle);
     await processHumanInput(runtime, controls, state, cycle);
 
@@ -1671,11 +2523,31 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
           controls,
           `vision cycle paused by token guard (${(cycle.pauseState && cycle.pauseState.reason) || "limit"})`
         );
+        const pausedCount = registerPausedOccurrence(state, "po-vision", "VISION-GLOBAL");
+        appendRunnerMetric(runtime, {
+          stage: "po-vision",
+          item_key: "VISION-GLOBAL",
+          result: "paused",
+          attempt: pausedCount,
+        });
+        if (pausedCount >= pausedLimit(runtime)) {
+          writeVisionClarification(
+            runtime,
+            `PO vision paused too often (${pausedCount}/${pausedLimit(runtime)}); escalated for human decision.`
+          );
+        }
+        writePoRunnerState(runtime, state);
         if (once) {
           return;
         }
         continue;
       }
+      resetPausedOccurrence(state, "po-vision", "VISION-GLOBAL");
+      appendRunnerMetric(runtime, {
+        stage: "po-vision",
+        item_key: "VISION-GLOBAL",
+        result: cycle.ok ? "pass" : "fail",
+      });
       if (planningFillNeeded) {
         planningCycles += 1;
       }
@@ -1725,13 +2597,15 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
       );
     }
 
-    if (shouldFillSelected(runtime, highWatermark, state, controls)) {
-      const filled = await fillSelected(runtime, highWatermark, controls, state, cycle);
-      if (filled && countFiles(runtime.queues.selected) > 0) {
-        const bundleId = buildBundleId();
-        const tagged = assignBundleIdToSelected(runtime, bundleId);
-        log(controls, `bundle prepared id=${bundleId} selected_tagged=${tagged}`);
-      }
+    const toppedUp = topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, highWatermark);
+    if (toppedUp > 0) {
+      log(controls, `bundle top-up moved ${toppedUp} item(s) backlog->selected`);
+    }
+
+    const preparedBeforeFill = tryPrepareReadyBundle(runtime, controls, state, highWatermark);
+    if (!preparedBeforeFill && shouldFillSelected(runtime, highWatermark, state, controls)) {
+      await fillSelected(runtime, highWatermark, controls, state, cycle);
+      tryPrepareReadyBundle(runtime, controls, state, highWatermark);
     } else {
       logWaitCheck(runtime, state, controls, highWatermark);
     }
@@ -1779,6 +2653,7 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
+  resetGlobalPauseOnStartup(runtime, controls);
 
   log(controls, `mode=${mode}`);
   log(controls, `selected watermark low=${lowWatermark} high=${highWatermark}`);
@@ -1792,7 +2667,19 @@ async function main() {
   controls.cleanup();
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  __test: {
+    isAlreadyImplementedClaim,
+    parseAcceptanceCriteriaFromRaw,
+    parseAcEvidenceEntriesFromRaw,
+    isValidAcEvidenceReference,
+    evaluateAlreadyImplementedEvidence,
+  },
+};

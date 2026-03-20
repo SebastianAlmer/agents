@@ -35,12 +35,18 @@ Queue intent:
 - Autonomous delivery starts from `selected`.
 - Unclear items from ARCH/DEV/QA/SEC/UX/DEPLOY go to `to-clarify`.
 - PO resolves `to-clarify` whenever possible.
+- `wont-do` policy:
+  - valid for duplicate/obsolete/invalid or explicitly deprioritized scope.
+  - `already implemented` requires complete AC evidence for every acceptance criterion.
+  - if AC evidence is incomplete, route to `backlog` and document `Open Gaps`.
+- `to-clarify` and `blocked` are treated as next-bundle planning input, not as in-bundle execution queues.
 - Only PO escalates hard unresolved conflicts to `human-decision-needed`.
 - UAT may create manual decision packages in `human-decision-needed` only for business-critical checks that are not automatable.
 - MAINT may create cleanup follow-up requirements after deploy.
 - `human-decision-needed` is human-owned: no autonomous runner moves files out of this queue.
 - After human evaluation, move those items to `human-input`; PO ingests `human-input` in the next iteration.
 - Hard blockers from review phases may go to `blocked`.
+- `blocked` is treated as a technical freeze queue; runners may reroute blocked items to `refinement` for PO re-triage.
 - QA/UAT/MAINT follow-ups are auto-routed:
   - `P0/P1` -> `selected` (hotfix)
   - `P2/P3` -> `backlog`

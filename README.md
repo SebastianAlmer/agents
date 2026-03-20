@@ -61,24 +61,55 @@ PO vision rules:
 
 Modes:
 - `full`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), then downstream once-per-bundle gates (UX -> SEC -> QA -> UAT -> DEPLOY), followed by QA post-bundle sanity and MAINT post-deploy hygiene scan. When Product Vision is marked complete and queues are drained, runner auto-triggers one comprehensive final test over `released` (UX final + SEC final + QA final + optional deterministic E2E + UAT full regression).
+- MAINT loop guard: if the latest released bundle contains only MAINT-generated follow-up/hotfix requirements, the delivery runner skips the immediate MAINT post-deploy scan to prevent self-triggered MAINT bundle loops.
 - `fast`: selected -> arch intake -> (ARCH agent if triggered, else fast-pass to DEV), no downstream gates.
 - `test`: quality/regression mode. Runs delivery quality gates without deploy git actions and then performs a comprehensive full-system test over `released`. If `[e2e].required_in_test_mode=true`, deterministic E2E is a mandatory gate. This mode is non-mutating for `released` (no automatic `released -> dev` reroute on fails); findings are emitted as follow-up requirements.
 
 Bundle behavior:
 - Bundles start from `selected`.
+- PO prepares exactly one ready bundle ahead; delivery activates that bundle via `.runtime/bundles/registry.json` (`ready_bundle_id` -> `active_bundle_id`).
+- PO marks a bundle as `ready` only after the selected set reaches `loops.bundle_min_size` (or underfilled fallback via `loops.force_underfilled_after_cycles`).
+- PO writes bundle id into front matter (`bundle_id`) and normalizes selected filenames to `...-B0001.md`.
+- Carryovers from failed/clarification exits are marked with `...-carry-01-from-B0001.md` plus `carryover_*` metadata.
+- Before ARCH/DEV work starts, delivery runner creates/switches to a per-bundle local workspace branch derived from `[bundle_flow].branch_prefix` (default `rb/<bundle>-<short>`).
+- Safety guard: `base_branch` (for example `dev`) is never accepted as an active bundle workspace branch.
+- Workspace branches are created only for valid bundle IDs (for example `B0019`); non-bundle queue keys never create `*-no-bundle` branches.
+- Delivery automatically prunes stale local workspace branches that have no unique commits vs `base_branch` (keeps current/active branch and any branch with unique commits).
 - Priority uses `business_score` in requirement front matter.
 - Default bundle range: 5-20 (configurable).
 - Agents run once per bundle in downstream phase.
 - DEV has a watchdog + recovery ladder (`same-thread retry -> fresh-thread retry -> route to to-clarify`) to prevent infinite loops on a single requirement.
+- Agent threads can auto-recover from compact/model errors and optionally rotate after N runs (`[thread_recovery]`) to avoid stale long-lived sessions.
 - Default quality mode is strict: QA and UAT must pass before deploy.
 - On QA/UAT fail, the same bundle is routed back to `dev` for rework (bounded by `delivery_quality.max_fix_cycles`), then retried.
 - If max fix cycles are exceeded, the bundle is routed to `blocked` to avoid endless loops.
+- Repeated pauses/timeouts/identical failures are tracked; loop-policy thresholds trigger early escalation to avoid long retry chains.
 - If QA `mandatory_checks` fail and `[qa].auto_fix_on_mandatory_fail=true`, the runner first attempts automatic technical repair (optional shell fix commands and/or Codex repair) before strict-gate escalation.
+- `blocked` is treated as an autonomous technical recovery queue: delivery reroutes technical items to `dev` for repair/retest loops.
+- If `blocked` contains explicit business ambiguity, delivery reroutes to `to-clarify` (PO intake owner) instead of escalating directly.
+- `blocked` escalates to `human-decision-needed` only when technical retries are exhausted; escalation notes include a clear `why`.
+- PO does not reroute `blocked` directly; `to-clarify` stays PO-owned, while technical `blocked` recovery stays delivery-owned.
+- With `[release_automation].allow_release_with_human_decision_needed=true`, pending items in `human-decision-needed` do not block release/finalization flow.
 - Agents support local project memory under `.runtime/memory` (shared + per-agent) and can auto-update it after runs.
 - `P0/P1` findings are auto-routed to `selected` as hotfix requirements.
 - `P2/P3` findings are auto-routed to `backlog`.
 - Strict non-automatable critical UAT checks are auto-routed to `human-decision-needed` as manual check packages.
 - MAINT cleanup findings are auto-routed using the same severity routing (`P0/P1 -> selected`, `P2/P3 -> backlog`).
+- Visual screenshot diffs in QA mandatory checks use requirement frontmatter policy:
+  - `visual_change_intent=false` + `baseline_decision=none` -> route to `dev` as regression fix
+  - `visual_change_intent=true` + `baseline_decision=update_baseline|revert_ui` -> route to `dev` with explicit action
+  - missing/conflicting fields -> route to `human-decision-needed` (explicit product decision required to prevent visual drift)
+- Technical gate orchestration failures (for example missing definitive gate artifact/pending gate after tool exit) are routed to `human-input` as process issues, not to `human-decision-needed`.
+
+Release automation flow (`[release_automation].enabled=true`):
+- Runs after successful deploy bundle and requires `[deploy].mode=commit_push`.
+- Executes `version_command` in `paths.repo_root` (default `npm version patch --no-git-tag-version`).
+- Uses the active local bundle workspace branch as release source and fast-forward merges into `base_branch`.
+- Commits on the local bundle branch, merges locally into `base_branch`, then pushes `origin/<base_branch>`.
+- Bundle branches are local-only (never pushed to origin) and are deleted locally after successful merge.
+- Optional tagging via `tag_enabled` + `tag_prefix`.
+- On merge/push/version failures, creates a `human-input` requirement with conflict details.
+- If auto-resolve is enabled, runner first tries bounded rebase/repush attempts before escalating.
 
 Deterministic E2E:
 - Controlled via `[e2e]` config.
@@ -119,6 +150,8 @@ Global pause guard:
 - PO and Delivery react to provider limit errors (`usage limit`, `rate limit`, `insufficient_quota`, `try again at ...`).
 - A shared pause state is written to `.runtime/pause-state.json`.
 - While active, runners pause processing (no queue failure rerouting) and resume automatically after `resume_after`.
+- On runner startup, any previously active global pause state is cleared so a fresh run starts immediately.
+- Delivery has downstream no-progress guards for UX/SEC: if an agent exits `ok` but queue state does not change, runner resets that agent thread and retries; on repeated no-progress, fallback routing is applied (`ux -> sec`, `sec -> qa`) to prevent infinite loops.
 
 ## Quick start
 
@@ -140,6 +173,11 @@ Global pause guard:
 5) Optional full regression test mode:
 - `node delivery-runner.js --mode test`
 
+Runner hotkeys (TTY):
+- `q`: graceful drain (finish current item, then stop)
+- `q` again: force stop
+- `Ctrl+C`: immediate stop
+
 ## Config
 
 `config.local.toml` is gitignored and project-specific.
@@ -147,7 +185,13 @@ Global pause guard:
 Important sections:
 - `[paths]`: `repo_root`, `requirements_root`, `docs_dir`, `product_vision_dir`
 - `[loops]`: bundle sizes, polling, retry policy
+- `[bundle_flow]`: bundle id/registry/branch policy (`id_prefix`, `id_pad`, `max_ready_ahead`, `carryover_target_queue`, `branch_prefix`, `allow_cross_bundle_moves`)
 - `[delivery_runner]`: `default_mode = full|fast|test`
+- `[delivery_runner].agent_timeout_seconds`: hard timeout per runner agent call to prevent indefinite hangs
+- `[delivery_runner].no_output_timeout_seconds`: stuck-guard timeout when a runner child process emits no output
+- `[delivery_runner].max_paused_cycles_per_item`: pause/token-guard limit before escalation
+- `[retry_policy]`: stage-specific retry limits (fail-fast defaults)
+- `[loop_policy]`: loop detection and escalation thresholds
 - `[delivery_quality]`: strict QA/UAT gate behavior and bounded fix loop
 - `[e2e]`: deterministic full E2E configuration (`enabled`, `required_in_test_mode`, `run_on_full_completion`, commands, timeout, env)
 - `[po]`: vision defaults and limits
@@ -155,11 +199,18 @@ Important sections:
 - `[po].backlog_promote_*`: auto-promote sticky/high-value backlog items to `selected`
 - `[arch]`: trigger policy, risk/scope guards, docs digest behavior, retries
 - `[dev]`: watchdog timeout + recovery retries for stuck DEV runs
+- `[thread_recovery]`: cross-agent thread recovery/rotation (`rotate_after_runs`, `reset_on_compact_or_model_error`)
 - `[deploy]`: `check | commit | commit_push` (default `commit_push`)
 - `[deploy.pr]`: optional PR creation after deploy push (`enabled`, `provider`, `remote`, `base_branch`, `head_mode`, `head_branch`, templates). Template vars: `${type}` (`feat|fix|chore` inferred from branch), `${branch}`, `${base}`, `${remote}`
+- `[release_automation]`: optional release flow after deploy bundle (`enabled`, `base_branch`, `remote`, `branch_prefix`, `version_command`, `merge_mode=ff-only`, conflict auto-resolve, tag options)
+- `[release_automation].allow_release_with_human_decision_needed`: when `true`, pending business decisions in `human-decision-needed` do not block release/finalization.
 - `[dev_routing]`, `[dev_agents]`
 - `[qa]`: `mandatory_checks`, `run_checks_in_runner`, and optional `auto_fix_*` settings for deterministic pre-QA checks plus automatic repair on technical gate failures
 - `[memory]`: local agent memory behavior (`enabled`, `dir`, `include_in_prompt`, `update_on_auto`, `update_on_interactive`, limits)
+  - Memory content guideline: keep durable rules plus short recent run context (`Path(s)` + `Decision` + `Outcome`).
+- Requirement frontmatter contract for visual gates:
+  - `visual_change_intent: true|false`
+  - `baseline_decision: update_baseline|revert_ui|none`
 - `[models]`
 - Include optional per-agent model overrides such as `[models].uat` and `[models].maint`.
 - `[codex]`: base Codex profile (`model`, `approval_policy`, `sandbox_mode`, `model_reasoning_effort`)
@@ -190,6 +241,11 @@ Intake recommendation:
 - ARCH/DEV/QA/SEC/UX/DEPLOY route unresolved items to `to-clarify`.
 - PO intake ownership is `to-clarify`, `human-input`, `backlog`, `refinement`.
 - PO resolves `to-clarify` when possible and escalates only hard unresolved conflicts to `human-decision-needed`.
+- `wont-do` policy:
+  - valid for deprioritized/non-delivery scope, duplicate, obsolete, or invalid requirements.
+  - `already implemented` is allowed only with full AC evidence (`AC Evidence` lines for every acceptance criterion with concrete evidence).
+  - if AC evidence is incomplete, item must route to `backlog` with `Open Gaps`.
+- Delivery owns `blocked`: technical items auto-recover in `dev`; business-ambiguous items route to `to-clarify` for PO; only exhausted technical retries escalate to `human-decision-needed`.
 - Items in `human-decision-needed` are human-owned and must not be moved by autonomous runners.
 - After manual evaluation, move items to `human-input`; PO ingests `human-input` in the next iteration.
 

@@ -12,7 +12,11 @@ const {
   runCodexExec,
   startInteractiveCodexAgent,
 } = require("../lib/agent");
+const { installTimestampedConsole } = require("../lib/logging");
 const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
+
+installTimestampedConsole();
+const FINAL_GATE_PENDING_SUMMARY = "pending";
 
 function parseArgs(argv) {
   const args = {
@@ -71,6 +75,34 @@ function listRequirementFiles(dir) {
     .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
 }
 
+function terminalPassGate(summary) {
+  return {
+    status: "pass",
+    summary: String(summary || "").trim() || "Gate passed.",
+    blocking_findings: [],
+    findings: [],
+    manual_uat: [],
+  };
+}
+
+function writeGatePayload(gateFile, payload) {
+  if (!gateFile) {
+    throw new Error("UAT gate file path is required");
+  }
+  const gate = payload && typeof payload === "object" ? payload : terminalPassGate("Gate passed.");
+  fs.writeFileSync(gateFile, `${JSON.stringify(gate, null, 2)}\n`, "utf8");
+}
+
+function writeNoItemsPassGate(gateFile, label, queueName) {
+  if (!gateFile) {
+    return false;
+  }
+  const queue = String(queueName || "").trim() || "queue";
+  const normalizedLabel = String(label || "batch").trim() || "batch";
+  writeGatePayload(gateFile, terminalPassGate(`UAT ${normalizedLabel}: no items in queue (${queue}).`));
+  return true;
+}
+
 function resolveRequirementPath(requirement, candidateDirs) {
   if (!requirement) {
     return "";
@@ -115,6 +147,12 @@ function validateGateFile(gateFile, label) {
   const summary = String(parsed.summary || "").trim();
   if (!summary) {
     throw new Error(`UAT ${label} gate file requires non-empty summary`);
+  }
+  if (summary.toLowerCase() === FINAL_GATE_PENDING_SUMMARY) {
+    throw new Error(`UAT ${label} gate file must not remain pending`);
+  }
+  if (!Array.isArray(parsed.blocking_findings) || !Array.isArray(parsed.findings) || !Array.isArray(parsed.manual_uat)) {
+    throw new Error(`UAT ${label} gate file requires explicit arrays for blocking_findings, findings, manual_uat`);
   }
 }
 
@@ -173,6 +211,7 @@ async function main() {
       } else {
         console.log(`UAT: ${queueName} queue empty`);
         if (auto) {
+          writeNoItemsPassGate(gateFile, "batch", queueName);
           process.exit(0);
         }
       }
@@ -187,6 +226,7 @@ async function main() {
       if (!reqFile) {
         console.log(`UAT: ${queueName} queue empty`);
         if (auto) {
+          writeNoItemsPassGate(gateFile, "single", queueName);
           process.exit(0);
         }
       }
@@ -269,7 +309,17 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  FINAL_GATE_PENDING_SUMMARY,
+  terminalPassGate,
+  writeGatePayload,
+  writeNoItemsPassGate,
+  validateGateFile,
+};

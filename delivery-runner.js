@@ -10,12 +10,17 @@ const {
   countFiles,
   listQueueFiles,
   moveRequirementFile,
+  upsertMarkdownSection,
   appendQueueSection,
   runNodeScript,
   chooseBundleByBusinessScore,
   parseFrontMatter,
   normalizeStatus,
   getActivePauseState,
+  readPauseState,
+  clearPauseState,
+  readBundleRegistry,
+  writeBundleRegistry,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
 const {
@@ -27,6 +32,7 @@ const {
 } = require("./lib/agent");
 
 const DELIVERY_IDLE_WAIT_MS = 5 * 60 * 1000;
+const MAINT_FOLLOWUP_ID_RE = /^REQ-MAINT-(HOTFIX|FOLLOWUP)-/i;
 
 function parseArgs(argv) {
   const args = {
@@ -125,6 +131,131 @@ function normalizePositiveInt(value, fallback, min = 1) {
   return parsed;
 }
 
+function runnerAgentTimeoutSeconds(runtime) {
+  const parsed = Number.parseInt(
+    String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.agentTimeoutSeconds || 0),
+    10
+  );
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function runnerNoOutputTimeoutSeconds(runtime) {
+  const parsed = Number.parseInt(
+    String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.noOutputTimeoutSeconds || 0),
+    10
+  );
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function retryMaxForStage(runtime, stageName, fallback = 0) {
+  const policy = runtime && runtime.retryPolicy ? runtime.retryPolicy : {};
+  const map = {
+    arch: policy.archRetryMax,
+    ux: policy.uxRetryMax,
+    sec: policy.secRetryMax,
+    qa: policy.qaRetryMax,
+    uat: policy.uatRetryMax,
+    deploy: policy.deployRetryMax,
+    maint: policy.maintRetryMax,
+    "qa-post": policy.qaPostRetryMax,
+    "ux-final": policy.uxFinalRetryMax,
+    "sec-final": policy.secFinalRetryMax,
+    "uat-full": policy.uatFullRetryMax,
+  };
+  const value = map[String(stageName || "").toLowerCase()];
+  if (!Number.isFinite(value)) {
+    return Math.max(0, Number.parseInt(String(fallback || 0), 10) || 0);
+  }
+  return Math.max(0, Number.parseInt(String(value), 10) || 0);
+}
+
+function runnerMetricsDir(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "runner-metrics");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function appendRunnerMetric(runtime, event) {
+  try {
+    const dir = runnerMetricsDir(runtime);
+    const eventPath = path.join(dir, "events.jsonl");
+    const summaryPath = path.join(dir, "summary.json");
+    const payload = {
+      ts: new Date().toISOString(),
+      runner: "delivery",
+      ...event,
+    };
+    fs.appendFileSync(eventPath, `${JSON.stringify(payload)}\n`, "utf8");
+
+    let summary = { totals: { events: 0 }, byRunner: {}, byStage: {}, byResult: {} };
+    if (fs.existsSync(summaryPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+        if (parsed && typeof parsed === "object") {
+          summary = parsed;
+        }
+      } catch {
+        // keep default summary
+      }
+    }
+    summary.totals = summary.totals && typeof summary.totals === "object" ? summary.totals : { events: 0 };
+    summary.byRunner = summary.byRunner && typeof summary.byRunner === "object" ? summary.byRunner : {};
+    summary.byStage = summary.byStage && typeof summary.byStage === "object" ? summary.byStage : {};
+    summary.byResult = summary.byResult && typeof summary.byResult === "object" ? summary.byResult : {};
+    summary.totals.events = Math.max(0, Number.parseInt(String(summary.totals.events || 0), 10)) + 1;
+    const runnerKey = String(payload.runner || "delivery");
+    const stageKey = String(payload.stage || "unknown");
+    const resultKey = String(payload.result || "unknown");
+    summary.byRunner[runnerKey] = Math.max(0, Number.parseInt(String(summary.byRunner[runnerKey] || 0), 10)) + 1;
+    summary.byStage[stageKey] = Math.max(0, Number.parseInt(String(summary.byStage[stageKey] || 0), 10)) + 1;
+    summary.byResult[resultKey] = Math.max(0, Number.parseInt(String(summary.byResult[resultKey] || 0), 10)) + 1;
+    summary.updatedAt = new Date().toISOString();
+    fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+  } catch {
+    // metrics are best-effort only
+  }
+}
+
+function pausedLimit(runtime) {
+  return Math.max(
+    1,
+    Number.parseInt(
+      String(runtime && runtime.deliveryRunner && runtime.deliveryRunner.maxPausedCyclesPerItem || 2),
+      10
+    ) || 2
+  );
+}
+
+function handlePausedStage(runtime, controls, stageName, queueName, reason = "paused") {
+  const itemKey = stageItemKey(runtime, queueName);
+  const current = registerPausedOccurrence(runtime, stageName, itemKey);
+  appendRunnerMetric(runtime, {
+    stage: stageName,
+    queue: queueName,
+    item_key: itemKey,
+    result: "paused",
+    attempt: current,
+    reason,
+  });
+  const limit = pausedLimit(runtime);
+  if (current >= limit) {
+    return escalateStageLoop(
+      runtime,
+      stageName,
+      queueName,
+      `paused-limit reached (${current}/${limit})`,
+      controls
+    );
+  }
+  return false;
+}
+
 function queueSummary(runtime) {
   return {
     refinement: countFiles(runtime.queues.refinement),
@@ -168,6 +299,7 @@ function createControls(initialVerbose, runtime) {
   const controls = {
     verbose: Boolean(initialVerbose),
     stopRequested: false,
+    drainRequested: false,
     onStop(callback) {
       if (typeof callback !== "function") {
         return () => {};
@@ -192,6 +324,17 @@ function createControls(initialVerbose, runtime) {
           // ignore hook errors during shutdown
         }
       }
+    },
+    requestDrain(reason = "q") {
+      if (controls.stopRequested) {
+        return;
+      }
+      if (controls.drainRequested) {
+        controls.requestStop(`${reason} (force)`);
+        return;
+      }
+      controls.drainRequested = true;
+      process.stdout.write("\nDELIVERY: graceful stop requested (finish current item, then exit)\n");
     },
     cleanup() {},
   };
@@ -229,7 +372,7 @@ function createControls(initialVerbose, runtime) {
       return;
     }
     if ((key.name || "").toLowerCase() === "q") {
-      controls.requestStop("q");
+      controls.requestDrain("q");
       return;
     }
   };
@@ -257,10 +400,134 @@ function getStopSignal(controls) {
   };
 }
 
+function timestampMinute() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${y}-${m}-${d} ${hh}:${mm}`;
+}
+
+function bundleIdFromSequence(seq, runtime) {
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const prefix = String(cfg.idPrefix || "B").trim() || "B";
+  const pad = Math.max(1, Number.parseInt(String(cfg.idPad || 4), 10) || 4);
+  const normalized = Math.max(1, Number.parseInt(String(seq || 1), 10) || 1);
+  return `${prefix}${String(normalized).padStart(pad, "0")}`;
+}
+
+function readBundleRegistryForRuntime(runtime) {
+  return readBundleRegistry(runtime.agentsRoot);
+}
+
+function writeBundleRegistryForRuntime(runtime, registry) {
+  return writeBundleRegistry(runtime.agentsRoot, registry);
+}
+
+function activeBundleId(runtime) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  return String(registry.active_bundle_id || "").trim();
+}
+
+function fileBundleId(filePath) {
+  const fm = parseFrontMatter(filePath);
+  return String(fm.bundle_id || "").trim();
+}
+
+function listQueueFilesByBundle(runtime, queueName, bundleId) {
+  const files = listQueueFiles(runtime.queues[queueName]);
+  const normalized = String(bundleId || "").trim();
+  if (!normalized) {
+    return files;
+  }
+  return files.filter((filePath) => String(fileBundleId(filePath) || "").trim() === normalized);
+}
+
+function countFilesByBundle(runtime, queueName, bundleId) {
+  return listQueueFilesByBundle(runtime, queueName, bundleId).length;
+}
+
+function activateReadyBundle(runtime, controls) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const readyId = String(registry.ready_bundle_id || "").trim();
+  if (!readyId) {
+    return { started: false, bundleId: "", reason: "no-ready-bundle" };
+  }
+  const now = new Date().toISOString();
+  registry.active_bundle_id = readyId;
+  registry.ready_bundle_id = "";
+  const current = registry.bundles[readyId] && typeof registry.bundles[readyId] === "object"
+    ? registry.bundles[readyId]
+    : {};
+  registry.bundles[readyId] = {
+    ...current,
+    id: readyId,
+    seq: Number.parseInt(String(current.seq || 0), 10) || 0,
+    status: "active",
+    startedAt: now,
+    createdAt: String(current.createdAt || now).trim() || now,
+  };
+  writeBundleRegistryForRuntime(runtime, registry);
+  log(controls, `bundle activated id=${readyId}`);
+  return { started: true, bundleId: readyId, reason: "" };
+}
+
+function completeActiveBundle(runtime, controls, details = {}) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const activeId = String(registry.active_bundle_id || "").trim();
+  if (!activeId) {
+    return;
+  }
+  const now = new Date().toISOString();
+  const current = registry.bundles[activeId] && typeof registry.bundles[activeId] === "object"
+    ? registry.bundles[activeId]
+    : {};
+  registry.bundles[activeId] = {
+    ...current,
+    id: activeId,
+    status: String(details.status || "completed").trim() || "completed",
+    finishedAt: now,
+  };
+  registry.active_bundle_id = "";
+  writeBundleRegistryForRuntime(runtime, registry);
+  log(controls, `bundle completed id=${activeId} status=${registry.bundles[activeId].status}`);
+}
+
+function activeBundleDrained(runtime) {
+  const activeId = activeBundleId(runtime);
+  if (!activeId) {
+    return false;
+  }
+  const executionQueues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy"];
+  for (const queueName of executionQueues) {
+    if (countFilesByBundle(runtime, queueName, activeId) > 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function log(controls, message) {
   if (controls.verbose) {
-    process.stdout.write(`DELIVERY: ${message}\n`);
+    process.stdout.write(`${timestampMinute()} DELIVERY: ${message}\n`);
   }
+}
+
+function resetGlobalPauseOnStartup(runtime, controls) {
+  const state = readPauseState(runtime.agentsRoot);
+  if (!state || !state.active) {
+    return;
+  }
+  const reason = String(state.reason || "unknown").replace(/_/g, "-");
+  const source = String(state.source || "unknown");
+  const resumeAfter = String(state.resumeAfter || "unknown");
+  clearPauseState(runtime.agentsRoot);
+  process.stdout.write(
+    `${timestampMinute()} DELIVERY: startup pause reset (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
+  );
+  log(controls, "global pause state cleared on startup");
 }
 
 async function sleepWithStopCheck(ms, controls) {
@@ -292,7 +559,7 @@ async function waitIfGloballyPaused(runtime, controls) {
   if (!pauseState) {
     return false;
   }
-  process.stdout.write(`DELIVERY: ${formatPauseLine(pauseState)}\n`);
+  process.stdout.write(`${timestampMinute()} DELIVERY: ${formatPauseLine(pauseState)}\n`);
   const fallbackMs = Math.max(1, runtime.loops.deliveryPollSeconds) * 1000;
   const waitMs = Number.isFinite(pauseState.remainingMs)
     ? Math.min(Math.max(1000, pauseState.remainingMs), fallbackMs)
@@ -390,7 +657,15 @@ function moveToQueue(runtime, sourcePath, targetQueue, status, noteLines) {
 }
 
 function moveAll(runtime, fromQueue, toQueue, status, note) {
-  const files = listQueueFiles(runtime.queues[fromQueue]);
+  let files = listQueueFiles(runtime.queues[fromQueue]);
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const bundleScoped = Boolean(cfg.enabled) && !Boolean(cfg.allowCrossBundleMoves);
+  if (bundleScoped) {
+    const activeId = activeBundleId(runtime);
+    if (activeId) {
+      files = files.filter((filePath) => String(fileBundleId(filePath) || "").trim() === activeId);
+    }
+  }
   let moved = 0;
   for (const file of files) {
     if (moveToQueue(runtime, file, toQueue, status, [note])) {
@@ -398,6 +673,298 @@ function moveAll(runtime, fromQueue, toQueue, status, note) {
     }
   }
   return moved;
+}
+
+function scopedQueueFiles(runtime, queueName) {
+  const dir = runtime && runtime.queues ? runtime.queues[queueName] : "";
+  if (!dir) {
+    return [];
+  }
+  let files = listQueueFiles(dir);
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const bundleScoped = Boolean(cfg.enabled) && !Boolean(cfg.allowCrossBundleMoves);
+  if (bundleScoped) {
+    const activeId = activeBundleId(runtime);
+    if (activeId) {
+      files = files.filter((filePath) => String(fileBundleId(filePath) || "").trim() === activeId);
+    }
+  }
+  return files;
+}
+
+function parseFrontMatterBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+function normalizeBaselineDecision(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (["update_baseline", "update-baseline", "update", "baseline-update"].includes(normalized)) {
+    return "update_baseline";
+  }
+  if (["revert_ui", "revert-ui", "revert", "restore"].includes(normalized)) {
+    return "revert_ui";
+  }
+  if (["none", "n/a", "na", "not_applicable", "not-applicable"].includes(normalized)) {
+    return "none";
+  }
+  return "";
+}
+
+function isVisualSnapshotFailure(checkResult) {
+  const command = String((checkResult && checkResult.command) || "").toLowerCase();
+  const output = String((checkResult && checkResult.output) || "").toLowerCase();
+  if (!command) {
+    return false;
+  }
+  const commandLooksVisual = /(playwright|e2e:ui:gates|visual-regression|tohavescreenshot|screenshot)/i.test(command);
+  if (!commandLooksVisual) {
+    return false;
+  }
+  const outputLooksVisual = /(tohavescreenshot|screenshot comparison failed|pixel-?diff|snapshot.*(mismatch|different|failed)|visual regression)/i.test(output);
+  return outputLooksVisual;
+}
+
+function evaluateVisualBaselinePolicy(runtime, sourceQueue) {
+  const files = scopedQueueFiles(runtime, sourceQueue);
+  if (files.length === 0) {
+    return {
+      route: "human-input",
+      reasonCode: "no-source-files",
+      summary: "Visual regression failure has no source requirements in scope.",
+      recommendation: "Repair queue/gate orchestration so affected requirements are in scope, then rerun QA.",
+      question: "Please triage runner/gate setup so visual policy can be evaluated against actual requirements.",
+      files: [],
+      details: [],
+    };
+  }
+
+  const details = files.map((filePath) => {
+    const fm = parseFrontMatter(filePath);
+    const intent = parseFrontMatterBoolean(fm.visual_change_intent);
+    const decision = normalizeBaselineDecision(fm.baseline_decision);
+    return {
+      filePath,
+      fileName: path.basename(filePath),
+      intent,
+      decision,
+    };
+  });
+
+  const invalid = details.filter((item) => item.intent === null || !item.decision);
+  if (invalid.length > 0) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "missing-frontmatter",
+      summary: "Visual regression requires explicit visual_change_intent and baseline_decision fields.",
+      recommendation: "Set frontmatter fields per requirement, then rerun QA.",
+      question: "Is this visual diff intended and should baselines be updated, or should UI be reverted?",
+      files,
+      details,
+    };
+  }
+
+  const intents = new Set(details.map((item) => item.intent));
+  if (intents.size > 1) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "mixed-intent",
+      summary: "Bundle contains mixed visual_change_intent values.",
+      recommendation: "Align all requirements in the active bundle to one visual intent.",
+      question: "Should this bundle be treated as intentional visual change, or as regression fix?",
+      files,
+      details,
+    };
+  }
+
+  const onlyIntent = details[0].intent;
+  if (!onlyIntent) {
+    const inconsistent = details.filter((item) => item.decision !== "none");
+    if (inconsistent.length > 0) {
+      return {
+        route: "human-decision-needed",
+        reasonCode: "inconsistent-regression-policy",
+        summary: "visual_change_intent=false conflicts with non-none baseline_decision.",
+        recommendation: "Set baseline_decision=none for regression requirements.",
+        question: "Should this be treated as regression fix without baseline update?",
+        files,
+        details,
+      };
+    }
+    return {
+      route: "dev",
+      reasonCode: "regression-fix",
+      summary: "Visual diff classified as unintended regression.",
+      recommendation: "Fix UI implementation until existing baseline passes.",
+      question: "",
+      files,
+      details,
+    };
+  }
+
+  const decisions = new Set(details.map((item) => item.decision));
+  if (decisions.has("none")) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "intent-without-decision",
+      summary: "Intentional visual change requires baseline_decision update_baseline or revert_ui.",
+      recommendation: "Set baseline_decision consistently across the bundle.",
+      question: "Should intentional visual changes update baselines or be reverted?",
+      files,
+      details,
+    };
+  }
+
+  if (decisions.size > 1) {
+    return {
+      route: "human-decision-needed",
+      reasonCode: "mixed-baseline-decision",
+      summary: "Bundle contains conflicting baseline_decision values.",
+      recommendation: "Choose one baseline_decision for the active bundle.",
+      question: "Should this bundle update baselines or revert UI?",
+      files,
+      details,
+    };
+  }
+
+  if (decisions.has("update_baseline")) {
+    return {
+      route: "dev",
+      reasonCode: "update-baseline",
+      summary: "Intentional visual change approved for baseline update.",
+      recommendation: "Update targeted snapshots and rerun UI gates.",
+      question: "",
+      files,
+      details,
+    };
+  }
+
+  if (decisions.has("revert_ui")) {
+    return {
+      route: "dev",
+      reasonCode: "revert-ui",
+      summary: "Intentional visual diff must be removed by reverting UI changes.",
+      recommendation: "Revert UI to baseline-compliant state and rerun UI gates.",
+      question: "",
+      files,
+      details,
+    };
+  }
+
+  return {
+    route: "human-decision-needed",
+    reasonCode: "unknown-decision",
+    summary: "Unknown baseline_decision value in active bundle.",
+    recommendation: "Normalize baseline_decision to update_baseline, revert_ui, or none.",
+    question: "Which baseline decision should apply to this visual diff?",
+    files,
+    details,
+  };
+}
+
+function applyVisualBaselineHumanDecisionSection(filePath, policy, checkResult) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const command = String((checkResult && checkResult.command) || "").trim() || "unknown command";
+  const summary = String((policy && policy.summary) || "").trim() || "Visual baseline decision required.";
+  const recommendation = String((policy && policy.recommendation) || "").trim() || "Choose baseline action and rerun QA.";
+  const question = String((policy && policy.question) || "").trim()
+    || "Should this visual diff be accepted via baseline update, or should UI be reverted?";
+  upsertMarkdownSection(filePath, "Human Decision", [
+    `- Question: ${question}`,
+    "- Options: update_baseline | revert_ui",
+    `- Recommendation: ${recommendation}`,
+    `- Evidence: mandatory check failed (${command})`,
+    `- Context: ${summary}`,
+  ]);
+}
+
+function handleVisualBaselineFailureRoute(runtime, controls, options = {}) {
+  const sourceQueue = String(options.sourceQueue || "").trim();
+  const gateName = String(options.gateName || "qa").trim();
+  const gate = options.gate || null;
+  const checkResult = options.checkResult || null;
+  const policy = options.policy || null;
+  if (!policy || !sourceQueue) {
+    return null;
+  }
+
+  const note = `Delivery runner: ${String(gateName || "").toUpperCase()} visual baseline policy -> ${policy.route} (${policy.reasonCode})`;
+  const summary = truncateForQueueNote(String(policy.summary || queueNote("qa gate fail", gate)), 240);
+  const itemKey = queueBundleKey(runtime, sourceQueue);
+
+  if (policy.route === "human-decision-needed") {
+    const files = scopedQueueFiles(runtime, sourceQueue);
+    for (const filePath of files) {
+      applyVisualBaselineHumanDecisionSection(filePath, policy, checkResult);
+    }
+    const moved = moveAll(runtime, sourceQueue, "humanDecisionNeeded", "human-decision-needed", `${note}; ${summary}`);
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: itemKey,
+      result: "fail",
+      reason: `${queueNote("visual baseline decision required", gate)} | ${policy.reasonCode}`,
+      routed_to: "human-decision-needed",
+    });
+    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> human-decision-needed (${moved})`);
+    return {
+      progressed: moved > 0,
+      gate,
+      routedTo: "human-decision-needed",
+    };
+  }
+
+  if (policy.route === "dev") {
+    const moved = moveAll(runtime, sourceQueue, "dev", "dev", `${note}; ${summary}`);
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: itemKey,
+      result: "fail",
+      reason: `${queueNote("visual baseline route dev", gate)} | ${policy.reasonCode}`,
+      routed_to: "dev",
+    });
+    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> dev (${moved})`);
+    return {
+      progressed: moved > 0,
+      gate,
+      routedTo: "dev",
+    };
+  }
+
+  if (policy.route === "human-input") {
+    const moved = moveAll(runtime, sourceQueue, "humanInput", "human-input", `${note}; ${summary}`);
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: itemKey,
+      result: "fail",
+      reason: `${queueNote("visual baseline technical route human-input", gate)} | ${policy.reasonCode}`,
+      routed_to: "human-input",
+    });
+    log(controls, `${String(gateName || "").toUpperCase()} visual baseline route -> human-input (${moved})`);
+    return {
+      progressed: moved > 0,
+      gate,
+      routedTo: "human-input",
+    };
+  }
+
+  return null;
 }
 
 function removeDuplicateSourceIfTargetExists(sourcePath, targetPath, controls, stageLabel) {
@@ -424,6 +991,141 @@ function removeDuplicateSourceIfTargetExists(sourcePath, targetPath, controls, s
     );
     return false;
   }
+}
+
+function queueSignature(runtime, queueNames) {
+  const names = Array.isArray(queueNames) ? queueNames : [];
+  const parts = [];
+  for (const queueName of names) {
+    const dir = runtime && runtime.queues ? runtime.queues[queueName] : "";
+    if (!dir) {
+      continue;
+    }
+    const files = listQueueFiles(dir);
+    parts.push(`${queueName}:${files.length}`);
+    for (const file of files) {
+      try {
+        const stat = fs.statSync(file);
+        parts.push(`${queueName}:${path.basename(file)}|${stat.size}|${Math.round(stat.mtimeMs)}`);
+      } catch {
+        parts.push(`${queueName}:${path.basename(file)}|missing`);
+      }
+    }
+  }
+  return parts.join("\n");
+}
+
+function firstQueueFile(runtime, queueName) {
+  const activeId = activeBundleId(runtime);
+  const scoped = listQueueFilesByBundle(runtime, queueName, activeId);
+  if (scoped.length > 0) {
+    return scoped[0];
+  }
+  const all = listQueueFiles(runtime.queues[queueName]);
+  return all[0] || "";
+}
+
+function resetAgentAutoThread(runtime, agentRoleDir, controls, reason) {
+  const roleDir = String(agentRoleDir || "").trim();
+  if (!roleDir) {
+    return false;
+  }
+  const agentRoot = path.join(runtime.agentsRoot, roleDir);
+  const threadFile = getThreadFilePath({
+    agentsRoot: runtime.agentsRoot,
+    agentRoot,
+    auto: true,
+  });
+  if (!fs.existsSync(threadFile)) {
+    log(controls, `${roleDir.toUpperCase()} recovery: no thread file to reset (${reason})`);
+    return false;
+  }
+
+  const threadId = readThreadId(threadFile);
+  if (!threadId) {
+    try {
+      fs.unlinkSync(threadFile);
+      log(controls, `${roleDir.toUpperCase()} recovery: removed empty thread file (${reason})`);
+      return true;
+    } catch (err) {
+      log(controls, `${roleDir.toUpperCase()} recovery: failed to remove empty thread file (${err.message || err})`);
+      return false;
+    }
+  }
+
+  clearThreadState({
+    threadFile,
+    threadId,
+    agentsRoot: runtime.agentsRoot,
+  });
+  log(controls, `${roleDir.toUpperCase()} recovery: reset auto thread (${reason})`);
+  return true;
+}
+
+function noProgressFallbackThreshold(runtime) {
+  const configured = Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.loopThreshold || 3), 10);
+  const normalized = Number.isFinite(configured) ? configured : 3;
+  return Math.max(2, Math.min(4, normalized));
+}
+
+function handleSuccessfulStageNoProgress(runtime, controls, options) {
+  const stageName = String(options && options.stageName || "stage").toLowerCase();
+  const queueName = String(options && options.queueName || "").trim();
+  const itemKey = String(options && options.itemKey || stageItemKey(runtime, queueName)).trim();
+  const agentRoleDir = String(options && options.agentRoleDir || "").trim();
+  const fallbackTargetQueue = String(options && options.fallbackTargetQueue || "").trim();
+  const fallbackStatus = String(options && options.fallbackStatus || fallbackTargetQueue).trim();
+  const fallbackLabel = String(options && options.fallbackLabel || "fallback route").trim();
+  const metricStage = stageName || "stage";
+  const counterStage = `${metricStage}-no-progress`;
+
+  const attempts = registerLoopFailure(runtime, counterStage, itemKey, "no-progress");
+  appendRunnerMetric(runtime, {
+    stage: metricStage,
+    queue: queueName,
+    item_key: itemKey,
+    result: "no-progress",
+    reason: "successful run without queue transition",
+  });
+  log(
+    controls,
+    `${stageName.toUpperCase()} no-progress detected item=${itemKey} attempt=${attempts}; applying recovery`
+  );
+
+  resetAgentAutoThread(runtime, agentRoleDir, controls, `no-progress attempt ${attempts}`);
+  const threshold = noProgressFallbackThreshold(runtime);
+  if (attempts < threshold) {
+    return false;
+  }
+
+  const sourceFile = firstQueueFile(runtime, queueName);
+  if (sourceFile && fallbackTargetQueue) {
+    const moved = moveToQueue(runtime, sourceFile, fallbackTargetQueue, fallbackStatus, [
+      `Delivery runner: ${stageName.toUpperCase()} no-progress auto-recovery`,
+      `- successful run produced no queue transition after ${attempts} attempt(s)`,
+      `- fallback route applied: ${fallbackLabel}`,
+    ]);
+    if (moved) {
+      resetLoopFailuresForItem(runtime, counterStage, itemKey);
+      appendRunnerMetric(runtime, {
+        stage: metricStage,
+        queue: queueName,
+        item_key: itemKey,
+        result: "auto-routed",
+        reason: fallbackLabel,
+      });
+      log(
+        controls,
+        `${stageName.toUpperCase()} no-progress fallback routed ${path.basename(sourceFile)} -> ${fallbackTargetQueue}`
+      );
+      return true;
+    }
+  }
+
+  if (escalateStageLoop(runtime, counterStage, queueName, "successful run without queue transition", controls)) {
+    return true;
+  }
+  return false;
 }
 
 function frontMatterTruthy(value) {
@@ -869,6 +1571,164 @@ function enforceClarifyQueuePolicy(runtime, controls) {
   return rerouted > 0;
 }
 
+function blockedRecoveryMaxAttempts(runtime) {
+  return Math.max(
+    2,
+    Number.parseInt(
+      String((runtime.loopPolicy && runtime.loopPolicy.maxTotalAttemptsPerReq) || 5),
+      10
+    ) || 5
+  );
+}
+
+function blockedRecoveryItemKey(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return "";
+  }
+  const fm = parseFrontMatter(filePath);
+  const id = String(fm.id || "").trim();
+  if (id) {
+    return id;
+  }
+  return path.basename(filePath);
+}
+
+function applyBlockedHumanDecisionSection(filePath, details = {}) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  const reasonCode = String(details.reasonCode || "blocked-recovery-escalation").trim();
+  const reasonText = String(details.reasonText || "Blocked auto-recovery reached escalation condition.").trim();
+  const attempts = Math.max(0, Number.parseInt(String(details.attempts || 0), 10) || 0);
+  const maxAttempts = Math.max(1, Number.parseInt(String(details.maxAttempts || 1), 10) || 1);
+  const itemKey = String(details.itemKey || "").trim() || path.basename(filePath);
+  upsertMarkdownSection(filePath, "Human Decision", [
+    "- Question: How should this requirement proceed after blocked auto-recovery escalation?",
+    "- Options: provide clarifying business decision | split requirement | move to wont-do",
+    `- Why now: ${reasonText}`,
+    `- Escalation code: ${reasonCode}`,
+    `- Recovery attempts: ${attempts}/${maxAttempts}`,
+    `- Item key: ${itemKey}`,
+  ]);
+}
+
+function enforceBlockedQueuePolicy(runtime, controls) {
+  const blockedFiles = listQueueFiles(runtime.queues.blocked);
+  if (blockedFiles.length === 0) {
+    return false;
+  }
+
+  const maxAttempts = blockedRecoveryMaxAttempts(runtime);
+  let recovered = 0;
+  let clarified = 0;
+  let escalated = 0;
+  let routeFailed = 0;
+
+  for (const file of blockedFiles) {
+    const itemKey = blockedRecoveryItemKey(file) || path.basename(file);
+    const attempts = registerLoopFailure(runtime, "blocked-recovery", itemKey, "recover");
+    const businessUnclear = hasBusinessClarificationEvidence(file);
+    if (businessUnclear) {
+      const movedToClarify = moveToQueue(runtime, file, "toClarify", "to-clarify", [
+        "Delivery runner: blocked recovery clarification handoff",
+        "- explicit business ambiguity detected in requirement content",
+        "- route: to-clarify (PO intake owner)",
+        "- technical recovery paused until PO clarification is provided",
+      ]);
+      if (movedToClarify) {
+        appendRunnerMetric(runtime, {
+          stage: "blocked",
+          queue: "blocked",
+          item_key: itemKey,
+          result: "clarification-routed",
+          routed_to: "to-clarify",
+          reason: "blocked-business-ambiguity",
+        });
+        resetLoopFailuresForItem(runtime, "blocked-recovery", itemKey);
+        clarified += 1;
+        continue;
+      }
+      routeFailed += 1;
+      appendRunnerMetric(runtime, {
+        stage: "blocked",
+        queue: "blocked",
+        item_key: itemKey,
+        result: "route-failed",
+        reason: "blocked-business-ambiguity",
+      });
+      continue;
+    }
+
+    const exhausted = attempts >= maxAttempts;
+    if (exhausted && runtime.queues.humanDecisionNeeded) {
+      const reasonCode = "blocked-auto-recovery-exhausted";
+      const reasonText = "Technical auto-recovery retries were exhausted while the requirement repeatedly returned to blocked.";
+      applyBlockedHumanDecisionSection(file, {
+        reasonCode,
+        reasonText,
+        attempts,
+        maxAttempts,
+        itemKey,
+      });
+      const movedToDecision = moveToQueue(runtime, file, "humanDecisionNeeded", "human-decision-needed", [
+        "Delivery runner: blocked recovery escalation",
+        `- reason: ${reasonCode}`,
+        `- detail: ${reasonText}`,
+        `- attempts: ${attempts}/${maxAttempts}`,
+        "- routed to human-decision-needed to prevent endless technical retry loops",
+      ]);
+      if (movedToDecision) {
+        appendRunnerMetric(runtime, {
+          stage: "blocked",
+          queue: "blocked",
+          item_key: itemKey,
+          result: "escalated",
+          escalated_to: "human-decision-needed",
+          reason: reasonCode,
+        });
+        resetLoopFailuresForItem(runtime, "blocked-recovery", itemKey);
+        escalated += 1;
+        continue;
+      }
+    }
+
+    const movedToDev = moveToQueue(runtime, file, "dev", "dev", [
+      "Delivery runner: blocked auto-recovery",
+      "- blocked is treated as technical work queue for autonomous repair",
+      `- recovery attempt: ${attempts}/${maxAttempts}`,
+      "- route: dev (then normal downstream QA/UX/SEC/DEPLOY flow)",
+      "- escalation target: human-decision-needed after retry exhaustion",
+      "- if business ambiguity is detected, route switches to to-clarify (PO intake owner)",
+    ]);
+    if (movedToDev) {
+      appendRunnerMetric(runtime, {
+        stage: "blocked",
+        queue: "blocked",
+        item_key: itemKey,
+        result: "recovery-routed",
+        routed_to: "dev",
+        reason: `attempt ${attempts}/${maxAttempts}`,
+      });
+      recovered += 1;
+      continue;
+    }
+
+    routeFailed += 1;
+    appendRunnerMetric(runtime, {
+      stage: "blocked",
+      queue: "blocked",
+      item_key: itemKey,
+      result: "route-failed",
+      reason: `attempt ${attempts}/${maxAttempts}`,
+    });
+  }
+
+  if (recovered > 0 || clarified > 0 || escalated > 0 || routeFailed > 0) {
+    log(controls, `blocked policy: recovered=${recovered} clarified=${clarified} escalated=${escalated} route_failed=${routeFailed}`);
+  }
+  return recovered > 0 || clarified > 0 || escalated > 0;
+}
+
 function readPoVisionDecision(runtime) {
   const filePath = path.join(runtime.agentsRoot, ".runtime", "po-vision.decision.json");
   try {
@@ -914,50 +1774,55 @@ function shouldForceUnderfilledFromVision(runtime) {
 
 function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, controls, options = {}) {
   if (planningInProgress(runtime) || downstreamInProgress(runtime)) {
-    return { started: false, underfilledCycles };
+    return { started: false, underfilledCycles, bundleKey: "" };
+  }
+  if (activeBundleId(runtime)) {
+    return { started: false, underfilledCycles, bundleKey: "" };
   }
 
-  const selectedCount = countFiles(runtime.queues.selected);
+  const activated = activateReadyBundle(runtime, controls);
+  if (!activated.started) {
+    return { started: false, underfilledCycles: 0, bundleKey: "" };
+  }
+  const readyBundleId = activated.bundleId;
+  const selectedBundleFiles = listQueueFilesByBundle(runtime, "selected", readyBundleId);
+  const selectedCount = selectedBundleFiles.length;
   if (selectedCount === 0) {
-    return { started: false, underfilledCycles: 0 };
+    log(controls, `bundle activate warning: ${readyBundleId} has no selected files`);
+    completeActiveBundle(runtime, controls, { status: "aborted" });
+    return { started: false, underfilledCycles: 0, bundleKey: "" };
   }
 
   const forceUnderfilled = Boolean(options.forceUnderfilled);
   const allowUnderfilled = underfilledCycles >= runtime.loops.forceUnderfilledAfterCycles;
   if (selectedCount < minBundle && !allowUnderfilled && !forceUnderfilled) {
-    log(controls, `waiting for fuller bundle: selected=${selectedCount} min=${minBundle}`);
-    return { started: false, underfilledCycles: underfilledCycles + 1 };
-  }
-  if (selectedCount < minBundle && forceUnderfilled && !allowUnderfilled) {
-    log(
-      controls,
-      `vision final-drain: start underfilled bundle selected=${selectedCount} min=${minBundle}`
-    );
+    log(controls, `bundle ${readyBundleId} under min-size selected=${selectedCount} min=${minBundle}; starting anyway (static bundle)`);
   }
 
-  const picked = chooseBundleByBusinessScore(runtime.queues.selected, maxBundle);
-  if (picked.length === 0) {
-    return { started: false, underfilledCycles };
-  }
+  const picked = chooseBundleByBusinessScore(runtime.queues.selected, maxBundle)
+    .filter((filePath) => String(fileBundleId(filePath) || "").trim() === readyBundleId);
+  const filesToMove = picked.length > 0 ? picked : selectedBundleFiles;
 
   let toArch = 0;
-  for (const file of picked) {
+  for (const file of filesToMove) {
     moveToQueue(runtime, file, "arch", "arch", [
-      "Delivery runner: bundle intake by business score",
+      "Delivery runner: bundle intake by ready bundle id",
+      `- bundle id=${readyBundleId}`,
       `- bundle size target max=${maxBundle}`,
       "- route: arch intake",
     ]);
     toArch += 1;
   }
-  log(controls, `bundle started with ${picked.length} requirement(s): arch=${toArch}`);
-  return { started: true, underfilledCycles: 0 };
+  const bundleKey = readyBundleId;
+  log(controls, `bundle started id=${readyBundleId} size=${filesToMove.length}: arch=${toArch}`);
+  return { started: true, underfilledCycles: 0, bundleKey };
 }
 
 async function runArch(runtime, controls) {
   let progressed = false;
   while (true) {
-    const file = listQueueFiles(runtime.queues.arch)[0];
-    if (!file || controls.stopRequested) {
+    const file = listQueueFilesByBundle(runtime, "arch", activeBundleId(runtime))[0];
+    if (!file || controls.stopRequested || controls.drainRequested) {
       break;
     }
     const sourceFile = resolveRequirementPath(runtime, file) || file;
@@ -977,11 +1842,15 @@ async function runArch(runtime, controls) {
       scriptPath: path.join(runtime.agentsRoot, "arch", "arch.js"),
       args: ["--auto", "--requirement", sourceFile],
       cwd: runtime.agentsRoot,
-      maxRetries: runtime.arch && Number.isInteger(runtime.arch.maxRetries)
-        ? runtime.arch.maxRetries
-        : 0,
+      maxRetries: retryMaxForStage(
+        runtime,
+        "arch",
+        runtime.arch && Number.isInteger(runtime.arch.maxRetries) ? runtime.arch.maxRetries : 0
+      ),
       retryDelaySeconds: runtime.loops.retryDelaySeconds,
       stopSignal: getStopSignal(controls),
+      timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+      noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
     });
     if (!result.ok) {
       if (result.aborted && controls.stopRequested) {
@@ -989,6 +1858,10 @@ async function runArch(runtime, controls) {
       }
       if (result.paused) {
         log(controls, `ARCH paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+        if (handlePausedStage(runtime, controls, "arch", "arch", "token-guard")) {
+          progressed = true;
+          continue;
+        }
         break;
       }
       moveToQueue(runtime, sourceFile, "dev", "dev", [
@@ -1048,8 +1921,8 @@ async function runDev(runtime, controls) {
   const sameThreadRetriesMax = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.sameThreadRetries || 0), 10));
   const freshThreadRetriesMax = Math.max(0, Number.parseInt(String(runtime.dev && runtime.dev.freshThreadRetries || 0), 10));
   while (true) {
-    const file = listQueueFiles(runtime.queues.dev)[0];
-    if (!file || controls.stopRequested) {
+    const file = listQueueFilesByBundle(runtime, "dev", activeBundleId(runtime))[0];
+    if (!file || controls.stopRequested || controls.drainRequested) {
       break;
     }
 
@@ -1075,6 +1948,7 @@ async function runDev(runtime, controls) {
         retryDelaySeconds: runtime.loops.retryDelaySeconds,
         stopSignal: getStopSignal(controls),
         timeoutSeconds: devTimeoutSeconds,
+        noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
       });
 
       if (!result.ok && result.aborted && controls.stopRequested) {
@@ -1171,14 +2045,26 @@ async function runUxBatch(runtime, controls) {
   if (countFiles(runtime.queues.ux) === 0) {
     return movedQa > 0;
   }
+  const uxItemKeyBefore = stageItemKey(runtime, "ux");
+  const uxSnapshotBefore = queueSignature(runtime, [
+    "ux",
+    "sec",
+    "qa",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
   log(controls, "UX batch start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "ux", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (!result.ok) {
@@ -1187,11 +2073,20 @@ async function runUxBatch(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `UX paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return false;
+      return handlePausedStage(runtime, controls, "ux", "ux", "token-guard");
     }
+    appendRunnerMetric(runtime, {
+      stage: "ux",
+      queue: "ux",
+      item_key: stageItemKey(runtime, "ux"),
+      result: result.timedOut ? "timeout" : "fail",
+      reason: truncateForQueueNote(result.stderr || "", 200),
+    });
+    escalateStageLoop(runtime, "ux", "ux", "technical failure", controls);
     moveAll(runtime, "ux", "blocked", "blocked", "Delivery runner: UX batch failed (technical) -> blocked");
     return true;
   }
+  resetPausedOccurrence(runtime, "ux", uxItemKeyBefore);
 
   const normalized = moveAll(
     runtime,
@@ -1203,7 +2098,34 @@ async function runUxBatch(runtime, controls) {
   if (normalized > 0) {
     log(controls, `UX normalize moved deploy->sec: ${normalized}`);
   }
+  const uxSnapshotAfter = queueSignature(runtime, [
+    "ux",
+    "sec",
+    "qa",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
+  if (uxSnapshotBefore === uxSnapshotAfter) {
+    return handleSuccessfulStageNoProgress(runtime, controls, {
+      stageName: "ux",
+      queueName: "ux",
+      itemKey: uxItemKeyBefore,
+      agentRoleDir: "ux",
+      fallbackTargetQueue: "sec",
+      fallbackStatus: "sec",
+      fallbackLabel: "ux -> sec",
+    });
+  }
 
+  resetLoopFailuresForItem(runtime, "ux-no-progress", uxItemKeyBefore);
+  appendRunnerMetric(runtime, {
+    stage: "ux",
+    queue: "ux",
+    item_key: uxItemKeyBefore,
+    result: "pass",
+  });
   return true;
 }
 
@@ -1211,14 +2133,26 @@ async function runSecBatch(runtime, controls) {
   if (countFiles(runtime.queues.sec) === 0) {
     return false;
   }
+  const secItemKeyBefore = stageItemKey(runtime, "sec");
+  const secSnapshotBefore = queueSignature(runtime, [
+    "sec",
+    "qa",
+    "ux",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
   log(controls, "SEC batch start");
   const result = await runNodeScript({
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "sec", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (!result.ok) {
@@ -1227,11 +2161,20 @@ async function runSecBatch(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `SEC paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return false;
+      return handlePausedStage(runtime, controls, "sec", "sec", "token-guard");
     }
+    appendRunnerMetric(runtime, {
+      stage: "sec",
+      queue: "sec",
+      item_key: stageItemKey(runtime, "sec"),
+      result: result.timedOut ? "timeout" : "fail",
+      reason: truncateForQueueNote(result.stderr || "", 200),
+    });
+    escalateStageLoop(runtime, "sec", "sec", "technical failure", controls);
     moveAll(runtime, "sec", "blocked", "blocked", "Delivery runner: SEC batch failed (technical) -> blocked");
     return true;
   }
+  resetPausedOccurrence(runtime, "sec", secItemKeyBefore);
 
   const normalized = moveAll(
     runtime,
@@ -1243,7 +2186,34 @@ async function runSecBatch(runtime, controls) {
   if (normalized > 0) {
     log(controls, `SEC normalize moved ux->qa: ${normalized}`);
   }
+  const secSnapshotAfter = queueSignature(runtime, [
+    "sec",
+    "qa",
+    "ux",
+    "deploy",
+    "blocked",
+    "toClarify",
+    "humanDecisionNeeded",
+  ]);
+  if (secSnapshotBefore === secSnapshotAfter) {
+    return handleSuccessfulStageNoProgress(runtime, controls, {
+      stageName: "sec",
+      queueName: "sec",
+      itemKey: secItemKeyBefore,
+      agentRoleDir: "sec",
+      fallbackTargetQueue: "qa",
+      fallbackStatus: "qa",
+      fallbackLabel: "sec -> qa",
+    });
+  }
 
+  resetLoopFailuresForItem(runtime, "sec-no-progress", secItemKeyBefore);
+  appendRunnerMetric(runtime, {
+    stage: "sec",
+    queue: "sec",
+    item_key: secItemKeyBefore,
+    result: "pass",
+  });
   return true;
 }
 
@@ -1305,6 +2275,7 @@ function parseGate(filePath) {
       blocking_findings: ["invalid gate file"],
       findings: [],
       manual_uat: [],
+      failure_type: "technical_gate_invalid",
     };
   }
 }
@@ -1436,6 +2407,26 @@ function stableHash(input) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+function normalizeFindingTextForFingerprint(sourceLabel, text) {
+  let normalized = String(text || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized) {
+    return "";
+  }
+  if (String(sourceLabel || "").trim().toLowerCase() !== "maint") {
+    return normalized;
+  }
+  normalized = normalized
+    .replace(/candidatecount\s*=\s*\d+/g, "candidatecount=#")
+    .replace(/\b(en|de)count\s*=\s*\d+\b/g, "$1count=#")
+    .replace(/\b(en|de)only\s*=\s*\d+\b/g, "$1only=#")
+    .replace(/\bb\d{4,}\b/gi, "b####")
+    .replace(/\b\d{4}-\d{2}-\d{2}t\d{2}[:\-]\d{2}[:\-]\d{2}(?:\.\d+)?z\b/gi, "<ts>")
+    .replace(/\b\d+\b/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized;
+}
+
 function findByFrontMatterFingerprint(runtime, key, fingerprint, queueNames) {
   const target = String(fingerprint || "").trim();
   if (!target) {
@@ -1458,7 +2449,11 @@ function findByFrontMatterFingerprint(runtime, key, fingerprint, queueNames) {
 
 function findingsFingerprint(sourceLabel, queueName, findings) {
   const canonical = (findings || [])
-    .map((item) => `${normalizeSeverity(item.severity, "P2")}|${String(item.title || "").trim()}|${String(item.details || "").trim()}`)
+    .map((item) => {
+      const title = normalizeFindingTextForFingerprint(sourceLabel, item && item.title);
+      const details = normalizeFindingTextForFingerprint(sourceLabel, item && item.details);
+      return `${normalizeSeverity(item && item.severity, "P2")}|${title}|${details}`;
+    })
     .sort()
     .join("\n");
   return stableHash(`${sourceLabel}|${queueName}|${canonical}`);
@@ -1525,6 +2520,8 @@ function createQualityFollowUp(runtime, sourceLabel, queueName, findings, summar
     `status: ${status}`,
     `source: ${sourceLabel}-gate`,
     "implementation_scope: fullstack",
+    "visual_change_intent: false",
+    "baseline_decision: none",
     `business_score: ${targetIsSelected ? 100 : 60}`,
     `review_risk: ${targetIsSelected ? "high" : "medium"}`,
     `followup_fingerprint: ${fingerprint}`,
@@ -1641,6 +2638,8 @@ function createManualUatDecision(runtime, items, summary) {
     "status: human-decision-needed",
     "source: uat-manual",
     "implementation_scope: fullstack",
+    "visual_change_intent: false",
+    "baseline_decision: none",
     "review_risk: high",
     "business_score: 100",
     `manual_uat_fingerprint: ${fingerprint}`,
@@ -1769,6 +2768,7 @@ function createGenericExecutionFailureGate({
   stderr = "",
   timedOut = false,
   fallbackDetails = "",
+  failureType = "technical_execution",
 }) {
   const parts = [];
   const commandText = String(command || "").trim();
@@ -1808,6 +2808,7 @@ function createGenericExecutionFailureGate({
       },
     ],
     manual_uat: [],
+    failure_type: String(failureType || "technical_execution"),
   };
 }
 
@@ -1820,6 +2821,7 @@ function createQaExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -1832,6 +2834,7 @@ function createUxExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -1844,6 +2847,7 @@ function createSecExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -1856,6 +2860,7 @@ function createUatExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails,
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -1868,6 +2873,7 @@ function createMaintExecutionFailureGate(context = {}) {
     stderr: context.stderr,
     timedOut: context.timedOut,
     fallbackDetails: context.fallbackDetails || "Runner could not complete repository hygiene analysis.",
+    failureType: context.failureType || "technical_execution",
   });
 }
 
@@ -1887,6 +2893,7 @@ function gateFromAgentResult({ result, parsedGate, createFailureGate, command, g
       exitCode: result && result.exitCode,
       stderr: result && result.stderr,
       timedOut: Boolean(result && result.timedOut),
+      failureType: "technical_runner_exit",
     });
   }
 
@@ -1896,6 +2903,7 @@ function gateFromAgentResult({ result, parsedGate, createFailureGate, command, g
       exitCode: result.exitCode,
       stderr: result.stderr,
       fallbackDetails: `${gateLabel} completed without writing a definitive gate result.`,
+      failureType: "technical_gate_pending",
     });
   }
 
@@ -1936,6 +2944,90 @@ function queueNote(prefix, gate) {
   return `${prefix} (summary: ${summary.slice(0, 250)})`;
 }
 
+function strictGateLoopReason(gateName, gate) {
+  const summary = truncateForQueueNote(String(gate && gate.summary || "").trim(), 220);
+  if (!summary) {
+    return "strict gate fail";
+  }
+  const stage = String(gateName || "gate").toUpperCase();
+  return `strict gate fail (${stage}): ${summary}`;
+}
+
+function isTechnicalGateFailure(gate) {
+  const failureType = String((gate && gate.failure_type) || "").trim().toLowerCase();
+  if (["technical_runner_exit", "technical_gate_pending", "technical_gate_invalid", "technical_execution"].includes(failureType)) {
+    return true;
+  }
+  if (failureType === "technical_check") {
+    return false;
+  }
+  const summary = String((gate && gate.summary) || "").toLowerCase();
+  if (!summary) {
+    return false;
+  }
+  return /execution failed|invalid gate file|definitive gate result|pending/.test(summary);
+}
+
+function technicalGateFailureFingerprint(gateName, gate) {
+  const normalizedType = String((gate && gate.failure_type) || "technical_unknown")
+    .trim()
+    .toLowerCase();
+  const normalizedSummary = truncateForQueueNote(String((gate && gate.summary) || "").trim().toLowerCase(), 320);
+  const normalizedFindings = Array.isArray(gate && gate.blocking_findings)
+    ? gate.blocking_findings.map((entry) => String(entry || "").trim().toLowerCase()).join("|")
+    : "";
+  return stableHash(`${String(gateName || "gate").toLowerCase()}|${normalizedType}|${normalizedSummary}|${normalizedFindings}`);
+}
+
+function routeTechnicalGateFailureToHumanInput(runtime, controls, options = {}) {
+  const gateName = String(options.gateName || "gate").trim().toLowerCase();
+  const sourceQueue = String(options.sourceQueue || "").trim();
+  const gate = options.gate && typeof options.gate === "object" ? options.gate : {};
+  if (!sourceQueue || !runtime.queues[sourceQueue]) {
+    return { progressed: false, gate, routedTo: "", repeatCount: 0 };
+  }
+
+  const bundleKey = queueBundleKey(runtime, sourceQueue);
+  const fingerprint = technicalGateFailureFingerprint(gateName, gate);
+  const repeatCount = registerLoopFailure(
+    runtime,
+    `${gateName}-technical-failure`,
+    `${bundleKey}:${fingerprint}`,
+    "fail"
+  );
+  const summary = truncateForQueueNote(
+    String(gate.summary || `${gateName.toUpperCase()} technical gate failure`),
+    240
+  );
+  const failureType = String(gate.failure_type || "technical_unknown").trim() || "technical_unknown";
+  const note = [
+    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> human-input`,
+    `- failure_type: ${failureType}`,
+    `- repeat_count: ${repeatCount}`,
+    `- summary: ${summary}`,
+    "- classification: process/tooling/gate-orchestration issue (not product decision)",
+  ].join(" ");
+
+  const moved = moveAll(runtime, sourceQueue, "humanInput", "human-input", note);
+  if (moved > 0) {
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: bundleKey,
+      result: "escalated",
+      escalated_to: "human-input",
+      reason: `${failureType}#${repeatCount}`,
+    });
+    log(
+      controls,
+      `${gateName.toUpperCase()} technical gate failure routed -> human-input moved=${moved} repeat=${repeatCount}`
+    );
+    return { progressed: true, gate, routedTo: "human-input", repeatCount };
+  }
+
+  return { progressed: false, gate, routedTo: "", repeatCount };
+}
+
 function deliveryQualityStatePath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "delivery-quality");
   fs.mkdirSync(dir, { recursive: true });
@@ -1947,24 +3039,384 @@ function readDeliveryQualityState(runtime) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || typeof parsed !== "object") {
-      return { attempts: {} };
+      return { attempts: {}, pausedCounts: {}, loopCounters: {} };
     }
     if (!parsed.attempts || typeof parsed.attempts !== "object") {
-      return { attempts: {} };
+      parsed.attempts = {};
     }
-    return { attempts: parsed.attempts };
+    if (!parsed.pausedCounts || typeof parsed.pausedCounts !== "object") {
+      parsed.pausedCounts = {};
+    }
+    if (!parsed.loopCounters || typeof parsed.loopCounters !== "object") {
+      parsed.loopCounters = {};
+    }
+    return {
+      attempts: parsed.attempts,
+      pausedCounts: parsed.pausedCounts,
+      loopCounters: parsed.loopCounters,
+    };
   } catch {
-    return { attempts: {} };
+    return { attempts: {}, pausedCounts: {}, loopCounters: {} };
   }
 }
 
 function writeDeliveryQualityState(runtime, state) {
   const filePath = deliveryQualityStatePath(runtime);
-  const normalized = state && typeof state === "object" ? state : { attempts: {} };
+  const normalized = state && typeof state === "object" ? state : {};
   if (!normalized.attempts || typeof normalized.attempts !== "object") {
     normalized.attempts = {};
   }
+  if (!normalized.pausedCounts || typeof normalized.pausedCounts !== "object") {
+    normalized.pausedCounts = {};
+  }
+  if (!normalized.loopCounters || typeof normalized.loopCounters !== "object") {
+    normalized.loopCounters = {};
+  }
   fs.writeFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+}
+
+function pausedKey(stageName, itemKey) {
+  return `${String(stageName || "unknown").toLowerCase()}:${String(itemKey || "unknown")}`;
+}
+
+function registerPausedOccurrence(runtime, stageName, itemKey) {
+  const state = readDeliveryQualityState(runtime);
+  const key = pausedKey(stageName, itemKey);
+  const next = Math.max(1, Number.parseInt(String((state.pausedCounts && state.pausedCounts[key]) || 0), 10) + 1);
+  state.pausedCounts[key] = next;
+  writeDeliveryQualityState(runtime, state);
+  return next;
+}
+
+function resetPausedOccurrence(runtime, stageName, itemKey) {
+  const state = readDeliveryQualityState(runtime);
+  const key = pausedKey(stageName, itemKey);
+  if (Object.prototype.hasOwnProperty.call(state.pausedCounts, key)) {
+    delete state.pausedCounts[key];
+    writeDeliveryQualityState(runtime, state);
+  }
+}
+
+function loopCounterKey(stageName, itemKey, failureClass) {
+  return `${String(stageName || "unknown").toLowerCase()}:${String(itemKey || "unknown")}:${String(failureClass || "fail")}`;
+}
+
+function registerLoopFailure(runtime, stageName, itemKey, failureClass = "fail") {
+  const state = readDeliveryQualityState(runtime);
+  const key = loopCounterKey(stageName, itemKey, failureClass);
+  const next = Math.max(1, Number.parseInt(String((state.loopCounters && state.loopCounters[key]) || 0), 10) + 1);
+  state.loopCounters[key] = next;
+  writeDeliveryQualityState(runtime, state);
+  return next;
+}
+
+function resetLoopFailuresForItem(runtime, stageName, itemKey) {
+  const state = readDeliveryQualityState(runtime);
+  const prefix = `${String(stageName || "unknown").toLowerCase()}:${String(itemKey || "unknown")}:`;
+  let changed = false;
+  for (const key of Object.keys(state.loopCounters || {})) {
+    if (key.startsWith(prefix)) {
+      delete state.loopCounters[key];
+      changed = true;
+    }
+  }
+  if (changed) {
+    writeDeliveryQualityState(runtime, state);
+  }
+}
+
+function bundleWorkspaceStatePath(runtime) {
+  const dir = path.join(runtime.agentsRoot, ".runtime", "delivery-quality");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "bundle-workspace.json");
+}
+
+function readBundleWorkspaceState(runtime) {
+  const filePath = bundleWorkspaceStatePath(runtime);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object") {
+      return { bundleKey: "", branch: "" };
+    }
+    return {
+      bundleKey: String(parsed.bundleKey || "").trim(),
+      branch: String(parsed.branch || "").trim(),
+    };
+  } catch {
+    return { bundleKey: "", branch: "" };
+  }
+}
+
+function writeBundleWorkspaceState(runtime, state) {
+  const filePath = bundleWorkspaceStatePath(runtime);
+  const normalized = state && typeof state === "object" ? state : {};
+  const payload = {
+    bundleKey: String(normalized.bundleKey || "").trim(),
+    branch: String(normalized.branch || "").trim(),
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function clearBundleWorkspaceState(runtime) {
+  writeBundleWorkspaceState(runtime, { bundleKey: "", branch: "" });
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isBundleIdKey(runtime, value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return false;
+  }
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const prefix = String(cfg.idPrefix || "B").trim() || "B";
+  const pattern = new RegExp(`^${escapeRegExp(prefix)}\\d+$`, "i");
+  return pattern.test(raw);
+}
+
+function activeBundleKey(runtime) {
+  const registryActive = activeBundleId(runtime);
+  if (registryActive && isBundleIdKey(runtime, registryActive)) {
+    return registryActive;
+  }
+  const orderedQueues = ["arch", "dev", "qa", "ux", "sec", "deploy"];
+  for (const queueName of orderedQueues) {
+    const ids = queueBundleIds(runtime, queueName).filter((id) => isBundleIdKey(runtime, id));
+    if (ids.length === 1) {
+      return ids[0];
+    }
+  }
+  return "";
+}
+
+function localBranchExists(repoRoot, branchName) {
+  const result = runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/heads/${branchName}`]);
+  return result.ok;
+}
+
+function buildWorkspaceBranchName(runtime, bundleKey) {
+  const releaseCfg = runtime && runtime.releaseAutomation ? runtime.releaseAutomation : {};
+  const bundleCfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const branchPrefix = String(bundleCfg.branchPrefix || releaseCfg.branchPrefix || "rb").trim() || "rb";
+  const bundleLabel = sanitizeRefPart(bundleKey || "bundle", "bundle");
+  const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(2, 12); // YYMMDDHHMM
+  return `${branchPrefix}/${bundleLabel}-${stamp}`;
+}
+
+function workspaceBranchPrefix(runtime) {
+  const releaseCfg = runtime && runtime.releaseAutomation ? runtime.releaseAutomation : {};
+  const bundleCfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  return String(bundleCfg.branchPrefix || releaseCfg.branchPrefix || "rb").trim() || "rb";
+}
+
+function listLocalWorkspaceBranches(runtime) {
+  const prefix = workspaceBranchPrefix(runtime);
+  const result = runGit(runtime.repoRoot, [
+    "for-each-ref",
+    "--format=%(refname:short)",
+    `refs/heads/${prefix}`,
+  ]);
+  if (!result.ok) {
+    return [];
+  }
+  return String(result.output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function branchDivergenceAgainstBase(repoRoot, baseBranch, branchName) {
+  const result = runGit(repoRoot, ["rev-list", "--left-right", "--count", `${baseBranch}...${branchName}`]);
+  if (!result.ok) {
+    return { ok: false, baseOnly: 0, branchOnly: 0 };
+  }
+  const parts = String(result.output || "")
+    .trim()
+    .split(/\s+/)
+    .map((value) => Number.parseInt(value, 10));
+  const baseOnly = Number.isFinite(parts[0]) ? parts[0] : 0;
+  const branchOnly = Number.isFinite(parts[1]) ? parts[1] : 0;
+  return { ok: true, baseOnly, branchOnly };
+}
+
+function pruneStaleWorkspaceBranches(runtime, controls, reason = "idle") {
+  const agentsRootGit = gitRoot(runtime.agentsRoot);
+  const targetRootGit = gitRoot(runtime.repoRoot);
+  if (!targetRootGit || (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit)) {
+    return;
+  }
+
+  const releaseCfg = runtime.releaseAutomation || {};
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (!currentBranch) {
+    return;
+  }
+  const state = readBundleWorkspaceState(runtime);
+  const rememberedBranch = String(state.branch || "").trim();
+  const protectedBranches = new Set([currentBranch]);
+  if (rememberedBranch) {
+    protectedBranches.add(rememberedBranch);
+  }
+
+  let deleted = 0;
+  let keptWithCommits = 0;
+  for (const branchName of listLocalWorkspaceBranches(runtime)) {
+    if (protectedBranches.has(branchName)) {
+      continue;
+    }
+    const divergence = branchDivergenceAgainstBase(runtime.repoRoot, baseBranch, branchName);
+    if (!divergence.ok) {
+      continue;
+    }
+    if (divergence.branchOnly > 0) {
+      keptWithCommits += 1;
+      continue;
+    }
+    const dropped = runGit(runtime.repoRoot, ["branch", "-D", branchName]);
+    if (dropped.ok) {
+      deleted += 1;
+    }
+  }
+
+  if (deleted > 0) {
+    log(controls, `BUNDLE BRANCH: pruned ${deleted} stale local workspace branch(es) reason=${reason}`);
+  }
+  if (keptWithCommits > 0) {
+    log(
+      controls,
+      `BUNDLE BRANCH: kept ${keptWithCommits} local workspace branch(es) with unique commits vs ${baseBranch}`
+    );
+  }
+}
+
+function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {}) {
+  const outcome = {
+    ok: false,
+    branch: "",
+    reason: "",
+  };
+  const normalizedBundleKey = String(bundleKey || "").trim();
+  if (!normalizedBundleKey) {
+    outcome.ok = true;
+    return outcome;
+  }
+  if (!isBundleIdKey(runtime, normalizedBundleKey)) {
+    outcome.ok = true;
+    log(controls, `BUNDLE BRANCH: skip workspace branch for non-bundle key '${normalizedBundleKey}'`);
+    return outcome;
+  }
+
+  const agentsRootGit = gitRoot(runtime.agentsRoot);
+  const targetRootGit = gitRoot(runtime.repoRoot);
+  if (!targetRootGit) {
+    outcome.reason = "target repo is not git";
+    return outcome;
+  }
+  if (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit) {
+    outcome.reason = "safety guard prevented workspace branch management in agents repo";
+    return outcome;
+  }
+
+  const releaseCfg = runtime.releaseAutomation || {};
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const remote = String(releaseCfg.remote || "origin").trim() || "origin";
+  const state = readBundleWorkspaceState(runtime);
+  const rawRememberedBranch = state.bundleKey === normalizedBundleKey ? String(state.branch || "").trim() : "";
+  const rememberedBranch = rawRememberedBranch && rawRememberedBranch !== baseBranch
+    ? rawRememberedBranch
+    : "";
+  const createFromCurrent = Boolean(options.createFromCurrent);
+  if (rawRememberedBranch && rawRememberedBranch === baseBranch) {
+    log(
+      controls,
+      `BUNDLE BRANCH: ignored invalid remembered branch '${baseBranch}' for ${normalizedBundleKey}`
+    );
+  }
+  const targetBranch = rememberedBranch || buildWorkspaceBranchName(runtime, normalizedBundleKey);
+
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (!currentBranch) {
+    outcome.reason = "could not resolve current git branch";
+    return outcome;
+  }
+  if (currentBranch === targetBranch && currentBranch !== baseBranch) {
+    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+    outcome.ok = true;
+    outcome.branch = targetBranch;
+    return outcome;
+  }
+  if (currentBranch === baseBranch && targetBranch === baseBranch) {
+    outcome.reason = "refusing to use base branch as bundle workspace branch";
+    return outcome;
+  }
+
+  if (localBranchExists(runtime.repoRoot, targetBranch)) {
+    const checkoutExisting = runGit(runtime.repoRoot, ["checkout", targetBranch]);
+    if (!checkoutExisting.ok) {
+      outcome.reason = `checkout existing branch failed: ${truncateForQueueNote(checkoutExisting.output || "", 300)}`;
+      return outcome;
+    }
+    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+    outcome.ok = true;
+    outcome.branch = targetBranch;
+    log(controls, `BUNDLE BRANCH: switched to existing ${targetBranch}`);
+    return outcome;
+  }
+
+  if (!createFromCurrent && currentBranch !== baseBranch) {
+    const checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
+    if (!checkoutBase.ok) {
+      outcome.reason = `checkout base branch failed: ${truncateForQueueNote(checkoutBase.output || "", 300)}`;
+      return outcome;
+    }
+  }
+
+  if (!createFromCurrent) {
+    runGit(runtime.repoRoot, ["fetch", remote]);
+    const pullBase = runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
+    if (!pullBase.ok) {
+      log(controls, `BUNDLE BRANCH: base pull warning ${truncateForQueueNote(pullBase.output || "", 240)}`);
+    }
+  }
+
+  const createBranch = runGit(runtime.repoRoot, ["checkout", "-b", targetBranch]);
+  if (!createBranch.ok) {
+    outcome.reason = `create workspace branch failed: ${truncateForQueueNote(createBranch.output || "", 300)}`;
+    return outcome;
+  }
+
+  writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+  outcome.ok = true;
+  outcome.branch = targetBranch;
+  log(controls, `BUNDLE BRANCH: created and switched ${targetBranch} (base=${baseBranch})`);
+  return outcome;
+}
+
+function enforceActiveWorkspaceBranch(runtime, controls) {
+  const key = activeBundleKey(runtime);
+  if (!key) {
+    return { ok: true, branch: "" };
+  }
+  const result = ensureBundleWorkspaceBranch(runtime, controls, key, { createFromCurrent: true });
+  if (!result.ok) {
+    return result;
+  }
+  const releaseCfg = runtime.releaseAutomation || {};
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (currentBranch === baseBranch) {
+    return {
+      ok: false,
+      branch: currentBranch,
+      reason: `workspace branch guard: active bundle '${key}' is still on base branch '${baseBranch}'`,
+    };
+  }
+  return result;
 }
 
 function queueBundleIds(runtime, queueName) {
@@ -1972,10 +3424,16 @@ function queueBundleIds(runtime, queueName) {
   if (!dir) {
     return [];
   }
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const bundleScoped = Boolean(cfg.enabled) && !Boolean(cfg.allowCrossBundleMoves);
+  const activeId = bundleScoped ? activeBundleId(runtime) : "";
   const ids = new Set();
   for (const filePath of listQueueFiles(dir)) {
     const fm = parseFrontMatter(filePath);
     const id = String(fm.bundle_id || "").trim();
+    if (bundleScoped && activeId && id && id !== activeId) {
+      continue;
+    }
     if (id) {
       ids.add(id);
     }
@@ -1992,6 +3450,84 @@ function queueBundleKey(runtime, queueName) {
     return ids[0];
   }
   return `mixed:${ids.join("+")}`;
+}
+
+function stageItemKey(runtime, queueName) {
+  const ids = queueBundleIds(runtime, queueName);
+  if (ids.length > 0) {
+    return ids.length === 1 ? ids[0] : `mixed:${ids.join("+")}`;
+  }
+  const dir = runtime && runtime.queues ? runtime.queues[queueName] : "";
+  const files = dir ? listQueueFiles(dir) : [];
+  if (files.length > 0) {
+    const fm = parseFrontMatter(files[0]);
+    const id = String(fm.id || "").trim();
+    if (id) {
+      return id;
+    }
+    return path.basename(files[0]);
+  }
+  return `${queueName}:no-item`;
+}
+
+function shouldEscalateBusinessLoop(runtime) {
+  return Boolean(runtime && runtime.loopPolicy && runtime.loopPolicy.escalateBusinessLoopToHumanDecision);
+}
+
+function escalateStageLoop(runtime, stageName, sourceQueue, reason, controls) {
+  const queue = String(sourceQueue || "").trim();
+  const itemKey = stageItemKey(runtime, queue);
+  const maxAttempts = Math.max(1, Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.maxTotalAttemptsPerReq || 5), 10));
+  const threshold = Math.max(2, Number.parseInt(String(runtime.loopPolicy && runtime.loopPolicy.loopThreshold || 3), 10));
+  const totalAttempts = registerLoopFailure(runtime, stageName, itemKey, "fail");
+  const shouldEscalate = totalAttempts >= threshold || totalAttempts >= maxAttempts;
+  if (!shouldEscalate) {
+    return false;
+  }
+
+  const businessEscalation = shouldEscalateBusinessLoop(runtime) && ["qa", "uat", "ux", "sec"].includes(String(stageName || "").toLowerCase());
+  if (businessEscalation && runtime.queues.humanDecisionNeeded) {
+    const moved = moveAll(
+      runtime,
+      queue,
+      "humanDecisionNeeded",
+      "human-decision-needed",
+      `Delivery runner: ${String(stageName || "").toUpperCase()} loop escalation -> human-decision-needed (${reason})`
+    );
+    if (moved > 0) {
+      appendRunnerMetric(runtime, {
+        stage: stageName,
+        item_key: itemKey,
+        result: "escalated",
+        escalated_to: "human-decision-needed",
+        reason,
+      });
+      log(controls, `${String(stageName || "").toUpperCase()} loop escalation to human-decision-needed item=${itemKey}`);
+      resetLoopFailuresForItem(runtime, stageName, itemKey);
+      return true;
+    }
+  }
+
+  const moved = moveAll(
+    runtime,
+    queue,
+    "blocked",
+    "blocked",
+    `Delivery runner: ${String(stageName || "").toUpperCase()} loop escalation -> blocked (${reason})`
+  );
+  if (moved > 0) {
+    appendRunnerMetric(runtime, {
+      stage: stageName,
+      item_key: itemKey,
+      result: "escalated",
+      escalated_to: "blocked",
+      reason,
+    });
+    log(controls, `${String(stageName || "").toUpperCase()} loop escalation to blocked item=${itemKey}`);
+    resetLoopFailuresForItem(runtime, stageName, itemKey);
+    return true;
+  }
+  return false;
 }
 
 function gateAttemptKey(gateName, bundleKey) {
@@ -2250,7 +3786,7 @@ async function runMandatoryChecksWithAutoFix(runtime, controls) {
   };
 }
 
-function createMandatoryCheckFailureGate(checkResult) {
+function createMandatoryCheckFailureGate(checkResult, visualPolicy = null) {
   const command = String((checkResult && checkResult.command) || "unknown command");
   const output = truncateForQueueNote(String((checkResult && checkResult.output) || "no output"), 500);
   const autoFix = checkResult && checkResult.autoFix && typeof checkResult.autoFix === "object"
@@ -2280,6 +3816,9 @@ function createMandatoryCheckFailureGate(checkResult) {
   const traceSummary = traceParts.length > 0
     ? ` | auto-fix: ${truncateForQueueNote(traceParts.join("; "), 380)}`
     : "";
+  const visualSummary = visualPolicy && typeof visualPolicy === "object"
+    ? ` | visual-policy: ${String(visualPolicy.reasonCode || "n/a")} (${String(visualPolicy.route || "n/a")})`
+    : "";
   return {
     status: "fail",
     summary: `mandatory check failed: ${command}${autoFixSuffix}`,
@@ -2288,10 +3827,13 @@ function createMandatoryCheckFailureGate(checkResult) {
       {
         severity: "P1",
         title: "Mandatory QA check failed",
-        details: `${command} :: ${output}${traceSummary}`,
+        details: `${command} :: ${output}${traceSummary}${visualSummary}`,
       },
     ],
     manual_uat: [],
+    failure_type: visualPolicy ? "visual_regression" : "technical_check",
+    baseline_policy_route: visualPolicy ? String(visualPolicy.route || "") : "",
+    baseline_policy_reason: visualPolicy ? String(visualPolicy.reasonCode || "") : "",
   };
 }
 
@@ -2358,9 +3900,24 @@ async function runQaBundle(runtime, controls) {
   if (strictQa && runtime.qa && runtime.qa.runChecksInRunner) {
     const checks = await runMandatoryChecksWithAutoFix(runtime, controls);
     if (!checks.ok) {
-      const gate = createMandatoryCheckFailureGate(checks);
+      const visualPolicy = isVisualSnapshotFailure(checks)
+        ? evaluateVisualBaselinePolicy(runtime, "qa")
+        : null;
+      const gate = createMandatoryCheckFailureGate(checks, visualPolicy);
       if (runtime.deliveryQuality.emitFollowupsOnFail) {
         applyGateOutcomes(runtime, controls, "qa", gate);
+      }
+      if (visualPolicy) {
+        const routed = handleVisualBaselineFailureRoute(runtime, controls, {
+          sourceQueue: "qa",
+          gateName: "qa",
+          gate,
+          checkResult: checks,
+          policy: visualPolicy,
+        });
+        if (routed) {
+          return routed;
+        }
       }
       return handleStrictGateFailure(runtime, controls, {
         gateName: "qa",
@@ -2378,9 +3935,11 @@ async function runQaBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--batch-tests", "--batch-queue", "qa", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "qa", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
   if (result.aborted && controls.stopRequested) {
     return {
@@ -2390,11 +3949,13 @@ async function runQaBundle(runtime, controls) {
   }
   if (result.paused) {
     log(controls, `QA paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "qa", "qa", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       gate: null,
     };
   }
+  resetPausedOccurrence(runtime, "qa", stageItemKey(runtime, "qa"));
 
   const parsed = parseGate(gatePath);
   const gate = gateFromAgentResult({
@@ -2407,6 +3968,12 @@ async function runQaBundle(runtime, controls) {
   if (strictQa) {
     if (gatePass(gate)) {
       resetGateAttempt(runtime, "qa", bundleKey);
+      appendRunnerMetric(runtime, {
+        stage: "qa",
+        queue: "qa",
+        item_key: bundleKey,
+        result: "pass",
+      });
       applyGateOutcomes(runtime, controls, "qa", gate);
       moveAll(runtime, "qa", "deploy", "deploy", "Delivery runner: QA strict pass -> deploy");
       return {
@@ -2417,6 +3984,29 @@ async function runQaBundle(runtime, controls) {
     if (runtime.deliveryQuality.emitFollowupsOnFail) {
       applyGateOutcomes(runtime, controls, "qa", gate);
     }
+    appendRunnerMetric(runtime, {
+      stage: "qa",
+      queue: "qa",
+      item_key: bundleKey,
+      result: "fail",
+      reason: queueNote("qa gate fail", gate),
+    });
+    if (isTechnicalGateFailure(gate)) {
+      const routed = routeTechnicalGateFailureToHumanInput(runtime, controls, {
+        gateName: "qa",
+        sourceQueue: "qa",
+        gate,
+      });
+      if (routed.progressed) {
+        return routed;
+      }
+    }
+    if (escalateStageLoop(runtime, "qa", "qa", strictGateLoopReason("qa", gate), controls)) {
+      return {
+        progressed: true,
+        gate,
+      };
+    }
     return handleStrictGateFailure(runtime, controls, {
       gateName: "qa",
       sourceQueue: "qa",
@@ -2425,6 +4015,13 @@ async function runQaBundle(runtime, controls) {
   }
 
   applyGateOutcomes(runtime, controls, "qa", gate);
+  appendRunnerMetric(runtime, {
+    stage: "qa",
+    queue: "qa",
+    item_key: bundleKey,
+    result: gatePass(gate) ? "pass" : "fail",
+    reason: queueNote("qa advisory", gate),
+  });
   const note = gatePass(gate)
     ? "Delivery runner: QA advisory pass -> continue to deploy"
     : queueNote("Delivery runner: QA advisory fail -> continue to deploy", gate);
@@ -2458,9 +4055,11 @@ async function runUatBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
     args: ["--auto", "--batch", "--source-queue", "deploy", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "uat", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
   if (result.aborted && controls.stopRequested) {
     return {
@@ -2470,11 +4069,13 @@ async function runUatBundle(runtime, controls) {
   }
   if (result.paused) {
     log(controls, `UAT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "uat", "deploy", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       gate: null,
     };
   }
+  resetPausedOccurrence(runtime, "uat", stageItemKey(runtime, "deploy"));
 
   const parsed = parseGate(gatePath);
   const gate = gateFromAgentResult({
@@ -2487,6 +4088,12 @@ async function runUatBundle(runtime, controls) {
   if (strictUat) {
     if (gatePass(gate)) {
       resetGateAttempt(runtime, "uat", bundleKey);
+      appendRunnerMetric(runtime, {
+        stage: "uat",
+        queue: "deploy",
+        item_key: bundleKey,
+        result: "pass",
+      });
       applyGateOutcomes(runtime, controls, "uat", gate);
       log(controls, "UAT strict pass");
       return {
@@ -2497,6 +4104,29 @@ async function runUatBundle(runtime, controls) {
     if (runtime.deliveryQuality.emitFollowupsOnFail) {
       applyGateOutcomes(runtime, controls, "uat", gate);
     }
+    appendRunnerMetric(runtime, {
+      stage: "uat",
+      queue: "deploy",
+      item_key: bundleKey,
+      result: "fail",
+      reason: queueNote("uat gate fail", gate),
+    });
+    if (isTechnicalGateFailure(gate)) {
+      const routed = routeTechnicalGateFailureToHumanInput(runtime, controls, {
+        gateName: "uat",
+        sourceQueue: "deploy",
+        gate,
+      });
+      if (routed.progressed) {
+        return routed;
+      }
+    }
+    if (escalateStageLoop(runtime, "uat", "deploy", strictGateLoopReason("uat", gate), controls)) {
+      return {
+        progressed: true,
+        gate,
+      };
+    }
     return handleStrictGateFailure(runtime, controls, {
       gateName: "uat",
       sourceQueue: "deploy",
@@ -2505,6 +4135,13 @@ async function runUatBundle(runtime, controls) {
   }
 
   applyGateOutcomes(runtime, controls, "uat", gate);
+  appendRunnerMetric(runtime, {
+    stage: "uat",
+    queue: "deploy",
+    item_key: bundleKey,
+    result: gatePass(gate) ? "pass" : "fail",
+    reason: queueNote("uat advisory", gate),
+  });
   if (!gatePass(gate)) {
     log(controls, queueNote("UAT advisory fail -> continue to deploy", gate));
   } else {
@@ -2533,9 +4170,11 @@ async function runUxFinalPass(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "ux-final", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -2582,9 +4221,11 @@ async function runSecFinalPass(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "sec-final", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -2631,9 +4272,11 @@ async function runUatFullRegression(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
     args: ["--auto", "--full-regression", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "uat-full", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -2876,6 +4519,8 @@ function writeComprehensiveSystemTestState(runtime, state) {
 }
 
 function hasOpenPlanningOrClarification(runtime) {
+  const releaseCfg = runtime && runtime.releaseAutomation ? runtime.releaseAutomation : {};
+  const blockOnHumanDecision = !releaseCfg.allowReleaseWithHumanDecisionNeeded;
   return countFiles(runtime.queues.refinement) > 0
     || countFiles(runtime.queues.backlog) > 0
     || countFiles(runtime.queues.selected) > 0
@@ -2883,7 +4528,7 @@ function hasOpenPlanningOrClarification(runtime) {
     || countFiles(runtime.queues.dev) > 0
     || countFiles(runtime.queues.toClarify) > 0
     || countFiles(runtime.queues.humanInput) > 0
-    || countFiles(runtime.queues.humanDecisionNeeded) > 0
+    || (blockOnHumanDecision && countFiles(runtime.queues.humanDecisionNeeded) > 0)
     || countFiles(runtime.queues.blocked) > 0;
 }
 
@@ -2958,9 +4603,28 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   if (runtime.qa && runtime.qa.runChecksInRunner) {
     const checks = await runMandatoryChecksWithAutoFix(runtime, controls);
     if (!checks.ok) {
-      const gate = createMandatoryCheckFailureGate(checks);
+      const visualPolicy = isVisualSnapshotFailure(checks)
+        ? evaluateVisualBaselinePolicy(runtime, "released")
+        : null;
+      const gate = createMandatoryCheckFailureGate(checks, visualPolicy);
       applyGateByPolicy(runtime, controls, "qa-full", gate, enforceStrictRouting);
       if (enforceStrictRouting) {
+        if (visualPolicy) {
+          const routed = handleVisualBaselineFailureRoute(runtime, controls, {
+            sourceQueue: "released",
+            gateName: "qa-full",
+            gate,
+            checkResult: checks,
+            policy: visualPolicy,
+          });
+          if (routed) {
+            return {
+              progressed: true,
+              passed: false,
+              reason: "mandatory-checks-failed",
+            };
+          }
+        }
         await strictGateFailRoute(runtime, controls, "qa-full", gate);
       } else if (trackFailuresWithoutRouting) {
         hasNonMutatingFailure = true;
@@ -3185,6 +4849,22 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
     };
   }
 
+  const skipDecision = shouldSkipMaintForReleasedBundle(runtime);
+  if (skipDecision.skip) {
+    const sourceList = skipDecision.sources.length > 0
+      ? skipDecision.sources.join(",")
+      : "maint-gate";
+    log(
+      controls,
+      `MAINT skip: latest released bundle ${skipDecision.bundleId} is maint-only follow-up/hotfix (sources=${sourceList}); preventing self-loop`
+    );
+    return {
+      progressed: false,
+      signature,
+      gate: null,
+    };
+  }
+
   const decisionPath = maintDecisionPath(runtime);
   fs.writeFileSync(decisionPath, gateTemplateJson(), "utf8");
 
@@ -3193,9 +4873,11 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
     scriptPath: path.join(runtime.agentsRoot, "maint", "maint.js"),
     args: ["--auto", "--post-deploy", "--decision-file", decisionPath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "maint", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -3207,8 +4889,9 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
   }
   if (result.paused) {
     log(controls, `MAINT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "maint", "released", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       signature: lastSignature,
       gate: null,
     };
@@ -3442,6 +5125,395 @@ function deployCommitPush(runtime, controls) {
   return outcome;
 }
 
+function readJsonFileSafe(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeRefPart(value, fallback = "bundle") {
+  const cleaned = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || fallback;
+}
+
+function resolveVersionFilePath(runtime, releaseCfg) {
+  if (!runtime || !runtime.repoRoot) {
+    return "";
+  }
+  const scope = String((releaseCfg && releaseCfg.versionScope) || "root").trim().toLowerCase();
+  if (scope === "root") {
+    return path.join(runtime.repoRoot, "package.json");
+  }
+  return path.join(runtime.repoRoot, "package.json");
+}
+
+function readPackageVersion(versionFilePath) {
+  const parsed = readJsonFileSafe(versionFilePath);
+  const version = parsed && typeof parsed.version === "string" ? parsed.version.trim() : "";
+  return version;
+}
+
+function readUnmergedConflictFiles(repoRoot) {
+  const result = runGit(repoRoot, ["diff", "--name-only", "--diff-filter=U"]);
+  if (!result.ok) {
+    return [];
+  }
+  return String(result.output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 50);
+}
+
+function createReleaseConflictHumanInput(runtime, details) {
+  const targetDir = runtime.queues.humanInput || runtime.queues.toClarify;
+  if (!targetDir) {
+    return "";
+  }
+  fs.mkdirSync(targetDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const id = `REQ-RELEASE-CONFLICT-${stamp}`;
+  const filePath = path.join(targetDir, `${id}.md`);
+
+  const conflictFiles = Array.isArray(details.conflictFiles) ? details.conflictFiles : [];
+  const conflictList = conflictFiles.length > 0
+    ? conflictFiles.map((item) => `- ${item}`).join("\n")
+    : "- none captured";
+  const reason = String(details.reason || "merge conflict could not be auto-resolved").trim();
+  const releaseBranch = String(details.releaseBranch || "").trim();
+  const baseBranch = String(details.baseBranch || "dev").trim() || "dev";
+  const bundle = String(details.bundleId || "unknown").trim();
+  const remote = String(details.remote || "origin").trim() || "origin";
+
+  const content = [
+    "---",
+    `id: ${id}`,
+    "title: Release automation merge conflict needs human resolution",
+    "status: human-input",
+    "source: delivery-release-automation",
+    "priority: P1",
+    "implementation_scope: fullstack",
+    "visual_change_intent: false",
+    "baseline_decision: none",
+    "---",
+    "",
+    "# Goal",
+    "Resolve release branch merge conflict and complete automated release handoff to dev.",
+    "",
+    "## Scope",
+    `- Bundle: ${bundle}`,
+    `- Remote: ${remote}`,
+    `- Base branch: ${baseBranch}`,
+    `- Release branch: ${releaseBranch || "<missing>"}`,
+    "",
+    "## Conflict Details",
+    `- Reason: ${reason}`,
+    "### Files",
+    conflictList,
+    "",
+    "## Recommended Action",
+    "- Resolve conflicts locally on the release branch.",
+    "- Re-run tests/checks for changed files.",
+    "- Merge release branch into dev and push origin/dev.",
+    "- Record decision notes in this requirement, then move as appropriate.",
+    "",
+  ].join("\n");
+
+  fs.writeFileSync(filePath, `${content}\n`, "utf8");
+  return filePath;
+}
+
+function runReleaseAutomation(runtime, controls, context = {}) {
+  const releaseCfg = runtime.releaseAutomation || {};
+  const outcome = {
+    committed: false,
+    pushed: false,
+    merged: false,
+    tagged: false,
+    releaseBranch: "",
+    version: "",
+    conflictEscalation: "",
+  };
+  if (!releaseCfg.enabled) {
+    return outcome;
+  }
+  if (runtime.deploy.mode !== "commit_push") {
+    log(controls, `RELEASE: skipped (deploy.mode=${runtime.deploy.mode}; requires commit_push)`);
+    return outcome;
+  }
+
+  const agentsRootGit = gitRoot(runtime.agentsRoot);
+  const targetRootGit = gitRoot(runtime.repoRoot);
+  if (!targetRootGit) {
+    log(controls, "RELEASE: skipped - target repo is not git");
+    return outcome;
+  }
+  if (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit) {
+    log(controls, "RELEASE: skipped - safety guard prevented agents repo release flow");
+    return outcome;
+  }
+
+  const remote = String(releaseCfg.remote || "origin").trim() || "origin";
+  const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
+  const currentBranch = getCurrentBranch(runtime.repoRoot);
+  if (!currentBranch) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: "could not determine current git branch",
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  if (currentBranch === baseBranch) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: currentBranch,
+      baseBranch,
+      remote,
+      reason: `active branch is base branch '${baseBranch}' (bundle branch required)`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const versionFilePath = resolveVersionFilePath(runtime, releaseCfg);
+  if (!versionFilePath || !fs.existsSync(versionFilePath)) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `version file missing: ${versionFilePath || "unknown"}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const oldVersion = readPackageVersion(versionFilePath);
+  if (!oldVersion) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `could not read current version from ${versionFilePath}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const versionCmd = String(releaseCfg.versionCommand || "npm version patch --no-git-tag-version").trim();
+  log(controls, `RELEASE: version bump start command='${versionCmd}' current=${oldVersion}`);
+  const versionResult = runShellCheckCommand(runtime, versionCmd, {
+    cwd: runtime.repoRoot,
+  });
+  if (!versionResult.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `version command failed: ${truncateForQueueNote(versionResult.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  const newVersion = readPackageVersion(versionFilePath);
+  if (!newVersion || newVersion === oldVersion) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch: "",
+      baseBranch,
+      remote,
+      reason: `version did not change after bump (old=${oldVersion}, new=${newVersion || "<missing>"})`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  outcome.version = newVersion;
+
+  const bundleLabel = sanitizeRefPart(context.bundleId || context.bundleKey || "bundle", "bundle");
+  const releaseBranch = currentBranch;
+  outcome.releaseBranch = releaseBranch;
+
+  runGit(runtime.repoRoot, ["add", "-A"]);
+  const commitMessage = `chore(release): ${bundleLabel} v${newVersion}`;
+  const commit = runGit(runtime.repoRoot, ["commit", "-m", commitMessage]);
+  if (!commit.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `commit failed: ${truncateForQueueNote(commit.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  outcome.committed = true;
+
+  log(controls, `RELEASE: keeping bundle branch local only (${releaseBranch})`);
+
+  runGit(runtime.repoRoot, ["fetch", remote]);
+  let checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
+  if (!checkoutBase.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `checkout base branch failed: ${truncateForQueueNote(checkoutBase.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  const pullBase = runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
+  if (!pullBase.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `base branch ff pull failed: ${truncateForQueueNote(pullBase.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+
+  let merge = runGit(runtime.repoRoot, ["merge", "--ff-only", releaseBranch]);
+  if (!merge.ok) {
+    let resolved = false;
+    if (releaseCfg.autoResolveConflicts && (releaseCfg.maxConflictFixAttempts || 0) > 0) {
+      for (let attempt = 1; attempt <= (releaseCfg.maxConflictFixAttempts || 0); attempt++) {
+        log(controls, `RELEASE: auto-resolve attempt ${attempt}/${releaseCfg.maxConflictFixAttempts}`);
+        runGit(runtime.repoRoot, ["checkout", releaseBranch]);
+        runGit(runtime.repoRoot, ["fetch", remote]);
+        const rebase = runGit(runtime.repoRoot, ["rebase", `${remote}/${baseBranch}`]);
+        if (!rebase.ok) {
+          runGit(runtime.repoRoot, ["rebase", "--abort"]);
+          continue;
+        }
+        checkoutBase = runGit(runtime.repoRoot, ["checkout", baseBranch]);
+        if (!checkoutBase.ok) {
+          continue;
+        }
+        runGit(runtime.repoRoot, ["pull", "--ff-only", remote, baseBranch]);
+        merge = runGit(runtime.repoRoot, ["merge", "--ff-only", releaseBranch]);
+        if (merge.ok) {
+          resolved = true;
+          break;
+        }
+      }
+    }
+    if (!merge.ok && !resolved) {
+      const conflictFiles = readUnmergedConflictFiles(runtime.repoRoot);
+      const humanPath = createReleaseConflictHumanInput(runtime, {
+        bundleId: context.bundleId,
+        releaseBranch,
+        baseBranch,
+        remote,
+        reason: `ff-only merge unresolved: ${truncateForQueueNote(merge.output || "", 300)}`,
+        conflictFiles,
+      });
+      if (humanPath) {
+        log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+        outcome.conflictEscalation = humanPath;
+      }
+      return outcome;
+    }
+  }
+  outcome.merged = true;
+
+  const pushBase = runGit(runtime.repoRoot, ["push", remote, baseBranch]);
+  if (!pushBase.ok) {
+    const humanPath = createReleaseConflictHumanInput(runtime, {
+      bundleId: context.bundleId,
+      releaseBranch,
+      baseBranch,
+      remote,
+      reason: `push base branch failed: ${truncateForQueueNote(pushBase.output || "", 300)}`,
+      conflictFiles: [],
+    });
+    if (humanPath) {
+      log(controls, `RELEASE: escalated to human-input ${path.basename(humanPath)}`);
+      outcome.conflictEscalation = humanPath;
+    }
+    return outcome;
+  }
+  outcome.pushed = true;
+
+  if (releaseCfg.tagEnabled) {
+    const tagName = `${String(releaseCfg.tagPrefix || "v")}${newVersion}`;
+    const tagCreate = runGit(runtime.repoRoot, ["tag", tagName]);
+    if (!tagCreate.ok && !/already exists/i.test(String(tagCreate.output || ""))) {
+      log(controls, `RELEASE: tag create failed ${truncateForQueueNote(tagCreate.output || "", 240)}`);
+    } else {
+      const tagPush = runGit(runtime.repoRoot, ["push", remote, tagName]);
+      if (tagPush.ok || /already exists/i.test(String(tagPush.output || ""))) {
+        outcome.tagged = true;
+      } else {
+        log(controls, `RELEASE: tag push failed ${truncateForQueueNote(tagPush.output || "", 240)}`);
+      }
+    }
+  }
+
+  const deleteLocalRelease = runGit(runtime.repoRoot, ["branch", "-D", releaseBranch]);
+  if (!deleteLocalRelease.ok) {
+    log(controls, `RELEASE: local bundle branch cleanup warning ${truncateForQueueNote(deleteLocalRelease.output || "", 220)}`);
+  } else {
+    log(controls, `RELEASE: deleted local bundle branch ${releaseBranch}`);
+  }
+
+  log(controls, `RELEASE: completed bundle=${bundleLabel} version=${newVersion} branch=${releaseBranch}`);
+  return outcome;
+}
+
 async function runDeployBundle(runtime, controls) {
   if (countFiles(runtime.queues.deploy) === 0) {
     return false;
@@ -3453,9 +5525,11 @@ async function runDeployBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "deploy", "deploy.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "deploy", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (!result.ok) {
@@ -3464,13 +5538,28 @@ async function runDeployBundle(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `DEPLOY paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return false;
+      return handlePausedStage(runtime, controls, "deploy", "deploy", "token-guard");
     }
+    appendRunnerMetric(runtime, {
+      stage: "deploy",
+      queue: "deploy",
+      item_key: deployBundleKey,
+      result: result.timedOut ? "timeout" : "fail",
+      reason: truncateForQueueNote(result.stderr || "", 200),
+    });
+    escalateStageLoop(runtime, "deploy", "deploy", "deploy stage failed", controls);
     moveAll(runtime, "deploy", "blocked", "blocked", "Delivery runner: deploy bundle failed (technical) -> blocked");
     return true;
   }
+  resetPausedOccurrence(runtime, "deploy", deployBundleKey);
 
   moveAll(runtime, "deploy", "released", "released", "Delivery runner: deploy bundle released");
+  appendRunnerMetric(runtime, {
+    stage: "deploy",
+    queue: "deploy",
+    item_key: deployBundleKey,
+    result: "pass",
+  });
   if (deployBundleIds.length > 0) {
     for (const bundleId of deployBundleIds) {
       resetBundleAttempts(runtime, bundleId);
@@ -3478,8 +5567,19 @@ async function runDeployBundle(runtime, controls) {
   } else {
     resetBundleAttempts(runtime, deployBundleKey);
   }
-  const deployInfo = deployCommitPush(runtime, controls);
-  createPullRequest(runtime, controls, deployInfo);
+  let deployInfo;
+  if (runtime.releaseAutomation && runtime.releaseAutomation.enabled) {
+    const bundleId = deployBundleIds.length === 1 ? deployBundleIds[0] : deployBundleKey;
+    deployInfo = runReleaseAutomation(runtime, controls, {
+      bundleId,
+      bundleKey: deployBundleKey,
+    });
+  } else {
+    deployInfo = deployCommitPush(runtime, controls);
+    createPullRequest(runtime, controls, deployInfo);
+  }
+  completeActiveBundle(runtime, controls, { status: "completed" });
+  clearBundleWorkspaceState(runtime);
   return true;
 }
 
@@ -3491,6 +5591,88 @@ function releasedSignature(runtime) {
     parts.push(`${path.basename(file)}|${stat.size}|${Math.round(stat.mtimeMs)}`);
   }
   return parts.sort().join("\n");
+}
+
+function latestReleasedBundle(runtime) {
+  const files = listQueueFiles(runtime.queues.released);
+  let latestBundleId = "";
+  let latestMtime = 0;
+  for (const filePath of files) {
+    const fm = parseFrontMatter(filePath);
+    const bundleId = String(fm.bundle_id || "").trim();
+    if (!bundleId) {
+      continue;
+    }
+    const stat = fs.statSync(filePath);
+    if (stat.mtimeMs > latestMtime) {
+      latestMtime = stat.mtimeMs;
+      latestBundleId = bundleId;
+    }
+  }
+  if (!latestBundleId) {
+    return {
+      bundleId: "",
+      files: [],
+      sources: [],
+    };
+  }
+
+  const bundleFiles = [];
+  const sourceSet = new Set();
+  for (const filePath of files) {
+    const fm = parseFrontMatter(filePath);
+    const bundleId = String(fm.bundle_id || "").trim();
+    if (bundleId !== latestBundleId) {
+      continue;
+    }
+    const source = String(fm.source || "").trim().toLowerCase() || "unknown";
+    sourceSet.add(source);
+    bundleFiles.push({
+      path: filePath,
+      frontMatter: fm,
+      source,
+    });
+  }
+
+  return {
+    bundleId: latestBundleId,
+    files: bundleFiles,
+    sources: Array.from(sourceSet).sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+function isMaintFollowUpRequirement(frontMatter) {
+  const fm = frontMatter && typeof frontMatter === "object" ? frontMatter : {};
+  const source = String(fm.source || "").trim().toLowerCase();
+  const reqId = String(fm.id || "").trim();
+  return source === "maint-gate" && MAINT_FOLLOWUP_ID_RE.test(reqId);
+}
+
+function shouldSkipMaintForReleasedBundle(runtime) {
+  const latest = latestReleasedBundle(runtime);
+  if (!latest.bundleId || !Array.isArray(latest.files) || latest.files.length === 0) {
+    return {
+      skip: false,
+      bundleId: "",
+      sources: [],
+      reason: "no-bundle",
+    };
+  }
+  const allMaintFollowUps = latest.files.every((entry) => isMaintFollowUpRequirement(entry.frontMatter));
+  if (!allMaintFollowUps) {
+    return {
+      skip: false,
+      bundleId: latest.bundleId,
+      sources: latest.sources,
+      reason: "contains-non-maint-scope",
+    };
+  }
+  return {
+    skip: true,
+    bundleId: latest.bundleId,
+    sources: latest.sources,
+    reason: "maint-only-released-bundle",
+  };
 }
 
 async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
@@ -3519,9 +5701,11 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
-    maxRetries: runtime.loops.maxRetries,
+    maxRetries: retryMaxForStage(runtime, "qa-post", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
   });
 
   if (result.aborted && controls.stopRequested) {
@@ -3534,8 +5718,9 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
 
   if (result.paused) {
     log(controls, `QA post-bundle paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const escalated = handlePausedStage(runtime, controls, "qa-post", "released", "token-guard");
     return {
-      progressed: false,
+      progressed: escalated,
       signature: lastSignature,
       gate: null,
     };
@@ -3606,6 +5791,7 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
     );
     if (moved > 0) {
       log(controls, `test mode normalized deploy->released: ${moved}`);
+      clearBundleWorkspaceState(runtime);
       progressed = true;
     }
   }
@@ -3654,6 +5840,8 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
+  resetGlobalPauseOnStartup(runtime, controls);
+  pruneStaleWorkspaceBranches(runtime, controls, "startup");
 
   log(controls, `mode=${mode}`);
   log(controls, `bundle min=${minBundle} max=${maxBundle}`);
@@ -3664,6 +5852,10 @@ async function main() {
   let forceComprehensiveOnce = Boolean(args.force);
 
   while (!controls.stopRequested) {
+    if (controls.drainRequested) {
+      log(controls, "graceful stop: no new work will be started");
+      break;
+    }
     if (await waitIfGloballyPaused(runtime, controls)) {
       if (args.once) {
         break;
@@ -3672,6 +5864,7 @@ async function main() {
     }
 
     enforceClarifyQueuePolicy(runtime, controls);
+    enforceBlockedQueuePolicy(runtime, controls);
 
     const before = snapshotHash(runtime);
     const forceUnderfilledFromVision = shouldForceUnderfilledFromVision(runtime);
@@ -3685,6 +5878,22 @@ async function main() {
       { forceUnderfilled: forceUnderfilledFromVision }
     );
     underfilledCycles = bundle.underfilledCycles;
+
+    if (bundle.started && bundle.bundleKey) {
+      const workspace = ensureBundleWorkspaceBranch(runtime, controls, bundle.bundleKey);
+      if (!workspace.ok) {
+        log(controls, `BUNDLE BRANCH: setup failed for ${bundle.bundleKey}: ${workspace.reason}`);
+        await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
+        continue;
+      }
+    }
+
+    const workspaceGuard = enforceActiveWorkspaceBranch(runtime, controls);
+    if (!workspaceGuard.ok) {
+      log(controls, `BUNDLE BRANCH: enforcement failed: ${workspaceGuard.reason}`);
+      await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
+      continue;
+    }
 
     await runArch(runtime, controls);
     await runDev(runtime, controls);
@@ -3704,6 +5913,9 @@ async function main() {
       }
       if (downstream.maintSignature) {
         lastMaintSignature = downstream.maintSignature;
+      }
+      if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
+        clearBundleWorkspaceState(runtime);
       }
     }
 
@@ -3732,11 +5944,20 @@ async function main() {
       }
     }
 
+    if (activeBundleDrained(runtime)) {
+      completeActiveBundle(runtime, controls, { status: "aborted" });
+    }
+
+    if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
+      clearBundleWorkspaceState(runtime);
+      pruneStaleWorkspaceBranches(runtime, controls, "idle");
+    }
+
     if (args.once) {
       break;
     }
 
-    if (controls.stopRequested) {
+    if (controls.stopRequested || controls.drainRequested) {
       break;
     }
 
@@ -3745,10 +5966,19 @@ async function main() {
       if (shouldUseLongIdleWait(runtime, mode)) {
         const minutes = Math.max(1, Math.round(DELIVERY_IDLE_WAIT_MS / 60000));
         process.stdout.write(
-          `DELIVERY: waiting ${minutes}m - upstream idle (selected=0 arch=0 dev=0), checking again for new PO input\n`
+          `${timestampMinute()} DELIVERY: waiting ${minutes}m - upstream idle (selected=0 arch=0 dev=0), checking again for new PO input\n`
         );
         await sleepWithStopCheck(DELIVERY_IDLE_WAIT_MS, controls);
       } else {
+        const seconds = Math.max(1, runtime.loops.deliveryPollSeconds);
+        const selected = countFiles(runtime.queues.selected);
+        const arch = countFiles(runtime.queues.arch);
+        const dev = countFiles(runtime.queues.dev);
+        const qa = countFiles(runtime.queues.qa);
+        const deploy = countFiles(runtime.queues.deploy);
+        process.stdout.write(
+          `${timestampMinute()} DELIVERY: waiting ${seconds}s - no bundle progress (selected=${selected} arch=${arch} dev=${dev} qa=${qa} deploy=${deploy})\n`
+        );
         await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
       }
     }
@@ -3757,7 +5987,26 @@ async function main() {
   controls.cleanup();
 }
 
-main().catch((err) => {
-  console.error((err && err.stack) ? err.stack : (err.message || err));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error((err && err.stack) ? err.stack : (err.message || err));
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  qaGateTemplate,
+  parseGate,
+  gatePending,
+  gateFromAgentResult,
+  createQaExecutionFailureGate,
+  createUatExecutionFailureGate,
+  evaluateVisualBaselinePolicy,
+  handleVisualBaselineFailureRoute,
+  isTechnicalGateFailure,
+  routeTechnicalGateFailureToHumanInput,
+  normalizeFindingTextForFingerprint,
+  findingsFingerprint,
+  shouldSkipMaintForReleasedBundle,
+  isMaintFollowUpRequirement,
+};
