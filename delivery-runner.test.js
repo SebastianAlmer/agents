@@ -16,10 +16,14 @@ const {
 function mkTempQueues() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-test-"));
   const qaDir = path.join(root, "requirements", "qa");
+  const devDir = path.join(root, "requirements", "dev");
   const humanInputDir = path.join(root, "requirements", "human-input");
+  const humanDecisionNeededDir = path.join(root, "requirements", "human-decision-needed");
   fs.mkdirSync(qaDir, { recursive: true });
+  fs.mkdirSync(devDir, { recursive: true });
   fs.mkdirSync(humanInputDir, { recursive: true });
-  return { root, qaDir, humanInputDir };
+  fs.mkdirSync(humanDecisionNeededDir, { recursive: true });
+  return { root, qaDir, devDir, humanInputDir, humanDecisionNeededDir };
 }
 
 test("gateFromAgentResult marks pending gate as technical process failure", () => {
@@ -42,36 +46,45 @@ test("gateFromAgentResult marks pending gate as technical process failure", () =
   assert.equal(isTechnicalGateFailure(gate), true);
 });
 
-test("technical gate failure is routed to human-input", () => {
-  const { root, qaDir, humanInputDir } = mkTempQueues();
-  const reqPath = path.join(qaDir, "REQ-TEST.md");
-  fs.writeFileSync(
-    reqPath,
-    [
-      "---",
-      "id: REQ-TEST",
-      "title: Test requirement",
-      "status: qa",
-      "---",
-      "",
-      "# Goal",
-      "Verify technical routing.",
-      "",
-    ].join("\n"),
-    "utf8"
-  );
+test("technical gate failure routes to dev first, then escalates after retries", () => {
+  const { root, qaDir, devDir, humanDecisionNeededDir } = mkTempQueues();
 
-  const runtime = {
+  const writeReq = (dir) => {
+    const reqPath = path.join(dir, "REQ-TEST.md");
+    fs.writeFileSync(
+      reqPath,
+      [
+        "---",
+        "id: REQ-TEST",
+        "title: Test requirement",
+        "status: qa",
+        "---",
+        "",
+        "# Goal",
+        "Verify technical routing.",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+    return reqPath;
+  };
+
+  const mkRuntime = () => ({
     agentsRoot: root,
     bundleFlow: {
       enabled: false,
       allowCrossBundleMoves: true,
     },
+    deliveryQuality: {
+      routeToDevOnFail: true,
+      maxFixCycles: 2,
+    },
     queues: {
       qa: qaDir,
-      humanInput: humanInputDir,
+      dev: devDir,
+      humanDecisionNeeded: humanDecisionNeededDir,
     },
-  };
+  });
   const controls = { verbose: false };
   const gate = {
     status: "fail",
@@ -82,20 +95,38 @@ test("technical gate failure is routed to human-input", () => {
     failure_type: "technical_gate_pending",
   };
 
-  const routed = routeTechnicalGateFailureToHumanInput(runtime, controls, {
+  // First failure: should route to dev
+  writeReq(qaDir);
+  const routed1 = routeTechnicalGateFailureToHumanInput(mkRuntime(), controls, {
     gateName: "qa",
     sourceQueue: "qa",
     gate,
   });
+  assert.equal(routed1.progressed, true);
+  assert.equal(routed1.routedTo, "dev");
+  assert.equal(fs.existsSync(path.join(devDir, "REQ-TEST.md")), true);
+  assert.equal(fs.existsSync(path.join(qaDir, "REQ-TEST.md")), false);
 
-  assert.equal(routed.progressed, true);
-  assert.equal(routed.routedTo, "human-input");
-  const targetPath = path.join(humanInputDir, "REQ-TEST.md");
-  assert.equal(fs.existsSync(targetPath), true);
-  assert.equal(fs.existsSync(reqPath), false);
+  // Second failure: still routes to dev (attempt 2 <= maxFixCycles 2)
+  fs.renameSync(path.join(devDir, "REQ-TEST.md"), path.join(qaDir, "REQ-TEST.md"));
+  const routed2 = routeTechnicalGateFailureToHumanInput(mkRuntime(), controls, {
+    gateName: "qa",
+    sourceQueue: "qa",
+    gate,
+  });
+  assert.equal(routed2.progressed, true);
+  assert.equal(routed2.routedTo, "dev");
 
-  const raw = fs.readFileSync(targetPath, "utf8");
-  assert.match(raw, /status:\s*human-input/i);
+  // Third failure: retries exhausted, escalates to human-decision-needed
+  fs.renameSync(path.join(devDir, "REQ-TEST.md"), path.join(qaDir, "REQ-TEST.md"));
+  const routed3 = routeTechnicalGateFailureToHumanInput(mkRuntime(), controls, {
+    gateName: "qa",
+    sourceQueue: "qa",
+    gate,
+  });
+  assert.equal(routed3.progressed, true);
+  assert.equal(routed3.routedTo, "human-decision-needed");
+  assert.equal(fs.existsSync(path.join(humanDecisionNeededDir, "REQ-TEST.md")), true);
 });
 
 function mkTempReleasedQueue() {

@@ -3257,15 +3257,43 @@ function routeTechnicalGateFailureToHumanInput(runtime, controls, options = {}) 
     240
   );
   const failureType = String(gate.failure_type || "technical_unknown").trim() || "technical_unknown";
-  const note = [
-    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> human-decision-needed`,
+  const maxFixCycles = Math.max(1, Number(runtime.deliveryQuality && runtime.deliveryQuality.maxFixCycles || 2));
+  const allowRouteToDev = Boolean(runtime.deliveryQuality && runtime.deliveryQuality.routeToDevOnFail);
+
+  if (allowRouteToDev && repeatCount <= maxFixCycles) {
+    const retryNote = [
+      `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> dev (retry ${repeatCount}/${maxFixCycles})`,
+      `- failure_type: ${failureType}`,
+      `- summary: ${summary}`,
+      "- classification: process/tooling/gate-orchestration issue (not product decision)",
+    ].join(" ");
+    const moved = moveAll(runtime, sourceQueue, "dev", "dev", retryNote);
+    if (moved > 0) {
+      appendRunnerMetric(runtime, {
+        stage: gateName,
+        queue: sourceQueue,
+        item_key: bundleKey,
+        result: "technical-retry",
+        retried_to: "dev",
+        reason: `${failureType}#${repeatCount}/${maxFixCycles}`,
+      });
+      log(
+        controls,
+        `${gateName.toUpperCase()} technical gate failure routed -> dev for retry attempt=${repeatCount}/${maxFixCycles} moved=${moved}`
+      );
+      return { progressed: true, gate, routedTo: "dev", repeatCount };
+    }
+  }
+
+  const escalationNote = [
+    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> human-decision-needed (retries exhausted)`,
     `- failure_type: ${failureType}`,
     `- repeat_count: ${repeatCount}`,
     `- summary: ${summary}`,
     "- classification: process/tooling/gate-orchestration issue (not product decision)",
   ].join(" ");
 
-  const moved = moveAll(runtime, sourceQueue, "humanDecisionNeeded", "human-decision-needed", note);
+  const moved = moveAll(runtime, sourceQueue, "humanDecisionNeeded", "human-decision-needed", escalationNote);
   if (moved > 0) {
     appendRunnerMetric(runtime, {
       stage: gateName,
@@ -3277,7 +3305,7 @@ function routeTechnicalGateFailureToHumanInput(runtime, controls, options = {}) 
     });
     log(
       controls,
-      `${gateName.toUpperCase()} technical gate failure routed -> human-decision-needed moved=${moved} repeat=${repeatCount}`
+      `${gateName.toUpperCase()} technical gate failure routed -> human-decision-needed moved=${moved} repeat=${repeatCount} (retries exhausted)`
     );
     return { progressed: true, gate, routedTo: "human-decision-needed", repeatCount };
   }
