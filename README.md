@@ -28,7 +28,7 @@ The system is split into three orchestration layers:
 - Controls bundle preparation in `selected`.
 
 3. `Delivery runner` (implementation + quality + deploy automation)
-- Runs ARCH/DEV and downstream gates (UX/SEC/QA/UAT/DEPLOY).
+ - Runs ARCH/DEV and downstream gates (UX/SEC/QA/UAT/DEPLOY).
 - Handles technical recovery loops and escalations.
 
 All requirements are queue files under `requirements/`.
@@ -53,7 +53,7 @@ Responsibility summary:
 - `UX`: UI quality and design/code refinement.
 - `SEC`: security hardening in code/config.
 - `QA`: technical validation and defect fixing loops.
-- `UAT`: functional/semantic behavior validation.
+- `UAT`: functional/semantic behavior validation. Can be disabled per config when not needed.
 - `MAINT`: post-deploy hygiene follow-ups.
 - `DEPLOY`: delivery completion and repo deploy actions.
 
@@ -143,6 +143,9 @@ Downstream path in `full`:
 - `selected -> arch -> dev -> ux -> sec -> qa -> uat -> deploy -> released`
 - Recovery loops reroute failed bundles back to `dev` until thresholds are reached.
 - Exhausted technical/business conflicts escalate to `human-decision-needed`.
+
+UAT toggle:
+- Set `[delivery_quality].uat_enabled = false` to skip both bundle UAT and full-regression UAT.
 
 ## Bundle mechanics (fine detail)
 

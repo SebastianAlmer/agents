@@ -372,6 +372,7 @@ function main() {
     : {};
   const deliveryQualityStrictGate = normalizeBool(deliveryQualityBase.strict_gate, true);
   const deliveryQualityRequireQaPass = normalizeBool(deliveryQualityBase.require_qa_pass, true);
+  const deliveryQualityUatEnabled = normalizeBool(deliveryQualityBase.uat_enabled, true);
   const deliveryQualityRequireUatPass = normalizeBool(deliveryQualityBase.require_uat_pass, true);
   const deliveryQualityRouteToDevOnFail = normalizeBool(deliveryQualityBase.route_to_dev_on_fail, true);
   const deliveryQualityMaxFixCycles = Number.isFinite(deliveryQualityBase.max_fix_cycles)
@@ -789,6 +790,7 @@ function main() {
     "[delivery_quality]",
     `strict_gate = ${toTomlBool(deliveryQualityStrictGate)}`,
     `require_qa_pass = ${toTomlBool(deliveryQualityRequireQaPass)}`,
+    `uat_enabled = ${toTomlBool(deliveryQualityUatEnabled)}`,
     `require_uat_pass = ${toTomlBool(deliveryQualityRequireUatPass)}`,
     `route_to_dev_on_fail = ${toTomlBool(deliveryQualityRouteToDevOnFail)}`,
     `max_fix_cycles = ${toTomlInt(deliveryQualityMaxFixCycles)}`,
@@ -947,7 +949,7 @@ function main() {
   console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
   console.log(`- bundle_flow: enabled=${bundleFlowEnabled} id_prefix=${bundleFlowIdPrefix} id_pad=${bundleFlowIdPad} max_ready_ahead=${bundleFlowMaxReadyAhead} carryover_target_queue=${bundleFlowCarryoverTargetQueue} branch_prefix=${bundleFlowBranchPrefix} allow_cross_bundle_moves=${bundleFlowAllowCrossBundleMoves}`);
   console.log(`- delivery_runner: mode=${deliveryRunnerDefault} agent_timeout_seconds=${deliveryRunnerTimeoutSeconds} no_output_timeout_seconds=${deliveryRunnerNoOutputTimeoutSeconds} max_paused_cycles_per_item=${deliveryRunnerMaxPausedCyclesPerItem} workspace_branches_enabled=${deliveryRunnerWorkspaceBranchesEnabled}`);
-  console.log(`- delivery_quality: strict=${deliveryQualityStrictGate} qa_pass=${deliveryQualityRequireQaPass} uat_pass=${deliveryQualityRequireUatPass} route_to_dev=${deliveryQualityRouteToDevOnFail} max_fix_cycles=${deliveryQualityMaxFixCycles} emit_followups_on_fail=${deliveryQualityEmitFollowupsOnFail}`);
+  console.log(`- delivery_quality: strict=${deliveryQualityStrictGate} qa_pass=${deliveryQualityRequireQaPass} uat_enabled=${deliveryQualityUatEnabled} uat_pass=${deliveryQualityRequireUatPass} route_to_dev=${deliveryQualityRouteToDevOnFail} max_fix_cycles=${deliveryQualityMaxFixCycles} emit_followups_on_fail=${deliveryQualityEmitFollowupsOnFail}`);
   console.log(`- qa autofix: enabled=${qaAutoFixOnMandatoryFail} max_attempts=${qaAutoFixMaxAttempts} shell_cmds=${qaAutoFixCommands.length} codex=${qaAutoFixUseCodex}`);
   console.log(`- memory: enabled=${memoryEnabled} dir=${memoryDir} include_in_prompt=${memoryIncludeInPrompt} update_on_auto=${memoryUpdateOnAuto} update_on_interactive=${memoryUpdateOnInteractive}`);
   console.log(`- e2e: enabled=${e2eEnabled} required_in_test_mode=${e2eRequiredInTestMode} run_on_full_completion=${e2eRunOnFullCompletion} timeout=${e2eTimeoutSeconds}s`);

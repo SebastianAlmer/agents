@@ -3504,6 +3504,13 @@ function workspaceBranchesEnabled(runtime) {
   return Boolean(runtime.deliveryRunner.workspaceBranchesEnabled);
 }
 
+function uatEnabled(runtime) {
+  if (!runtime || !runtime.deliveryQuality || runtime.deliveryQuality.uatEnabled == null) {
+    return true;
+  }
+  return Boolean(runtime.deliveryQuality.uatEnabled);
+}
+
 function listLocalWorkspaceBranches(runtime) {
   const prefix = workspaceBranchPrefix(runtime);
   const result = runGit(runtime.repoRoot, [
@@ -4412,9 +4419,18 @@ async function runUatBundle(runtime, controls) {
       gate: null,
     };
   }
+  if (!uatEnabled(runtime)) {
+    log(controls, "UAT bundle skipped (disabled by config)");
+    return {
+      progressed: false,
+      gate: null,
+      skipped: true,
+    };
+  }
 
   const strictUat = Boolean(
     runtime.deliveryQuality
+    && runtime.deliveryQuality.uatEnabled
     && runtime.deliveryQuality.strictGate
     && runtime.deliveryQuality.requireUatPass
   );
@@ -4634,6 +4650,14 @@ async function runUatFullRegression(runtime, controls) {
     return {
       progressed: false,
       gate: null,
+    };
+  }
+  if (!uatEnabled(runtime)) {
+    log(controls, "UAT full regression skipped (disabled by config)");
+    return {
+      progressed: false,
+      gate: null,
+      skipped: true,
     };
   }
 
@@ -5125,7 +5149,9 @@ async function runComprehensiveSystemTest(runtime, controls, options = {}) {
   }
 
   const uatFull = await runUatFullRegression(runtime, controls);
-  if (!uatFull.progressed && !uatFull.gate) {
+  if (uatFull && uatFull.skipped) {
+    log(controls, "UAT full regression disabled by config");
+  } else if (!uatFull.progressed && !uatFull.gate) {
     return {
       progressed: false,
       passed: false,
@@ -6387,7 +6413,10 @@ module.exports = {
   isMaintFollowUpRequirement,
   __test: {
     workspaceBranchesEnabled,
+    uatEnabled,
     ensureBundleWorkspaceBranch,
     enforceActiveWorkspaceBranch,
+    runUatBundle,
+    runUatFullRegression,
   },
 };

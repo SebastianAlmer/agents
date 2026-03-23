@@ -78,6 +78,7 @@ escalate_business_loop_to_human_decision = true
 # Strenger Qualitaetsmodus: QA/UAT muessen gruen sein vor Deploy.
 strict_gate = true
 require_qa_pass = true
+uat_enabled = true
 require_uat_pass = true
 route_to_dev_on_fail = true
 max_fix_cycles = 2

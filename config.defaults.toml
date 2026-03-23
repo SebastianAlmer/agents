@@ -108,6 +108,9 @@ strict_gate = true
 # OPTIONAL: Wenn true, muss QA gate PASS sein, sonst geht Bundle zurueck an DEV.
 require_qa_pass = true
 
+# OPTIONAL: false = UAT-Agent wird komplett uebersprungen (Bundle-Gate und Full-Regression).
+uat_enabled = true
+
 # OPTIONAL: Wenn true, muss UAT gate PASS sein, sonst geht Bundle zurueck an DEV.
 require_uat_pass = true
 

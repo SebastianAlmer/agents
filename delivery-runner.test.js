@@ -296,3 +296,45 @@ test("workspace branch enforcement is a no-op when disabled in config", () => {
   assert.equal(outcome.ok, true);
   assert.equal(outcome.branch, "feature/manual");
 });
+
+function mkTempUatRuntime() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-uat-test-"));
+  const deployDir = path.join(root, "requirements", "deploy");
+  const releasedDir = path.join(root, "requirements", "released");
+  fs.mkdirSync(deployDir, { recursive: true });
+  fs.mkdirSync(releasedDir, { recursive: true });
+  fs.writeFileSync(path.join(deployDir, "REQ-DEPLOY.md"), "---\nid: REQ-DEPLOY\n---\n", "utf8");
+  fs.writeFileSync(path.join(releasedDir, "REQ-RELEASED.md"), "---\nid: REQ-RELEASED\n---\n", "utf8");
+  return {
+    root,
+    runtime: {
+      agentsRoot: root,
+      repoRoot: root,
+      deliveryQuality: {
+        uatEnabled: false,
+      },
+      queues: {
+        deploy: deployDir,
+        released: releasedDir,
+      },
+    },
+  };
+}
+
+test("uat bundle is skipped when disabled in config", async () => {
+  const { runtime } = mkTempUatRuntime();
+  const result = await __test.runUatBundle(runtime, { verbose: false });
+
+  assert.equal(result.progressed, false);
+  assert.equal(result.gate, null);
+  assert.equal(result.skipped, true);
+});
+
+test("uat full regression is skipped when disabled in config", async () => {
+  const { runtime } = mkTempUatRuntime();
+  const result = await __test.runUatFullRegression(runtime, { verbose: false });
+
+  assert.equal(result.progressed, false);
+  assert.equal(result.gate, null);
+  assert.equal(result.skipped, true);
+});
