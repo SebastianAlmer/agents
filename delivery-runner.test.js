@@ -1,8 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { writeBundleRegistry } = require("./lib/flow-core");
 
 const {
   gateFromAgentResult,
@@ -11,6 +13,7 @@ const {
   routeTechnicalGateFailureToHumanInput,
   findingsFingerprint,
   shouldSkipMaintForReleasedBundle,
+  __test,
 } = require("./delivery-runner");
 
 function mkTempQueues() {
@@ -201,4 +204,95 @@ test("findingsFingerprint for maint ignores count-only churn", () => {
     },
   ]);
   assert.equal(a, b);
+});
+
+function initGitRepoWithBranch(branchName) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-branch-test-"));
+  const repoRoot = path.join(root, "repo");
+  const agentsRoot = path.join(root, "agents");
+  fs.mkdirSync(repoRoot, { recursive: true });
+  fs.mkdirSync(agentsRoot, { recursive: true });
+
+  childProcess.execFileSync("git", ["init", "-b", branchName], { cwd: repoRoot });
+  childProcess.execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot });
+  childProcess.execFileSync("git", ["config", "user.name", "Test User"], { cwd: repoRoot });
+  fs.writeFileSync(path.join(repoRoot, "README.md"), "test\n", "utf8");
+  childProcess.execFileSync("git", ["add", "README.md"], { cwd: repoRoot });
+  childProcess.execFileSync("git", ["commit", "-m", "init"], { cwd: repoRoot });
+
+  return { root, repoRoot, agentsRoot };
+}
+
+test("workspace branch setup stays on current branch when disabled in config", () => {
+  const { repoRoot, agentsRoot } = initGitRepoWithBranch("feature/manual");
+  const runtime = {
+    repoRoot,
+    agentsRoot,
+    deliveryRunner: {
+      workspaceBranchesEnabled: false,
+    },
+    bundleFlow: {
+      idPrefix: "B",
+      idPad: 4,
+      branchPrefix: "rb",
+    },
+    releaseAutomation: {
+      baseBranch: "main",
+      remote: "origin",
+    },
+  };
+
+  const outcome = __test.ensureBundleWorkspaceBranch(runtime, { verbose: false }, "B0001");
+  const currentBranch = childProcess.execFileSync(
+    "git",
+    ["rev-parse", "--abbrev-ref", "HEAD"],
+    { cwd: repoRoot, encoding: "utf8" }
+  ).trim();
+  const branches = childProcess.execFileSync(
+    "git",
+    ["branch", "--format=%(refname:short)"],
+    { cwd: repoRoot, encoding: "utf8" }
+  ).trim().split(/\r?\n/).filter(Boolean);
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.branch, "feature/manual");
+  assert.equal(currentBranch, "feature/manual");
+  assert.deepEqual(branches, ["feature/manual"]);
+});
+
+test("workspace branch enforcement is a no-op when disabled in config", () => {
+  const { repoRoot, agentsRoot } = initGitRepoWithBranch("feature/manual");
+  writeBundleRegistry(agentsRoot, {
+    active_bundle_id: "B0001",
+    ready_bundle_id: "",
+    bundles: {
+      B0001: {
+        id: "B0001",
+        status: "active",
+      },
+    },
+  });
+
+  const runtime = {
+    repoRoot,
+    agentsRoot,
+    deliveryRunner: {
+      workspaceBranchesEnabled: false,
+    },
+    bundleFlow: {
+      enabled: true,
+      idPrefix: "B",
+      idPad: 4,
+      branchPrefix: "rb",
+    },
+    releaseAutomation: {
+      baseBranch: "main",
+      remote: "origin",
+    },
+  };
+
+  const outcome = __test.enforceActiveWorkspaceBranch(runtime, { verbose: false });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.branch, "feature/manual");
 });

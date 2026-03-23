@@ -357,6 +357,10 @@ function main() {
   )
     ? Math.max(1, base.delivery_runner.max_paused_cycles_per_item)
     : 2;
+  const deliveryRunnerWorkspaceBranchesEnabled = normalizeBool(
+    base.delivery_runner && base.delivery_runner.workspace_branches_enabled,
+    true
+  );
   const retryPolicyBase = base.retry_policy && typeof base.retry_policy === "object"
     ? base.retry_policy
     : {};
@@ -759,6 +763,7 @@ function main() {
     `agent_timeout_seconds = ${toTomlInt(deliveryRunnerTimeoutSeconds)}`,
     `no_output_timeout_seconds = ${toTomlInt(deliveryRunnerNoOutputTimeoutSeconds)}`,
     `max_paused_cycles_per_item = ${toTomlInt(deliveryRunnerMaxPausedCyclesPerItem)}`,
+    `workspace_branches_enabled = ${toTomlBool(deliveryRunnerWorkspaceBranchesEnabled)}`,
     "",
     "[retry_policy]",
     `arch_retry_max = ${toTomlInt(Number.isFinite(retryPolicyBase.arch_retry_max) ? Math.max(0, retryPolicyBase.arch_retry_max) : 1)}`,
@@ -941,7 +946,7 @@ function main() {
   console.log(`- loops.bundle_min_size: ${bundleMinSize}`);
   console.log(`- loops.bundle_max_size: ${bundleMaxSize}`);
   console.log(`- bundle_flow: enabled=${bundleFlowEnabled} id_prefix=${bundleFlowIdPrefix} id_pad=${bundleFlowIdPad} max_ready_ahead=${bundleFlowMaxReadyAhead} carryover_target_queue=${bundleFlowCarryoverTargetQueue} branch_prefix=${bundleFlowBranchPrefix} allow_cross_bundle_moves=${bundleFlowAllowCrossBundleMoves}`);
-  console.log(`- delivery_runner: mode=${deliveryRunnerDefault} agent_timeout_seconds=${deliveryRunnerTimeoutSeconds} no_output_timeout_seconds=${deliveryRunnerNoOutputTimeoutSeconds} max_paused_cycles_per_item=${deliveryRunnerMaxPausedCyclesPerItem}`);
+  console.log(`- delivery_runner: mode=${deliveryRunnerDefault} agent_timeout_seconds=${deliveryRunnerTimeoutSeconds} no_output_timeout_seconds=${deliveryRunnerNoOutputTimeoutSeconds} max_paused_cycles_per_item=${deliveryRunnerMaxPausedCyclesPerItem} workspace_branches_enabled=${deliveryRunnerWorkspaceBranchesEnabled}`);
   console.log(`- delivery_quality: strict=${deliveryQualityStrictGate} qa_pass=${deliveryQualityRequireQaPass} uat_pass=${deliveryQualityRequireUatPass} route_to_dev=${deliveryQualityRouteToDevOnFail} max_fix_cycles=${deliveryQualityMaxFixCycles} emit_followups_on_fail=${deliveryQualityEmitFollowupsOnFail}`);
   console.log(`- qa autofix: enabled=${qaAutoFixOnMandatoryFail} max_attempts=${qaAutoFixMaxAttempts} shell_cmds=${qaAutoFixCommands.length} codex=${qaAutoFixUseCodex}`);
   console.log(`- memory: enabled=${memoryEnabled} dir=${memoryDir} include_in_prompt=${memoryIncludeInPrompt} update_on_auto=${memoryUpdateOnAuto} update_on_interactive=${memoryUpdateOnInteractive}`);

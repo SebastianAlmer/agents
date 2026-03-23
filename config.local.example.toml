@@ -50,6 +50,8 @@ default_mode = "full"
 agent_timeout_seconds = 1800
 no_output_timeout_seconds = 600
 max_paused_cycles_per_item = 2
+# false = keine lokalen Workspace-Branches; Delivery arbeitet immer auf dem aktuell ausgecheckten Branch.
+workspace_branches_enabled = true
 
 [retry_policy]
 arch_retry_max = 1

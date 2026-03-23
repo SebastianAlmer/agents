@@ -3497,6 +3497,13 @@ function workspaceBranchPrefix(runtime) {
   return String(bundleCfg.branchPrefix || releaseCfg.branchPrefix || "rb").trim() || "rb";
 }
 
+function workspaceBranchesEnabled(runtime) {
+  if (!runtime || !runtime.deliveryRunner || runtime.deliveryRunner.workspaceBranchesEnabled == null) {
+    return true;
+  }
+  return Boolean(runtime.deliveryRunner.workspaceBranchesEnabled);
+}
+
 function listLocalWorkspaceBranches(runtime) {
   const prefix = workspaceBranchPrefix(runtime);
   const result = runGit(runtime.repoRoot, [
@@ -3529,6 +3536,10 @@ function branchDivergenceAgainstBase(repoRoot, baseBranch, branchName) {
 }
 
 function pruneStaleWorkspaceBranches(runtime, controls, reason = "idle") {
+  if (!workspaceBranchesEnabled(runtime)) {
+    return;
+  }
+
   const agentsRootGit = gitRoot(runtime.agentsRoot);
   const targetRootGit = gitRoot(runtime.repoRoot);
   if (!targetRootGit || (agentsRootGit && targetRootGit && agentsRootGit === targetRootGit)) {
@@ -3593,6 +3604,12 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
   if (!isBundleIdKey(runtime, normalizedBundleKey)) {
     outcome.ok = true;
     log(controls, `BUNDLE BRANCH: skip workspace branch for non-bundle key '${normalizedBundleKey}'`);
+    return outcome;
+  }
+  if (!workspaceBranchesEnabled(runtime)) {
+    outcome.ok = true;
+    outcome.branch = getCurrentBranch(runtime.repoRoot);
+    log(controls, `BUNDLE BRANCH: disabled by config; staying on current branch '${outcome.branch || "<unknown>"}'`);
     return outcome;
   }
 
@@ -3683,6 +3700,10 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
 }
 
 function enforceActiveWorkspaceBranch(runtime, controls) {
+  if (!workspaceBranchesEnabled(runtime)) {
+    return { ok: true, branch: getCurrentBranch(runtime.repoRoot) };
+  }
+
   const key = activeBundleKey(runtime);
   if (!key) {
     return { ok: true, branch: "" };
@@ -6364,4 +6385,9 @@ module.exports = {
   findingsFingerprint,
   shouldSkipMaintForReleasedBundle,
   isMaintFollowUpRequirement,
+  __test: {
+    workspaceBranchesEnabled,
+    ensureBundleWorkspaceBranch,
+    enforceActiveWorkspaceBranch,
+  },
 };

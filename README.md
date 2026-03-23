@@ -162,7 +162,8 @@ Naming/metadata:
 - Business priority uses `business_score` in frontmatter.
 
 Workspace branches:
-- Delivery creates per-bundle local workspace branches.
+- Delivery creates per-bundle local workspace branches by default.
+- Set `[delivery_runner].workspace_branches_enabled = false` to keep working on the currently checked out branch.
 - Branch safety guard prevents using base branch as active bundle branch.
 - Stale workspace branches can be pruned automatically.
 
