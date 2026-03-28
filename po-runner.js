@@ -599,6 +599,18 @@ function planningQueuesBusy(runtime) {
   return countFiles(runtime.queues.arch) > 0 || countFiles(runtime.queues.dev) > 0;
 }
 
+function minBundleSize(runtime) {
+  return Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1);
+}
+
+function bundlePreparationTarget(runtime, highWatermark) {
+  return Math.max(highWatermark, minBundleSize(runtime));
+}
+
+function hasPendingIntakeCandidates(runtime) {
+  return listIntakeCandidates(runtime).length > 0;
+}
+
 function shouldFillSelected(runtime, highWatermark, state, controls) {
   const registry = readBundleRegistryForRuntime(runtime);
   const readyBundleId = String(registry.ready_bundle_id || "").trim();
@@ -623,7 +635,7 @@ function shouldFillSelected(runtime, highWatermark, state, controls) {
     return false;
   }
 
-  const bundleTarget = Math.max(highWatermark, Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1));
+  const bundleTarget = bundlePreparationTarget(runtime, highWatermark);
   if (selectedCount >= bundleTarget) {
     state.bundleLocked = true;
     log(controls, `bundle lock engaged at selected=${selectedCount} (target=${bundleTarget})`);
@@ -651,7 +663,7 @@ function logWaitCheck(runtime, state, controls, highWatermark) {
     reason = `bundle-ready(${readyBundleId})`;
   } else if (planningBusy) {
     reason = "planning-busy";
-  } else if (selectedCount >= Math.max(highWatermark, Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1))) {
+  } else if (selectedCount >= bundlePreparationTarget(runtime, highWatermark)) {
     reason = "selected-at-target";
   }
 
@@ -695,10 +707,8 @@ function findVisionOpenDecisionHint(runtime) {
 
 function waitReason(runtime, state, highWatermark, mode) {
   const selected = countFiles(runtime.queues.selected);
-  const minBundle = Math.max(
-    1,
-    Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1
-  );
+  const minBundle = minBundleSize(runtime);
+  const target = bundlePreparationTarget(runtime, highWatermark);
   const arch = countFiles(runtime.queues.arch);
   const dev = countFiles(runtime.queues.dev);
   const planningBusy = arch > 0 || dev > 0;
@@ -719,10 +729,12 @@ function waitReason(runtime, state, highWatermark, mode) {
     reason = `ready bundle waiting for delivery start (${readyBundleId})`;
   } else if (state && state.bundleLocked) {
     reason = `bundle locked while delivery drains (selected=${selected})`;
-  } else if (selected >= Math.max(highWatermark, minBundle)) {
-    reason = `selected buffer at target (${selected}/${Math.max(highWatermark, minBundle)})`;
+  } else if (selected >= target) {
+    reason = `selected buffer at target (${selected}/${target})`;
+  } else if (selected >= minBundle && intakeCandidates === 0) {
+    reason = `final underfilled bundle can start (${selected}/${target})`;
   } else if (selected > 0) {
-    reason = `waiting for full bundle (${selected}/${minBundle})`;
+    reason = `waiting for full bundle (${selected}/${target})`;
   } else if (mode === "vision") {
     const visionHint = findVisionOpenDecisionHint(runtime);
     if (intakeCandidates > 0) {
@@ -981,10 +993,11 @@ function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
     state.underfilledSelectedCycles = 0;
     return false;
   }
-  const minBundle = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1);
-  const target = Math.max(highWatermark, minBundle);
+  const minBundle = minBundleSize(runtime);
+  const target = bundlePreparationTarget(runtime, highWatermark);
   const underfilled = selectedCount < minBundle;
   const forceAfter = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.forceUnderfilledAfterCycles || 1), 10) || 1);
+  const allowFinalUnderfilled = selectedCount >= minBundle && selectedCount < target && !hasPendingIntakeCandidates(runtime);
 
   if (underfilled) {
     state.underfilledSelectedCycles = Math.max(0, Number.parseInt(String(state.underfilledSelectedCycles || 0), 10) || 0) + 1;
@@ -993,13 +1006,15 @@ function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
   }
 
   const allowUnderfilled = underfilled && state.underfilledSelectedCycles >= forceAfter;
-  if (selectedCount < target && !allowUnderfilled) {
+  if (selectedCount < target && !allowUnderfilled && !allowFinalUnderfilled) {
     log(controls, `bundle readiness wait selected=${selectedCount} target=${target} min=${minBundle} underfilled_cycles=${state.underfilledSelectedCycles}/${forceAfter}`);
     return false;
   }
 
   if (underfilled && allowUnderfilled) {
     log(controls, `bundle readiness forced underfilled selected=${selectedCount} min=${minBundle} after ${state.underfilledSelectedCycles} cycle(s)`);
+  } else if (allowFinalUnderfilled) {
+    log(controls, `bundle readiness final underfilled selected=${selectedCount} target=${target} min=${minBundle} (no intake candidates remain)`);
   }
 
   const nextBundle = reserveNextBundle(runtime);
@@ -3173,5 +3188,7 @@ module.exports = {
     parseAcEvidenceEntriesFromRaw,
     isValidAcEvidenceReference,
     evaluateAlreadyImplementedEvidence,
+    waitReason,
+    tryPrepareReadyBundle,
   },
 };

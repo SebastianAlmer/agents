@@ -35,7 +35,20 @@ function createRuntimeWithQueues() {
   for (const dir of Object.values(queues)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  return { root, queues };
+  return {
+    root,
+    agentsRoot: root,
+    queues,
+    loops: {
+      bundleMinSize: 1,
+      forceUnderfilledAfterCycles: 3,
+      poPollSeconds: 20,
+    },
+    bundleFlow: {
+      idPrefix: "B",
+      idPad: 4,
+    },
+  };
 }
 
 function writeRequirement(filePath, id, status = "refinement") {
@@ -160,74 +173,29 @@ test("normalizeWontDoDecisionReason allows only configured enum reasons", () => 
   assert.equal(__test.normalizeWontDoDecisionReason("random"), "");
 });
 
-test("findDecisionArtifactForRequirement resolves by canonical requirement id", () => {
+test("findDecisionArtifactForRequirement reports disabled sidecar lookup", () => {
   const runtime = createRuntimeWithQueues();
   const requirementPath = path.join(runtime.queues.backlog, "B0100-REQ-NEW-routing-hardening.md");
-  const artifactPath = path.join(runtime.queues.refinement, "REQ-NEW-routing-hardening.md.decision.json");
   writeRequirement(requirementPath, "REQ-NEW-routing-hardening", "backlog");
-  fs.writeFileSync(
-    artifactPath,
-    JSON.stringify({
-      status: "wont-do",
-      target_queue: "wont-do",
-      decision_reason: "duplicate",
-      summary: "Duplicate requirement.",
-    }),
-    "utf8"
-  );
 
   const picked = __test.findDecisionArtifactForRequirement(runtime, requirementPath);
-  assert.equal(picked.state, "ok");
-  assert.equal(picked.path, artifactPath);
-  assert.equal(picked.data.decision_reason, "duplicate");
+  assert.equal(picked.state, "missing");
+  assert.equal(picked.path, "");
+  assert.equal(picked.reason, "decision_artifacts_disabled");
 });
 
-test("recoverOrphanDecisionArtifacts dedupes sidecars when canonical requirement exists", () => {
+test("recoverOrphanDecisionArtifacts is a no-op with sidecar artifacts disabled", () => {
   const runtime = createRuntimeWithQueues();
-  const canonicalPath = path.join(runtime.queues.backlog, "B0101-REQ-NEW-sidecar-dedupe.md");
-  const sidecarPath = path.join(runtime.queues.refinement, "REQ-NEW-sidecar-dedupe.md.decision.json");
-  const attachedPath = sidecarPath.slice(0, -".decision.json".length);
-
-  writeRequirement(canonicalPath, "REQ-NEW-sidecar-dedupe", "backlog");
-  fs.writeFileSync(
-    sidecarPath,
-    JSON.stringify({
-      status: "selected",
-      target_queue: "selected",
-      summary: "Ready now.",
-    }),
-    "utf8"
-  );
-
   const result = __test.recoverOrphanDecisionArtifacts(runtime, { verbose: false });
   assert.equal(result.recovered, 0);
-  assert.equal(result.deduped, 1);
-  assert.equal(fs.existsSync(sidecarPath), false);
-  assert.equal(fs.existsSync(attachedPath), false);
+  assert.equal(result.deduped, 0);
 });
 
-test("recoverOrphanDecisionArtifacts recovers orphan sidecar when no canonical requirement exists", () => {
+test("recoverOrphanDecisionArtifacts does not recreate sidecars when disabled", () => {
   const runtime = createRuntimeWithQueues();
-  const sidecarPath = path.join(runtime.queues.refinement, "REQ-NEW-sidecar-recover.md.decision.json");
-  const attachedPath = sidecarPath.slice(0, -".decision.json".length);
-  fs.writeFileSync(
-    sidecarPath,
-    JSON.stringify({
-      id: "REQ-NEW-sidecar-recover",
-      status: "selected",
-      target_queue: "selected",
-      summary: "Recovered from sidecar.",
-    }),
-    "utf8"
-  );
-
   const result = __test.recoverOrphanDecisionArtifacts(runtime, { verbose: false });
-  assert.equal(result.recovered, 1);
+  assert.equal(result.recovered, 0);
   assert.equal(result.deduped, 0);
-  assert.equal(fs.existsSync(attachedPath), true);
-  const recoveredRaw = fs.readFileSync(attachedPath, "utf8");
-  assert.match(recoveredRaw, /target_queue:\s*selected/i);
-  assert.match(recoveredRaw, /decision_reason:\s*selected_ready_now/i);
 });
 
 test("extractPoResultsStatusFromRequirement reads closed status from PO block", () => {
@@ -248,4 +216,31 @@ test("extractPoResultsStatusFromRequirement reads closed status from PO block", 
   );
 
   assert.equal(__test.extractPoResultsStatusFromRequirement(filePath), "closed");
+});
+
+test("tryPrepareReadyBundle starts final underfilled bundle when no intake candidates remain", () => {
+  const runtime = createRuntimeWithQueues();
+  const selectedPath = path.join(runtime.queues.selected, "REQ-MVP-004-final-bundle.md");
+  writeRequirement(selectedPath, "REQ-MVP-004", "selected");
+
+  const prepared = __test.tryPrepareReadyBundle(runtime, { verbose: false }, { underfilledSelectedCycles: 0 }, 3);
+
+  assert.equal(prepared, true);
+  const bundledPath = path.join(runtime.queues.selected, "B0001-REQ-MVP-004-final-bundle.md");
+  assert.equal(fs.existsSync(bundledPath), true);
+
+  const registryPath = path.join(runtime.root, ".runtime", "bundles", "registry.json");
+  const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  assert.equal(registry.ready_bundle_id, "B0001");
+  assert.deepEqual(registry.bundles.B0001.sourceReqIds, ["REQ-MVP-004"]);
+});
+
+test("waitReason reports actual bundle target instead of min bundle size", () => {
+  const runtime = createRuntimeWithQueues();
+  writeRequirement(path.join(runtime.queues.selected, "REQ-MVP-004-final-bundle.md"), "REQ-MVP-004", "selected");
+  writeRequirement(path.join(runtime.queues.backlog, "REQ-MVP-005-follow-up.md"), "REQ-MVP-005", "backlog");
+
+  const info = __test.waitReason(runtime, { bundleLocked: false }, 3, "vision");
+
+  assert.match(info.reason, /waiting for full bundle \(1\/3\)/);
 });
