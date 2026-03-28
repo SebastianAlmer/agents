@@ -298,6 +298,19 @@ function toTomlArray(values) {
   return `[${items.join(", ")}]`;
 }
 
+function detectProductVisionDir(docsDir) {
+  const candidates = [
+    path.join(docsDir, "product-vision"),
+    path.join(docsDir, "product-operating-system"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+  }
+  return path.join(docsDir, "product-vision");
+}
+
 function main() {
   const agentsRoot = path.resolve(__dirname);
   const args = parseArgs(process.argv.slice(2));
@@ -327,9 +340,12 @@ function main() {
 
   const requirementsRoot = args.requirementsRoot || (base.paths && base.paths.requirements_root) || "./requirements";
   const docsDir = args.docsDir !== "" ? args.docsDir : ((base.paths && base.paths.docs_dir) || "");
+  const resolvedDocsDir = docsDir ? path.resolve(docsDir) : path.join(repoRoot, "docs");
   const productVisionDir = args.productVisionDir !== ""
-    ? args.productVisionDir
-    : ((base.paths && base.paths.product_vision_dir) || "");
+    ? path.resolve(args.productVisionDir)
+    : ((base.paths && base.paths.product_vision_dir)
+        ? path.resolve(String(base.paths.product_vision_dir))
+        : detectProductVisionDir(resolvedDocsDir));
 
   const deliveryRunnerDefaultRaw = String(
     args.flow || (base.delivery_runner && base.delivery_runner.default_mode) || "full"

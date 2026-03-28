@@ -21,7 +21,8 @@ repo_root = "/home/you/git/your-project"
 # OPTIONAL: Wenn leer, wird <repo_root>/docs verwendet.
 docs_dir = ""
 
-# OPTIONAL: Wenn leer, wird <docs_dir>/product-operating-system verwendet.
+# OPTIONAL: Wenn leer, wird <docs_dir>/product-vision verwendet.
+# Fallback fuer alte Projekte: <docs_dir>/product-operating-system
 product_vision_dir = ""
 
 # OPTIONAL: Nur aendern, wenn du die Requirements bewusst woanders verwalten willst.

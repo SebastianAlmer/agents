@@ -32,7 +32,8 @@ requirements_root = "./requirements"
 docs_dir = ""
 
 # OPTIONAL: Produktvision-Ordner.
-# Leer bedeutet automatisch: <docs_dir>/product-operating-system
+# Leer bedeutet automatisch: <docs_dir>/product-vision
+# Fallback fuer alte Projekte: <docs_dir>/product-operating-system
 product_vision_dir = ""
 
 [loops]
