@@ -188,6 +188,75 @@ test("shouldSkipMaintForReleasedBundle does not skip mixed-scope released bundle
   assert.equal(verdict.bundleId, "B9998");
 });
 
+test("resumeActiveBundleSelectedIntake requeues selected work for an active bundle", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-active-bundle-test-"));
+  const selectedDir = path.join(root, "requirements", "selected");
+  const archDir = path.join(root, "requirements", "arch");
+  const bundlesDir = path.join(root, ".runtime", "bundles");
+  fs.mkdirSync(selectedDir, { recursive: true });
+  fs.mkdirSync(archDir, { recursive: true });
+  fs.mkdirSync(bundlesDir, { recursive: true });
+
+  const bundleId = "B1234";
+  writeBundleRegistry(root, {
+    version: 1,
+    next_bundle_seq: 2,
+    active_bundle_id: bundleId,
+    ready_bundle_id: "",
+    bundles: {
+      [bundleId]: {
+        id: bundleId,
+        seq: 1,
+        status: "active",
+        createdAt: "2026-03-28T18:00:00Z",
+        startedAt: "2026-03-28T18:01:00Z",
+        finishedAt: "",
+        sourceReqIds: ["REQ-TEST"],
+        carryoversIn: [],
+        carryoversOut: [],
+      },
+    },
+    updatedAt: "2026-03-28T18:01:00Z",
+  });
+
+  const reqPath = path.join(selectedDir, `${bundleId}-REQ-TEST.md`);
+  fs.writeFileSync(
+    reqPath,
+    [
+      "---",
+      "id: REQ-TEST",
+      "title: Test requirement",
+      "status: selected",
+      `bundle_id: ${bundleId}`,
+      "bundle_seq: 1",
+      "---",
+      "",
+      "# Goal",
+      "Resume active bundle.",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const runtime = {
+    agentsRoot: root,
+    queues: {
+      selected: selectedDir,
+      arch: archDir,
+    },
+  };
+
+  const result = __test.resumeActiveBundleSelectedIntake(runtime, { verbose: false });
+  assert.equal(result.progressed, true);
+  assert.equal(fs.existsSync(reqPath), false);
+
+  const archPath = path.join(archDir, `${bundleId}-REQ-TEST.md`);
+  assert.equal(fs.existsSync(archPath), true);
+  const raw = fs.readFileSync(archPath, "utf8");
+  assert.match(raw, /^---\nid: REQ-TEST[\s\S]*\nstatus: arch\n/m);
+  assert.match(raw, /Delivery runner: active bundle resume/);
+});
+
 test("findingsFingerprint for maint ignores count-only churn", () => {
   const a = findingsFingerprint("maint", "selected", [
     {

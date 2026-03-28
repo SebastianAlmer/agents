@@ -2075,6 +2075,46 @@ function startBundleIfReady(runtime, minBundle, maxBundle, underfilledCycles, co
   return { started: true, underfilledCycles: 0, bundleKey };
 }
 
+function resumeActiveBundleSelectedIntake(runtime, controls) {
+  const activeId = activeBundleId(runtime);
+  if (!activeId) {
+    return { progressed: false, bundleKey: "" };
+  }
+
+  const selectedFiles = listQueueFilesByBundle(runtime, "selected", activeId);
+  if (selectedFiles.length === 0) {
+    return { progressed: false, bundleKey: activeId };
+  }
+
+  let moved = 0;
+  let deduped = 0;
+  for (const file of selectedFiles) {
+    const archPath = path.join(runtime.queues.arch, path.basename(file));
+    if (fs.existsSync(archPath)) {
+      if (removeDuplicateSourceIfTargetExists(file, archPath, controls, "bundle resume")) {
+        deduped += 1;
+      }
+      continue;
+    }
+    if (moveToQueue(runtime, file, "arch", "arch", [
+      "Delivery runner: active bundle resume",
+      `- bundle id=${activeId}`,
+      "- recovered selected work for active bundle",
+      "- route: arch intake",
+    ])) {
+      moved += 1;
+    }
+  }
+
+  if (moved > 0 || deduped > 0) {
+    log(controls, `bundle resume id=${activeId}: arch=${moved} deduped=${deduped}`);
+  }
+  return {
+    progressed: moved > 0 || deduped > 0,
+    bundleKey: activeId,
+  };
+}
+
 async function runArch(runtime, controls) {
   let progressed = false;
   while (true) {
@@ -6280,11 +6320,13 @@ async function main() {
       { forceUnderfilled: forceUnderfilledFromVision }
     );
     underfilledCycles = bundle.underfilledCycles;
+    const resumed = resumeActiveBundleSelectedIntake(runtime, controls);
 
-    if (bundle.started && bundle.bundleKey) {
-      const workspace = ensureBundleWorkspaceBranch(runtime, controls, bundle.bundleKey);
+    const workspaceBundleKey = bundle.bundleKey || (resumed.progressed ? resumed.bundleKey : "");
+    if (workspaceBundleKey) {
+      const workspace = ensureBundleWorkspaceBranch(runtime, controls, workspaceBundleKey);
       if (!workspace.ok) {
-        log(controls, `BUNDLE BRANCH: setup failed for ${bundle.bundleKey}: ${workspace.reason}`);
+        log(controls, `BUNDLE BRANCH: setup failed for ${workspaceBundleKey}: ${workspace.reason}`);
         await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
         continue;
       }
@@ -6416,6 +6458,7 @@ module.exports = {
     uatEnabled,
     ensureBundleWorkspaceBranch,
     enforceActiveWorkspaceBranch,
+    resumeActiveBundleSelectedIntake,
     runUatBundle,
     runUatFullRegression,
   },
