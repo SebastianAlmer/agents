@@ -2195,7 +2195,7 @@ function promoteBacklogForProgress(runtime, controls, state, cycle) {
     return false;
   }
 
-  const candidate = getFirstFile(runtime.queues.backlog);
+  const candidate = listAutoSelectableBacklogFiles(runtime)[0] || "";
   if (!candidate) {
     return false;
   }
@@ -2231,6 +2231,24 @@ function parseBusinessScoreFromRequirement(filePath) {
   const raw = fm.business_score || fm.priority_score || fm.score || "";
   const parsed = Number.parseFloat(String(raw));
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isManualBundleCleanupBacklogItem(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    return /## Flow Routing Notes\s*\nManual bundle cleanup\b/i.test(raw)
+      || /## Manual Cleanup Results\b/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function listAutoSelectableBacklogFiles(runtime) {
+  return listQueueFiles(runtime.queues.backlog)
+    .filter((filePath) => !isManualBundleCleanupBacklogItem(filePath));
 }
 
 function shouldPromoteBacklogItem(runtime, state, filePath) {
@@ -2279,7 +2297,7 @@ function promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark
   }
 
   const maxPerCycle = Math.max(1, runtime.po.backlogPromoteMaxPerCycle || 1);
-  const backlogFiles = listQueueFiles(runtime.queues.backlog)
+  const backlogFiles = listAutoSelectableBacklogFiles(runtime)
     .sort((a, b) => {
       const scoreDelta = parseBusinessScoreFromRequirement(b) - parseBusinessScoreFromRequirement(a);
       if (scoreDelta !== 0) {
@@ -2343,7 +2361,7 @@ function topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, high
     return 0;
   }
 
-  const backlogFiles = listQueueFiles(runtime.queues.backlog)
+  const backlogFiles = listAutoSelectableBacklogFiles(runtime)
     .sort((a, b) => {
       const scoreDelta = parseBusinessScoreFromRequirement(b) - parseBusinessScoreFromRequirement(a);
       if (scoreDelta !== 0) {
@@ -3188,6 +3206,8 @@ module.exports = {
     parseAcEvidenceEntriesFromRaw,
     isValidAcEvidenceReference,
     evaluateAlreadyImplementedEvidence,
+    isManualBundleCleanupBacklogItem,
+    topUpSelectedFromBacklogForBundle,
     waitReason,
     tryPrepareReadyBundle,
   },

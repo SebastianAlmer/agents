@@ -368,8 +368,14 @@ test("workspace branch enforcement is a no-op when disabled in config", () => {
 
 function mkTempUatRuntime() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-uat-test-"));
+  const qaDir = path.join(root, "requirements", "qa");
+  const uxDir = path.join(root, "requirements", "ux");
+  const secDir = path.join(root, "requirements", "sec");
   const deployDir = path.join(root, "requirements", "deploy");
   const releasedDir = path.join(root, "requirements", "released");
+  fs.mkdirSync(qaDir, { recursive: true });
+  fs.mkdirSync(uxDir, { recursive: true });
+  fs.mkdirSync(secDir, { recursive: true });
   fs.mkdirSync(deployDir, { recursive: true });
   fs.mkdirSync(releasedDir, { recursive: true });
   fs.writeFileSync(path.join(deployDir, "REQ-DEPLOY.md"), "---\nid: REQ-DEPLOY\n---\n", "utf8");
@@ -383,6 +389,9 @@ function mkTempUatRuntime() {
         uatEnabled: false,
       },
       queues: {
+        qa: qaDir,
+        ux: uxDir,
+        sec: secDir,
         deploy: deployDir,
         released: releasedDir,
       },
@@ -406,4 +415,13 @@ test("uat full regression is skipped when disabled in config", async () => {
   assert.equal(result.progressed, false);
   assert.equal(result.gate, null);
   assert.equal(result.skipped, true);
+});
+
+test("fast downstream skips deploy actions and releases directly", async () => {
+  const { runtime } = mkTempUatRuntime();
+  const result = await __test.runFastDownstream(runtime, { verbose: false });
+
+  assert.equal(result.progressed, true);
+  assert.equal(fs.existsSync(path.join(runtime.queues.deploy, "REQ-DEPLOY.md")), false);
+  assert.equal(fs.existsSync(path.join(runtime.queues.released, "REQ-DEPLOY.md")), true);
 });

@@ -39,6 +39,13 @@ function createRuntimeWithQueues() {
     root,
     agentsRoot: root,
     queues,
+    po: {
+      intakeIdempotenceEnabled: false,
+      backlogPromoteEnabled: true,
+      backlogPromoteMinBusinessScore: 0,
+      backlogPromoteAfterCycles: 1,
+      backlogPromoteMaxPerCycle: 1,
+    },
     loops: {
       bundleMinSize: 1,
       forceUnderfilledAfterCycles: 3,
@@ -243,4 +250,49 @@ test("waitReason reports actual bundle target instead of min bundle size", () =>
   const info = __test.waitReason(runtime, { bundleLocked: false }, 3, "vision");
 
   assert.match(info.reason, /waiting for full bundle \(1\/3\)/);
+});
+
+test("topUpSelectedFromBacklogForBundle skips manual cleanup backlog items", () => {
+  const runtime = createRuntimeWithQueues();
+  const selectedPath = path.join(runtime.queues.selected, "REQ-MVP-004-selected.md");
+  writeRequirement(selectedPath, "REQ-MVP-004", "selected");
+
+  const manualCleanupPath = path.join(runtime.queues.backlog, "REQ-QA-HISTORY.md");
+  fs.writeFileSync(
+    manualCleanupPath,
+    [
+      "---",
+      "id: REQ-QA-HISTORY",
+      "title: Historical cleanup",
+      "status: backlog",
+      "source: qa-gate",
+      "business_score: 99",
+      "---",
+      "",
+      "## Flow Routing Notes",
+      "Manual bundle cleanup",
+      "- returned to backlog after manual cleanup",
+      "",
+      "## Manual Cleanup Results",
+      "- preserved as backlog history",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const eligiblePath = path.join(runtime.queues.backlog, "REQ-MVP-005-follow-up.md");
+  writeRequirement(eligiblePath, "REQ-MVP-005", "backlog");
+
+  const moved = __test.topUpSelectedFromBacklogForBundle(
+    runtime,
+    { verbose: false },
+    { bundleLocked: false, underfilledSelectedCycles: 0, items: {}, pausedCounts: {}, loopCounters: {} },
+    1,
+    2
+  );
+
+  assert.equal(moved, 1);
+  assert.equal(fs.existsSync(path.join(runtime.queues.selected, "REQ-MVP-005-follow-up.md")), true);
+  assert.equal(fs.existsSync(path.join(runtime.queues.backlog, "REQ-QA-HISTORY.md")), true);
+  assert.equal(__test.isManualBundleCleanupBacklogItem(manualCleanupPath), true);
 });

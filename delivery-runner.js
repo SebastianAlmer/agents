@@ -6198,23 +6198,58 @@ function snapshotHash(runtime) {
 
 async function runFullDownstream(runtime, controls, lastReleasedSignature, lastMaintSignature, options = {}) {
   let progressed = false;
+  const runUx = options.runUx !== false;
+  const runSec = options.runSec !== false;
+  const runUat = options.runUat !== false;
   const performDeploy = options.performDeploy !== false;
   const runQaPost = options.runQaPost !== false;
   const runMaint = options.runMaint !== false;
+  const deploySkipNote = String(options.deploySkipNote || "").trim()
+    || "Delivery runner: deploy skipped by mode; release directly after QA";
 
-  if (await runUxBatch(runtime, controls)) {
-    progressed = true;
+  if (runUx) {
+    if (await runUxBatch(runtime, controls)) {
+      progressed = true;
+    }
+  } else {
+    const moved = moveAll(
+      runtime,
+      "ux",
+      "qa",
+      "qa",
+      "Delivery runner: skip UX stage and continue to QA"
+    );
+    if (moved > 0) {
+      log(controls, `normalized ux->qa: ${moved}`);
+      progressed = true;
+    }
   }
-  if (await runSecBatch(runtime, controls)) {
-    progressed = true;
+  if (runSec) {
+    if (await runSecBatch(runtime, controls)) {
+      progressed = true;
+    }
+  } else {
+    const moved = moveAll(
+      runtime,
+      "sec",
+      "qa",
+      "qa",
+      "Delivery runner: skip SEC stage and continue to QA"
+    );
+    if (moved > 0) {
+      log(controls, `normalized sec->qa: ${moved}`);
+      progressed = true;
+    }
   }
   const qaBundle = await runQaBundle(runtime, controls);
   if (qaBundle.progressed) {
     progressed = true;
   }
-  const uatBundle = await runUatBundle(runtime, controls);
-  if (uatBundle.progressed) {
-    progressed = true;
+  if (runUat) {
+    const uatBundle = await runUatBundle(runtime, controls);
+    if (uatBundle.progressed) {
+      progressed = true;
+    }
   }
   if (performDeploy) {
     if (await runDeployBundle(runtime, controls)) {
@@ -6226,10 +6261,10 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
       "deploy",
       "released",
       "released",
-      "Delivery runner: test mode - skip deploy actions; keep released snapshot for comprehensive tests"
+      deploySkipNote
     );
     if (moved > 0) {
-      log(controls, `test mode normalized deploy->released: ${moved}`);
+      log(controls, `normalized deploy->released: ${moved}`);
       clearBundleWorkspaceState(runtime);
       progressed = true;
     }
@@ -6259,6 +6294,18 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
     releasedSignature: qaPost.signature || lastReleasedSignature,
     maintSignature: maint.signature || lastMaintSignature,
   };
+}
+
+async function runFastDownstream(runtime, controls) {
+  return runFullDownstream(runtime, controls, "", "", {
+    runUx: false,
+    runSec: false,
+    runUat: false,
+    performDeploy: false,
+    runQaPost: false,
+    runMaint: false,
+    deploySkipNote: "Delivery runner: fast mode - skip deploy actions and release directly after QA",
+  });
 }
 
 async function main() {
@@ -6341,6 +6388,10 @@ async function main() {
 
     await runArch(runtime, controls);
     await runDev(runtime, controls);
+
+    if (mode === "fast" && !planningInProgress(runtime)) {
+      await runFastDownstream(runtime, controls);
+    }
 
     if ((mode === "full" || mode === "test") && !planningInProgress(runtime)) {
       const downstream = await runFullDownstream(
@@ -6459,6 +6510,7 @@ module.exports = {
     ensureBundleWorkspaceBranch,
     enforceActiveWorkspaceBranch,
     resumeActiveBundleSelectedIntake,
+    runFastDownstream,
     runUatBundle,
     runUatFullRegression,
   },
