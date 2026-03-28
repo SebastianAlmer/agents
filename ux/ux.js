@@ -105,8 +105,12 @@ function validateGateFile(gateFile) {
     throw new Error(`UX final gate file invalid JSON: ${err.message}`);
   }
   const status = String(parsed.status || "").toLowerCase();
-  if (!["pass", "fail"].includes(status)) {
+  if (!["pass", "fail", "blocked"].includes(status)) {
     throw new Error(`UX final gate file has invalid status: ${status || "<empty>"}`);
+  }
+  const summary = String(parsed.summary || "").trim();
+  if (!summary) {
+    throw new Error("UX final gate file requires non-empty summary");
   }
 }
 
@@ -280,7 +284,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  validateGateFile,
+  validateReviewDecisionFile,
+};
