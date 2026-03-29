@@ -242,6 +242,26 @@ test("tryPrepareReadyBundle starts final underfilled bundle when no intake candi
   assert.deepEqual(registry.bundles.B0001.sourceReqIds, ["REQ-MVP-004"]);
 });
 
+test("tryPrepareReadyBundle forces partial bundle after configured wait cycles", () => {
+  const runtime = createRuntimeWithQueues();
+  writeRequirement(path.join(runtime.queues.selected, "REQ-MVP-004.md"), "REQ-MVP-004", "selected");
+  writeRequirement(path.join(runtime.queues.selected, "REQ-MVP-005.md"), "REQ-MVP-005", "selected");
+  writeRequirement(path.join(runtime.queues.refinement, "REQ-MVP-006.md"), "REQ-MVP-006", "refinement");
+
+  const prepared = __test.tryPrepareReadyBundle(
+    runtime,
+    { verbose: false },
+    { underfilledSelectedCycles: 2 },
+    3
+  );
+
+  assert.equal(prepared, true);
+  const registryPath = path.join(runtime.root, ".runtime", "bundles", "registry.json");
+  const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  assert.equal(registry.ready_bundle_id, "B0001");
+  assert.deepEqual(registry.bundles.B0001.sourceReqIds, ["REQ-MVP-004", "REQ-MVP-005"]);
+});
+
 test("waitReason reports actual bundle target instead of min bundle size", () => {
   const runtime = createRuntimeWithQueues();
   writeRequirement(path.join(runtime.queues.selected, "REQ-MVP-004-final-bundle.md"), "REQ-MVP-004", "selected");
@@ -250,6 +270,12 @@ test("waitReason reports actual bundle target instead of min bundle size", () =>
   const info = __test.waitReason(runtime, { bundleLocked: false }, 3, "vision");
 
   assert.match(info.reason, /waiting for full bundle \(1\/3\)/);
+});
+
+test("poIdleWaitMs respects poPollSeconds config", () => {
+  const runtime = createRuntimeWithQueues();
+  runtime.loops.poPollSeconds = 20;
+  assert.equal(__test.poIdleWaitMs(runtime), 20000);
 });
 
 test("topUpSelectedFromBacklogForBundle skips manual cleanup backlog items", () => {

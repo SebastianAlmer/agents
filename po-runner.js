@@ -599,6 +599,17 @@ function planningQueuesBusy(runtime) {
   return countFiles(runtime.queues.arch) > 0 || countFiles(runtime.queues.dev) > 0;
 }
 
+function poIdleWaitMs(runtime) {
+  const configured = Number.parseInt(
+    String(runtime && runtime.loops && runtime.loops.poPollSeconds || 0),
+    10
+  );
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured * 1000;
+  }
+  return PO_IDLE_WAIT_MS;
+}
+
 function minBundleSize(runtime) {
   return Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.bundleMinSize || 1), 10) || 1);
 }
@@ -780,10 +791,13 @@ function waitReason(runtime, state, highWatermark, mode) {
 
 async function sleepWithWaitInfo(runtime, controls, state, highWatermark, mode) {
   const info = waitReason(runtime, state, highWatermark, mode);
-  const minutes = Math.max(1, Math.round(PO_IDLE_WAIT_MS / 60000));
+  const waitMs = poIdleWaitMs(runtime);
+  const label = waitMs >= 60000
+    ? `${Math.max(1, Math.round(waitMs / 60000))}m`
+    : `${Math.max(1, Math.round(waitMs / 1000))}s`;
   const suffix = info.extras.length > 0 ? ` | ${info.extras.join(" ")}` : "";
-  process.stdout.write(`${timestampMinute()} PO-RUNNER: waiting ${minutes}m - ${info.reason}${suffix}\n`);
-  await sleepWithStopCheck(PO_IDLE_WAIT_MS, controls);
+  process.stdout.write(`${timestampMinute()} PO-RUNNER: waiting ${label} - ${info.reason}${suffix}\n`);
+  await sleepWithStopCheck(waitMs, controls);
 }
 
 function readBundleRegistryForRuntime(runtime) {
@@ -995,24 +1009,24 @@ function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
   }
   const minBundle = minBundleSize(runtime);
   const target = bundlePreparationTarget(runtime, highWatermark);
-  const underfilled = selectedCount < minBundle;
+  const partialBundle = selectedCount < target;
   const forceAfter = Math.max(1, Number.parseInt(String(runtime.loops && runtime.loops.forceUnderfilledAfterCycles || 1), 10) || 1);
-  const allowFinalUnderfilled = selectedCount >= minBundle && selectedCount < target && !hasPendingIntakeCandidates(runtime);
+  const allowFinalUnderfilled = selectedCount >= minBundle && partialBundle && !hasPendingIntakeCandidates(runtime);
 
-  if (underfilled) {
+  if (partialBundle) {
     state.underfilledSelectedCycles = Math.max(0, Number.parseInt(String(state.underfilledSelectedCycles || 0), 10) || 0) + 1;
   } else {
     state.underfilledSelectedCycles = 0;
   }
 
-  const allowUnderfilled = underfilled && state.underfilledSelectedCycles >= forceAfter;
-  if (selectedCount < target && !allowUnderfilled && !allowFinalUnderfilled) {
+  const allowUnderfilled = partialBundle && state.underfilledSelectedCycles >= forceAfter;
+  if (partialBundle && !allowUnderfilled && !allowFinalUnderfilled) {
     log(controls, `bundle readiness wait selected=${selectedCount} target=${target} min=${minBundle} underfilled_cycles=${state.underfilledSelectedCycles}/${forceAfter}`);
     return false;
   }
 
-  if (underfilled && allowUnderfilled) {
-    log(controls, `bundle readiness forced underfilled selected=${selectedCount} min=${minBundle} after ${state.underfilledSelectedCycles} cycle(s)`);
+  if (partialBundle && allowUnderfilled) {
+    log(controls, `bundle readiness forced underfilled selected=${selectedCount} target=${target} min=${minBundle} after ${state.underfilledSelectedCycles} cycle(s)`);
   } else if (allowFinalUnderfilled) {
     log(controls, `bundle readiness final underfilled selected=${selectedCount} target=${target} min=${minBundle} (no intake candidates remain)`);
   }
@@ -3210,5 +3224,6 @@ module.exports = {
     topUpSelectedFromBacklogForBundle,
     waitReason,
     tryPrepareReadyBundle,
+    poIdleWaitMs,
   },
 };
