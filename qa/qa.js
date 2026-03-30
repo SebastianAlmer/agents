@@ -162,6 +162,45 @@ function failurePayloadFromReasons(label, reasons, fallback = "") {
   };
 }
 
+function technicalGateFailureTypeFromReasons(reasons) {
+  const text = normalizeArray(reasons)
+    .map((reason) => String(reason || "").trim().toLowerCase())
+    .filter(Boolean)
+    .join(" | ");
+  if (!text) {
+    return "technical_gate_invalid";
+  }
+  if (text.includes("pending")) {
+    return "technical_gate_pending";
+  }
+  if (text.includes("execution failed")) {
+    return "technical_execution";
+  }
+  if (text.includes("invalid json") || text.includes("invalid status") || text.includes("requires explicit arrays")) {
+    return "technical_gate_invalid";
+  }
+  return "technical_gate_invalid";
+}
+
+function technicalFailurePayloadFromReasons(label, reasons, fallback = "") {
+  const details = reasons.length > 0 ? reasons[0] : fallback;
+  const normalizedDetails = String(details || "").trim() || "QA gate did not finish with a definitive terminal artifact.";
+  return {
+    status: "fail",
+    summary: `QA ${label} failed to produce a definitive gate result`,
+    blocking_findings: [`P1: QA ${label} did not finish with a definitive gate result.`],
+    findings: [
+      {
+        severity: "P1",
+        title: `QA ${label} technical failure`,
+        details: normalizedDetails,
+      },
+    ],
+    manual_uat: [],
+    failure_type: technicalGateFailureTypeFromReasons(reasons),
+  };
+}
+
 function isDefinitiveFinalGatePayload(parsed) {
   if (!parsed || typeof parsed !== "object") {
     return {
@@ -334,6 +373,22 @@ function persistFinalPassFailure(gateFile, errorOrReasons, gateLabel = "final-pa
       writeError?.message || writeError || "unknown error",
     )}`;
   }
+}
+
+function persistTechnicalGateFailure(gateFile, errorOrReasons, gateLabel = "batch-tests") {
+  const normalizedReasons = normalizeArray(Array.isArray(errorOrReasons) ? errorOrReasons : [errorOrReasons])
+    .map((reason) => String(reason || "").trim())
+    .filter(Boolean);
+  const finalReasons =
+    normalizedReasons.length > 0
+      ? normalizedReasons
+      : [`QA ${gateLabel} failed to produce a definitive gate result.`];
+
+  const payload = technicalFailurePayloadFromReasons(gateLabel, finalReasons);
+  if (gateFile) {
+    fs.writeFileSync(gateFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  }
+  return finalReasons.join("; ");
 }
 
 function listRequirementFiles(dir) {
@@ -628,24 +683,36 @@ async function main() {
       throw error;
     }
   } else {
-    result = await runCodexExec({
-      prompt: fullPrompt,
-      repoRoot,
-      configArgs,
-      threadId,
-      threadFile,
-      agentsRoot: runtime.agentsRoot,
-      agentLabel: "QA",
-      autoCompact: auto,
-      runtime,
-      autoMode: auto,
-    });
+    try {
+      result = await runCodexExec({
+        prompt: fullPrompt,
+        repoRoot,
+        configArgs,
+        threadId,
+        threadFile,
+        agentsRoot: runtime.agentsRoot,
+        agentLabel: "QA",
+        autoCompact: auto,
+        runtime,
+        autoMode: auto,
+      });
 
-    if (batchTests) {
-      validateGateFile(gateFile, "batch-tests");
-    }
-    if (reviewOnly) {
-      validateReviewDecisionFile(decisionFile);
+      if (batchTests) {
+        validateGateFile(gateFile, "batch-tests");
+      }
+      if (reviewOnly) {
+        validateReviewDecisionFile(decisionFile);
+      }
+    } catch (error) {
+      if (!batchTests) {
+        throw error;
+      }
+      const reason = persistTechnicalGateFailure(
+        gateFile,
+        `QA batch-tests execution failed: ${String(error && error.message ? error.message : error)}`,
+        "batch-tests",
+      );
+      console.error(reason);
     }
   }
 
@@ -675,5 +742,7 @@ module.exports = {
   validateGateFile,
   applyFinalPassGateResult,
   persistFinalPassFailure,
+  persistTechnicalGateFailure,
   failurePayloadFromReasons,
+  technicalFailurePayloadFromReasons,
 };

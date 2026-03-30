@@ -29,6 +29,15 @@ const {
   parseBundleSequence,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
+const {
+  stripBundleSuffix,
+  stripCarryoverSuffix,
+  normalizeRequirementKey,
+  canonicalRequirementKeyFromPath,
+  canonicalRequirementKeyFromFileName,
+  findDuplicateRequirementCopies,
+  findBlockingDuplicateRequirementCopy,
+} = require("./lib/requirement-canonical");
 
 const PO_IDLE_WAIT_MS = 5 * 60 * 1000;
 const ALLOWED_WONT_DO_DECISION_REASONS = new Set([
@@ -885,13 +894,6 @@ function setFrontMatterField(filePath, key, value) {
   return true;
 }
 
-function stripBundleSuffix(stem) {
-  return String(stem || "")
-    .replace(/^B\d{4}-/i, "")
-    .replace(/-B\d{4}(?:-carry-\d{2}-from-B\d{4})?$/i, "")
-    .replace(/-carry-\d{2}-from-B\d{4}$/i, "");
-}
-
 function renameRequirementForBundle(filePath, bundleId) {
   if (!filePath || !fs.existsSync(filePath)) {
     return filePath;
@@ -910,12 +912,6 @@ function renameRequirementForBundle(filePath, bundleId) {
   }
   fs.renameSync(filePath, target);
   return target;
-}
-
-function stripCarryoverSuffix(stem) {
-  return String(stem || "")
-    .replace(/^carry-\d{2}-from-B\d{4}-/i, "")
-    .replace(/-carry-\d{2}-from-B\d{4}$/i, "");
 }
 
 function renameRequirementAsCarryover(filePath, oldBundleId, carryoverCount) {
@@ -1596,45 +1592,6 @@ function extractPoResultsStatusFromRequirement(filePath) {
   return String(statusMatch[1] || "").trim().toLowerCase();
 }
 
-function normalizeRequirementKey(value) {
-  const normalized = String(value || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return normalized;
-}
-
-function canonicalRequirementKeyFromPath(filePath) {
-  if (!filePath) {
-    return "";
-  }
-  if (fs.existsSync(filePath) && path.extname(filePath).toLowerCase() === ".md") {
-    const fm = parseFrontMatter(filePath);
-    const id = normalizeRequirementKey(fm.id || "");
-    if (id) {
-      return id;
-    }
-  }
-  const name = path.basename(String(filePath || ""));
-  return canonicalRequirementKeyFromFileName(name);
-}
-
-function canonicalRequirementKeyFromFileName(fileName) {
-  let stem = String(fileName || "").trim();
-  if (!stem) {
-    return "";
-  }
-  if (stem.endsWith(".decision.json")) {
-    stem = stem.slice(0, -".decision.json".length);
-  }
-  if (stem.toLowerCase().endsWith(".md")) {
-    stem = stem.slice(0, -".md".length);
-  }
-  const canonical = stripCarryoverSuffix(stripBundleSuffix(stem));
-  return normalizeRequirementKey(canonical);
-}
-
 function listDecisionArtifacts(dir) {
   if (!dir || !fs.existsSync(dir)) {
     return [];
@@ -2262,7 +2219,8 @@ function isManualBundleCleanupBacklogItem(filePath) {
 
 function listAutoSelectableBacklogFiles(runtime) {
   return listQueueFiles(runtime.queues.backlog)
-    .filter((filePath) => !isManualBundleCleanupBacklogItem(filePath));
+    .filter((filePath) => !isManualBundleCleanupBacklogItem(filePath))
+    .filter((filePath) => !findBlockingDuplicateRequirementCopy(runtime, filePath));
 }
 
 function shouldPromoteBacklogItem(runtime, state, filePath) {
@@ -2466,6 +2424,46 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
       `cooldown skip ${path.basename(sourceBefore)} until cycle ${existingState.skipUntilCycle}`
     );
     return false;
+  }
+
+  const blockingDuplicate = findBlockingDuplicateRequirementCopy(runtime, sourceBefore);
+  if (blockingDuplicate) {
+    const currentPath = resolveSourcePath(runtime, sourceBefore) || sourceBefore;
+    const duplicateSummary = `Suppressed duplicate; canonical copy already exists in ${blockingDuplicate.queueName}.`;
+    const duplicateNotes = [
+      "PO runner duplicate guard",
+      `- canonical duplicate found in ${blockingDuplicate.queueName}: ${path.basename(blockingDuplicate.filePath)}`,
+      "- duplicate work item is not allowed to re-enter active bundle preparation",
+      "- routed to backlog under terminal-wins policy",
+    ];
+    writeCanonicalPoResults(currentPath, {
+      status: "unknown",
+      targetQueue: "backlog",
+      sourceQueue: originQueue,
+      decisionReason: blockingDuplicate.reasonCode,
+      summary: duplicateSummary,
+      alreadyImplementedClaim: false,
+      evidenceReport: null,
+    });
+    if (originQueue === "backlog") {
+      setFrontMatterStatus(currentPath, "backlog");
+      appendQueueSection(currentPath, duplicateNotes);
+    } else {
+      moveWithFallback(runtime, currentPath, "backlog", "backlog", duplicateNotes);
+    }
+    updatePoStateAfterDirectMove({
+      runtime,
+      state,
+      cycle,
+      sourcePath: currentPath,
+      sourceQueue: originQueue,
+      targetQueue: "backlog",
+    });
+    log(
+      controls,
+      `duplicate guard suppressed ${path.basename(currentPath)}; canonical copy already in ${blockingDuplicate.queueName}`
+    );
+    return true;
   }
 
   const result = await runNodeScript({
@@ -3211,6 +3209,8 @@ module.exports = {
     defaultDecisionReasonForTarget,
     canonicalRequirementKeyFromPath,
     canonicalRequirementKeyFromFileName,
+    findDuplicateRequirementCopies,
+    findBlockingDuplicateRequirementCopy,
     findDecisionArtifactForRequirement,
     recoverOrphanDecisionArtifacts,
     extractDecisionReasonFromRequirement,
@@ -3221,6 +3221,7 @@ module.exports = {
     isValidAcEvidenceReference,
     evaluateAlreadyImplementedEvidence,
     isManualBundleCleanupBacklogItem,
+    promoteBacklogForProgress,
     topUpSelectedFromBacklogForBundle,
     waitReason,
     tryPrepareReadyBundle,

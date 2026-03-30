@@ -6,8 +6,8 @@ Each queue keeps a `.gitkeep` placeholder; queue metrics must count only `*.md` 
 JSON artifacts are not allowed in `requirements/**`; runners process markdown requirements only.
 
 Current workspace note (2026-02-23):
-- Existing queue payloads were archived to `_archive/mvp-reset-2026-02-23/`.
-- Active delivery currently follows a code-first MVP pass.
+- Existing queue payloads were archived during the 2026-02-23 queue reset.
+- Active delivery currently follows the current code-first product pass.
 
 Default queues:
 - `refinement`

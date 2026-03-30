@@ -10,6 +10,7 @@ const {
   validateFinalPassGateFile,
   applyFinalPassGateResult,
   persistFinalPassFailure,
+  persistTechnicalGateFailure,
   writeGatePayload,
 } = require("./qa");
 
@@ -175,5 +176,24 @@ test("batch empty queue helper writes definitive pass gate", () => {
   assert.deepEqual(payload.blocking_findings, []);
   assert.deepEqual(payload.findings, []);
   assert.deepEqual(payload.manual_uat, []);
+  assert.doesNotThrow(() => validateGateFile(gatePath, "batch-tests"));
+});
+
+test("batch technical failure helper writes definitive fail gate", () => {
+  const gatePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "qa-batch-fail-")), "gate.json");
+  const reason = persistTechnicalGateFailure(
+    gatePath,
+    "QA batch-tests execution failed: QA batch-tests gate file must not remain pending",
+    "batch-tests",
+  );
+
+  const payload = JSON.parse(fs.readFileSync(gatePath, "utf8"));
+  assert.ok(reason.length > 0, "Failure helper should return a persisted reason");
+  assert.equal(payload.status, "fail");
+  assert.notEqual(String(payload.summary || "").toLowerCase(), "pending");
+  assert.equal(payload.failure_type, "technical_gate_pending");
+  assert.equal(Array.isArray(payload.blocking_findings), true);
+  assert.equal(Array.isArray(payload.findings), true);
+  assert.equal(Array.isArray(payload.manual_uat), true);
   assert.doesNotThrow(() => validateGateFile(gatePath, "batch-tests"));
 });

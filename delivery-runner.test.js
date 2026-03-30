@@ -49,6 +49,33 @@ test("gateFromAgentResult marks pending gate as technical process failure", () =
   assert.equal(isTechnicalGateFailure(gate), true);
 });
 
+test("gateFromAgentResult keeps a definitive parsed gate even when the runner exits non-zero", () => {
+  const gate = gateFromAgentResult({
+    result: { ok: false, exitCode: 1, stderr: "qa exited after persisting fail gate" },
+    parsedGate: {
+      status: "fail",
+      summary: "QA batch-tests failed to produce a definitive gate result",
+      blocking_findings: ["P1: QA batch-tests did not finish with a definitive gate result."],
+      findings: [
+        {
+          severity: "P1",
+          title: "QA batch-tests technical failure",
+          details: "QA batch-tests execution failed: invalid gate",
+        },
+      ],
+      manual_uat: [],
+      failure_type: "technical_gate_invalid",
+    },
+    createFailureGate: createQaExecutionFailureGate,
+    command: "node qa/qa.js --auto --batch-tests",
+    gateLabel: "QA bundle gate",
+  });
+
+  assert.equal(gate.failure_type, "technical_gate_invalid");
+  assert.equal(gate.summary, "QA batch-tests failed to produce a definitive gate result");
+  assert.equal(isTechnicalGateFailure(gate), true);
+});
+
 test("technical gate failure routes to dev first, then escalates after retries", () => {
   const { root, qaDir, devDir, humanDecisionNeededDir } = mkTempQueues();
 
@@ -373,11 +400,13 @@ function mkTempUatRuntime() {
   const secDir = path.join(root, "requirements", "sec");
   const deployDir = path.join(root, "requirements", "deploy");
   const releasedDir = path.join(root, "requirements", "released");
+  const blockedDir = path.join(root, "requirements", "blocked");
   fs.mkdirSync(qaDir, { recursive: true });
   fs.mkdirSync(uxDir, { recursive: true });
   fs.mkdirSync(secDir, { recursive: true });
   fs.mkdirSync(deployDir, { recursive: true });
   fs.mkdirSync(releasedDir, { recursive: true });
+  fs.mkdirSync(blockedDir, { recursive: true });
   fs.writeFileSync(path.join(deployDir, "REQ-DEPLOY.md"), "---\nid: REQ-DEPLOY\n---\n", "utf8");
   fs.writeFileSync(path.join(releasedDir, "REQ-RELEASED.md"), "---\nid: REQ-RELEASED\n---\n", "utf8");
   return {
@@ -393,6 +422,7 @@ function mkTempUatRuntime() {
         ux: uxDir,
         sec: secDir,
         deploy: deployDir,
+        blocked: blockedDir,
         released: releasedDir,
       },
     },
@@ -424,4 +454,277 @@ test("fast downstream skips deploy actions and releases directly", async () => {
   assert.equal(result.progressed, true);
   assert.equal(fs.existsSync(path.join(runtime.queues.deploy, "REQ-DEPLOY.md")), false);
   assert.equal(fs.existsSync(path.join(runtime.queues.released, "REQ-DEPLOY.md")), true);
+});
+
+test("fast downstream completes active bundle after direct release", async () => {
+  const { root, runtime } = mkTempUatRuntime();
+  const bundleId = "B0042";
+  const deployPath = path.join(runtime.queues.deploy, `${bundleId}-REQ-DEPLOY.md`);
+  fs.writeFileSync(
+    deployPath,
+    [
+      "---",
+      "id: REQ-DEPLOY",
+      "title: Deploy test",
+      "status: deploy",
+      `bundle_id: ${bundleId}`,
+      "bundle_seq: 42",
+      "---",
+      "",
+      "# Goal",
+      "release directly",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  writeBundleRegistry(root, {
+    version: 1,
+    next_bundle_seq: 43,
+    active_bundle_id: bundleId,
+    ready_bundle_id: "",
+    bundles: {
+      [bundleId]: {
+        id: bundleId,
+        seq: 42,
+        status: "active",
+        createdAt: "2026-03-29T16:00:00Z",
+        startedAt: "2026-03-29T16:01:00Z",
+        finishedAt: "",
+        sourceReqIds: ["REQ-DEPLOY"],
+        carryoversIn: [],
+        carryoversOut: [],
+      },
+    },
+    updatedAt: "2026-03-29T16:01:00Z",
+  });
+  runtime.bundleFlow = {
+    enabled: true,
+    allowCrossBundleMoves: false,
+  };
+
+  const result = await __test.runFastDownstream(runtime, { verbose: false });
+  const registry = JSON.parse(fs.readFileSync(path.join(root, ".runtime", "bundles", "registry.json"), "utf8"));
+
+  assert.equal(result.progressed, true);
+  assert.equal(registry.active_bundle_id, "");
+  assert.equal(registry.bundles[bundleId].status, "completed");
+  assert.equal(fs.existsSync(path.join(runtime.queues.released, `${bundleId}-REQ-DEPLOY.md`)), true);
+});
+
+test("quarantineForeignExecutionQueues blocks foreign active-stage bundle files", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-scope-test-"));
+  const qaDir = path.join(root, "requirements", "qa");
+  const blockedDir = path.join(root, "requirements", "blocked");
+  fs.mkdirSync(qaDir, { recursive: true });
+  fs.mkdirSync(blockedDir, { recursive: true });
+
+  const activeBundleId = "B0100";
+  const foreignBundleId = "B0101";
+  writeBundleRegistry(root, {
+    version: 1,
+    next_bundle_seq: 102,
+    active_bundle_id: activeBundleId,
+    ready_bundle_id: "",
+    bundles: {
+      [activeBundleId]: { id: activeBundleId, seq: 100, status: "active" },
+      [foreignBundleId]: { id: foreignBundleId, seq: 101, status: "active" },
+    },
+    updatedAt: "2026-03-29T16:20:00Z",
+  });
+
+  const writeReq = (bundleId, fileName) => {
+    fs.writeFileSync(
+      path.join(qaDir, fileName),
+      [
+        "---",
+        `id: ${fileName.replace(/\.md$/i, "")}`,
+        "title: Scope test",
+        "status: qa",
+        `bundle_id: ${bundleId}`,
+        "---",
+        "",
+        "# Goal",
+        "scope test",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+  };
+
+  writeReq(activeBundleId, `${activeBundleId}-REQ-ACTIVE.md`);
+  writeReq(foreignBundleId, `${foreignBundleId}-REQ-FOREIGN.md`);
+
+  const runtime = {
+    agentsRoot: root,
+    bundleFlow: {
+      enabled: true,
+      allowCrossBundleMoves: false,
+    },
+    queues: {
+      arch: path.join(root, "requirements", "arch"),
+      dev: path.join(root, "requirements", "dev"),
+      qa: qaDir,
+      ux: path.join(root, "requirements", "ux"),
+      sec: path.join(root, "requirements", "sec"),
+      deploy: path.join(root, "requirements", "deploy"),
+      blocked: blockedDir,
+    },
+  };
+  for (const queueName of ["arch", "dev", "ux", "sec", "deploy"]) {
+    fs.mkdirSync(runtime.queues[queueName], { recursive: true });
+  }
+
+  const moved = __test.quarantineForeignExecutionQueues(runtime, { verbose: false });
+
+  assert.equal(moved, 1);
+  assert.equal(fs.existsSync(path.join(qaDir, `${activeBundleId}-REQ-ACTIVE.md`)), true);
+  assert.equal(fs.existsSync(path.join(qaDir, `${foreignBundleId}-REQ-FOREIGN.md`)), false);
+  assert.equal(fs.existsSync(path.join(blockedDir, `${foreignBundleId}-REQ-FOREIGN.md`)), true);
+});
+
+test("collectConflictingRequirementDuplicates ignores terminal-only history and reports active conflicts", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-duplicate-diagnostic-test-"));
+  const selectedDir = path.join(root, "requirements", "selected");
+  const releasedDir = path.join(root, "requirements", "released");
+  const humanDecisionNeededDir = path.join(root, "requirements", "human-decision-needed");
+  fs.mkdirSync(selectedDir, { recursive: true });
+  fs.mkdirSync(releasedDir, { recursive: true });
+  fs.mkdirSync(humanDecisionNeededDir, { recursive: true });
+
+  const writeReq = (dir, fileName, id, status) => {
+    fs.writeFileSync(
+      path.join(dir, fileName),
+      [
+        "---",
+        `id: ${id}`,
+        "title: Duplicate diagnostic",
+        `status: ${status}`,
+        "---",
+        "",
+        "# Goal",
+        "diagnose duplicates",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+  };
+
+  writeReq(releasedDir, "B0001-REQ-HISTORY.md", "REQ-HISTORY", "released");
+  writeReq(releasedDir, "B0002-REQ-HISTORY.md", "REQ-HISTORY", "released");
+  writeReq(humanDecisionNeededDir, "B0025-REQ-NEXUS-042.md", "REQ-NEXUS-042", "human-decision-needed");
+  writeReq(selectedDir, "B0028-REQ-NEXUS-042.md", "REQ-NEXUS-042", "selected");
+
+  const runtime = {
+    agentsRoot: root,
+    queues: {
+      selected: selectedDir,
+      released: releasedDir,
+      humanDecisionNeeded: humanDecisionNeededDir,
+    },
+  };
+
+  const conflicts = __test.collectConflictingRequirementDuplicates(runtime);
+
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].id, "REQ-NEXUS-042");
+  assert.equal(conflicts[0].reason, "terminal-wins-conflict");
+  assert.deepEqual(
+    conflicts[0].copies.map((item) => item.queueName).sort(),
+    ["humanDecisionNeeded", "selected"]
+  );
+});
+
+test("sanitizeBundleRegistryState suppresses ready bundle items with terminal winners", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-ready-duplicate-test-"));
+  const selectedDir = path.join(root, "requirements", "selected");
+  const backlogDir = path.join(root, "requirements", "backlog");
+  const humanDecisionNeededDir = path.join(root, "requirements", "human-decision-needed");
+  fs.mkdirSync(selectedDir, { recursive: true });
+  fs.mkdirSync(backlogDir, { recursive: true });
+  fs.mkdirSync(humanDecisionNeededDir, { recursive: true });
+
+  const bundleId = "B0028";
+  const selectedPath = path.join(selectedDir, `${bundleId}-REQ-NEXUS-042.md`);
+  fs.writeFileSync(
+    selectedPath,
+    [
+      "---",
+      "id: REQ-NEXUS-042",
+      "title: Nexus Supervisor Agent Identity and Role",
+      "status: selected",
+      `bundle_id: ${bundleId}`,
+      "bundle_seq: 28",
+      "---",
+      "",
+      "# Goal",
+      "duplicate selected copy",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(humanDecisionNeededDir, "B0025-REQ-NEXUS-042.md"),
+    [
+      "---",
+      "id: REQ-NEXUS-042",
+      "title: Nexus Supervisor Agent Identity and Role",
+      "status: human-decision-needed",
+      "bundle_id: B0025",
+      "bundle_seq: 25",
+      "---",
+      "",
+      "# Goal",
+      "canonical human decision copy",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  writeBundleRegistry(root, {
+    version: 1,
+    next_bundle_seq: 29,
+    active_bundle_id: "",
+    ready_bundle_id: bundleId,
+    bundles: {
+      [bundleId]: {
+        id: bundleId,
+        seq: 28,
+        status: "ready",
+        createdAt: "2026-03-29T16:02:12.443Z",
+        startedAt: "",
+        finishedAt: "",
+        sourceReqIds: ["REQ-NEXUS-042"],
+        carryoversIn: [],
+        carryoversOut: [],
+      },
+    },
+    updatedAt: "2026-03-29T16:17:42.817Z",
+  });
+
+  const runtime = {
+    agentsRoot: root,
+    queues: {
+      selected: selectedDir,
+      backlog: backlogDir,
+      humanDecisionNeeded: humanDecisionNeededDir,
+    },
+  };
+
+  __test.sanitizeBundleRegistryState(runtime, { verbose: false }, "startup");
+
+  const backlogPath = path.join(backlogDir, `${bundleId}-REQ-NEXUS-042.md`);
+  const registry = JSON.parse(fs.readFileSync(path.join(root, ".runtime", "bundles", "registry.json"), "utf8"));
+
+  assert.equal(fs.existsSync(selectedPath), false);
+  assert.equal(fs.existsSync(backlogPath), true);
+  assert.equal(registry.ready_bundle_id, "");
+  assert.equal(registry.bundles[bundleId].status, "aborted");
+  assert.deepEqual(registry.bundles[bundleId].sourceReqIds, []);
+
+  const backlogRaw = fs.readFileSync(backlogPath, "utf8");
+  assert.match(backlogRaw, /^---\nid: REQ-NEXUS-042[\s\S]*\nstatus: backlog\n/m);
+  assert.doesNotMatch(backlogRaw, /\nbundle_id\s*:/);
+  assert.match(backlogRaw, /Delivery runner duplicate cleanup/);
+  assert.match(backlogRaw, /human-decision-needed/);
+  assert.match(backlogRaw, /No active bundle assignment\./);
 });

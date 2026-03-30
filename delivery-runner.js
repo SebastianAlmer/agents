@@ -25,6 +25,14 @@ const {
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
 const {
+  TERMINAL_DUPLICATE_QUEUE_PRIORITY,
+  DELIVERY_ACTIVE_DUPLICATE_QUEUES,
+  normalizeRequirementKey,
+  canonicalRequirementKeyFromPath,
+  findBlockingDuplicateRequirementCopy,
+  collectRequirementDuplicateGroups,
+} = require("./lib/requirement-canonical");
+const {
   getThreadFilePath,
   readThreadId,
   clearThreadState,
@@ -450,6 +458,51 @@ function countFilesByBundle(runtime, queueName, bundleId) {
   return listQueueFilesByBundle(runtime, queueName, bundleId).length;
 }
 
+const TERMINAL_DUPLICATE_QUEUES = new Set(TERMINAL_DUPLICATE_QUEUE_PRIORITY);
+
+function queueDisplayName(queueName) {
+  const map = {
+    humanDecisionNeeded: "human-decision-needed",
+    humanInput: "human-input",
+    toClarify: "to-clarify",
+    wontDo: "wont-do",
+  };
+  return map[queueName] || String(queueName || "unknown");
+}
+
+function findTerminalDuplicateWinner(runtime, sourcePath) {
+  const duplicate = findBlockingDuplicateRequirementCopy(runtime, sourcePath, {
+    terminalQueuePriority: TERMINAL_DUPLICATE_QUEUE_PRIORITY,
+  });
+  return duplicate && duplicate.kind === "terminal" ? duplicate : null;
+}
+
+function collectConflictingRequirementDuplicates(runtime) {
+  return collectRequirementDuplicateGroups(runtime).filter(({ copies }) => {
+    const hasTerminal = copies.some((item) => TERMINAL_DUPLICATE_QUEUES.has(item.queueName));
+    const activeCopies = copies.filter((item) => DELIVERY_ACTIVE_DUPLICATE_QUEUES.includes(item.queueName));
+    return (hasTerminal && activeCopies.length > 0) || activeCopies.length > 1;
+  }).map(({ id, copies }) => ({
+    id,
+    reason: copies.some((item) => TERMINAL_DUPLICATE_QUEUES.has(item.queueName))
+      ? "terminal-wins-conflict"
+      : "multiple-active-copies",
+    copies,
+  }));
+}
+
+function reportConflictingRequirementDuplicates(runtime, controls, reason = "cycle") {
+  const conflicts = collectConflictingRequirementDuplicates(runtime);
+  if (conflicts.length === 0) {
+    return 0;
+  }
+  const preview = conflicts.slice(0, 3).map((item) => (
+    `${item.id}[${item.copies.map((copy) => queueDisplayName(copy.queueName)).join(",")}]`
+  )).join("; ");
+  log(controls, `duplicate requirement conflicts (${reason}) count=${conflicts.length}: ${preview}`);
+  return conflicts.length;
+}
+
 function activateReadyBundle(runtime, controls) {
   const registry = readBundleRegistryForRuntime(runtime);
   const readyId = String(registry.ready_bundle_id || "").trim();
@@ -566,14 +619,66 @@ function sanitizeBundleRegistryState(runtime, controls, reason = "startup") {
 
   const readyId = String(registry.ready_bundle_id || "").trim();
   if (readyId) {
-    const readyEntry = registry.bundles[readyId] && typeof registry.bundles[readyId] === "object"
+    let readyEntry = registry.bundles[readyId] && typeof registry.bundles[readyId] === "object"
       ? registry.bundles[readyId]
       : {};
-    const sourceReqIds = Array.isArray(readyEntry.sourceReqIds)
+    let sourceReqIds = Array.isArray(readyEntry.sourceReqIds)
       ? readyEntry.sourceReqIds.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
     const selectedFiles = listQueueFilesByBundle(runtime, "selected", readyId);
-    if (sourceReqIds.length === 0 && selectedFiles.length === 0) {
+    const suppressedReqKeys = new Set();
+    let suppressedCount = 0;
+
+    for (const filePath of selectedFiles) {
+      const winner = findTerminalDuplicateWinner(runtime, filePath);
+      if (!winner) {
+        continue;
+      }
+      const reqKey = canonicalRequirementKeyFromPath(filePath);
+      const moved = moveToQueue(runtime, filePath, "backlog", "backlog", [
+        "Delivery runner duplicate cleanup",
+        `- duplicate suppressed before bundle start; canonical copy already exists in ${queueDisplayName(winner.queueName)}`,
+        `- canonical file: ${path.basename(winner.filePath)}`,
+        `- removed from ready bundle ${readyId} under terminal-wins policy`,
+      ]);
+      if (!moved) {
+        continue;
+      }
+      clearRequirementBundleAssignment(
+        path.join(runtime.queues.backlog, path.basename(filePath)),
+        [
+          "- No active bundle assignment.",
+          `- Previous bundle: ${readyId}.`,
+          "- Bundle assignment cleared after duplicate suppression.",
+        ]
+      );
+      if (reqKey) {
+        suppressedReqKeys.add(reqKey);
+      }
+      suppressedCount += 1;
+    }
+
+    if (suppressedCount > 0) {
+      sourceReqIds = sourceReqIds.filter((item) => !suppressedReqKeys.has(normalizeRequirementKey(item)));
+      readyEntry = {
+        ...readyEntry,
+        id: readyId,
+        sourceReqIds,
+      };
+      registry.bundles[readyId] = readyEntry;
+      changed = true;
+      notes.push(`suppressed ${suppressedCount} ready duplicate item(s) in ${readyId}`);
+    }
+
+    const selectedFilesAfter = listQueueFilesByBundle(runtime, "selected", readyId);
+    if (selectedFilesAfter.length === 0) {
+      for (const backlogFile of listQueueFilesByBundle(runtime, "backlog", readyId)) {
+        clearRequirementBundleAssignment(backlogFile, [
+          "- No active bundle assignment.",
+          `- Previous bundle: ${readyId}.`,
+          "- Bundle assignment cleared after stale ready-bundle repair.",
+        ]);
+      }
       registry.ready_bundle_id = "";
       registry.bundles[readyId] = {
         ...readyEntry,
@@ -582,7 +687,9 @@ function sanitizeBundleRegistryState(runtime, controls, reason = "startup") {
         finishedAt: new Date().toISOString(),
       };
       changed = true;
-      notes.push(`cleared empty ready bundle ${readyId}`);
+      notes.push(sourceReqIds.length === 0
+        ? `cleared empty ready bundle ${readyId}`
+        : `cleared stale ready bundle ${readyId} with no selected files`);
     }
   }
 
@@ -671,6 +778,18 @@ function resetGlobalPauseOnStartup(runtime, controls) {
     `${timestampMinute()} DELIVERY: startup pause reset (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
   );
   log(controls, "global pause state cleared on startup");
+}
+
+function completeReleasedBundleWithoutDeploy(runtime, controls) {
+  if (!activeBundleId(runtime)) {
+    return false;
+  }
+  if (!activeBundleDrained(runtime)) {
+    return false;
+  }
+  completeActiveBundle(runtime, controls, { status: "completed" });
+  clearBundleWorkspaceState(runtime);
+  return true;
 }
 
 async function sleepWithStopCheck(ms, controls) {
@@ -898,6 +1017,30 @@ function resolveRequirementPath(runtime, sourcePath) {
   return "";
 }
 
+function clearRequirementBundleAssignment(filePath, noteLines = []) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const next = raw.replace(/^---\r?\n([\s\S]*?)\r?\n---/, (match, frontMatter) => {
+      const filtered = String(frontMatter || "")
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*bundle_(id|seq)\s*:/i.test(line))
+        .join("\n");
+      return `---\n${filtered}\n---`;
+    });
+    fs.writeFileSync(filePath, next, "utf8");
+    if (Array.isArray(noteLines) && noteLines.length > 0) {
+      upsertMarkdownSection(filePath, "Bundle Assignment", noteLines);
+    }
+    return true;
+  } catch (err) {
+    process.stderr.write(`DELIVERY: clearRequirementBundleAssignment failed for ${path.basename(String(filePath || ""))}: ${err.message || err}\n`);
+    return false;
+  }
+}
+
 function moveToQueue(runtime, sourcePath, targetQueue, status, noteLines) {
   const sourceFile = resolveRequirementPath(runtime, sourcePath);
   if (!sourceFile || !fs.existsSync(sourceFile)) {
@@ -962,6 +1105,54 @@ function scopedQueueFiles(runtime, queueName) {
     }
   }
   return files;
+}
+
+function quarantineForeignBundleQueueFiles(runtime, controls, queueName) {
+  const dir = runtime && runtime.queues ? runtime.queues[queueName] : "";
+  if (!dir) {
+    return 0;
+  }
+  const cfg = runtime && runtime.bundleFlow ? runtime.bundleFlow : {};
+  const bundleScoped = Boolean(cfg.enabled) && !Boolean(cfg.allowCrossBundleMoves);
+  if (!bundleScoped) {
+    return 0;
+  }
+  const activeId = activeBundleId(runtime);
+  if (!activeId) {
+    return 0;
+  }
+  if (!(runtime && runtime.queues && runtime.queues.blocked)) {
+    return 0;
+  }
+
+  let moved = 0;
+  for (const filePath of listQueueFiles(dir)) {
+    const bundleId = String(fileBundleId(filePath) || "").trim();
+    if (bundleId === activeId) {
+      continue;
+    }
+    if (moveToQueue(runtime, filePath, "blocked", "blocked", [
+      "Delivery runner: bundle scope quarantine",
+      `- active bundle id=${activeId}`,
+      `- foreign queue=${queueName}`,
+      `- foreign bundle id=${bundleId || "<missing>"}`,
+      "- moved to blocked to prevent mixed-bundle execution",
+    ])) {
+      moved += 1;
+    }
+  }
+  if (moved > 0) {
+    log(controls, `bundle scope quarantine ${queueName}: moved=${moved} active=${activeId}`);
+  }
+  return moved;
+}
+
+function quarantineForeignExecutionQueues(runtime, controls) {
+  let moved = 0;
+  for (const queueName of ["arch", "dev", "qa", "ux", "sec", "deploy"]) {
+    moved += quarantineForeignBundleQueueFiles(runtime, controls, queueName);
+  }
+  return moved;
 }
 
 function parseFrontMatterBoolean(value) {
@@ -3183,8 +3374,28 @@ function gatePending(gate) {
     && gate.blocking_findings.length === 0;
 }
 
+function definitiveGateArtifact(gate) {
+  if (!gate || typeof gate !== "object") {
+    return false;
+  }
+  const status = String(gate.status || "").toLowerCase();
+  if (!["pass", "fail"].includes(status)) {
+    return false;
+  }
+  const summary = String(gate.summary || "").trim();
+  if (!summary || summary.toLowerCase() === "pending") {
+    return false;
+  }
+  return Array.isArray(gate.blocking_findings)
+    && Array.isArray(gate.findings)
+    && Array.isArray(gate.manual_uat);
+}
+
 function gateFromAgentResult({ result, parsedGate, createFailureGate, command, gateLabel }) {
   if (!result || !result.ok) {
+    if (definitiveGateArtifact(parsedGate)) {
+      return parsedGate;
+    }
     return createFailureGate({
       command,
       exitCode: result && result.exitCode,
@@ -6265,7 +6476,11 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
     );
     if (moved > 0) {
       log(controls, `normalized deploy->released: ${moved}`);
-      clearBundleWorkspaceState(runtime);
+      if (!runQaPost && !runMaint && completeReleasedBundleWithoutDeploy(runtime, controls)) {
+        log(controls, "bundle completed after direct release without deploy stage");
+      } else {
+        clearBundleWorkspaceState(runtime);
+      }
       progressed = true;
     }
   }
@@ -6330,6 +6545,7 @@ async function main() {
   cleanupRequirementJsonArtifacts(runtime, controls, "startup");
   pruneStaleWorkspaceBranches(runtime, controls, "startup");
   sanitizeBundleRegistryState(runtime, controls, "startup");
+  reportConflictingRequirementDuplicates(runtime, controls, "startup");
 
   log(controls, `mode=${mode}`);
   log(controls, `bundle min=${minBundle} max=${maxBundle}`);
@@ -6354,6 +6570,10 @@ async function main() {
 
     enforceClarifyQueuePolicy(runtime, controls);
     enforceBlockedQueuePolicy(runtime, controls);
+    if (!activeBundleId(runtime)) {
+      sanitizeBundleRegistryState(runtime, controls, "cycle");
+    }
+    reportConflictingRequirementDuplicates(runtime, controls, "cycle");
 
     const before = snapshotHash(runtime);
     const forceUnderfilledFromVision = shouldForceUnderfilledFromVision(runtime);
@@ -6385,6 +6605,8 @@ async function main() {
       await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
       continue;
     }
+
+    quarantineForeignExecutionQueues(runtime, controls);
 
     await runArch(runtime, controls);
     await runDev(runtime, controls);
@@ -6507,10 +6729,14 @@ module.exports = {
   __test: {
     workspaceBranchesEnabled,
     uatEnabled,
+    collectConflictingRequirementDuplicates,
     ensureBundleWorkspaceBranch,
     enforceActiveWorkspaceBranch,
+    completeReleasedBundleWithoutDeploy,
+    quarantineForeignExecutionQueues,
     resumeActiveBundleSelectedIntake,
     runFastDownstream,
+    sanitizeBundleRegistryState,
     runUatBundle,
     runUatFullRegression,
   },
