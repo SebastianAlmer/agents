@@ -174,8 +174,9 @@ Workspace branches:
 
 Global pause guard:
 - Provider limits/auth failures create `.runtime/pause-state.json`.
-- Runners pause or escalate depending on policy.
-- Limit/auth incidents are escalated to `human-decision-needed` and runner stops gracefully.
+- Usage/rate/quota limits wait until `resumeAfter` and then continue automatically.
+- Active pause state survives runner restarts until it expires.
+- Auth/access failures escalate to `human-decision-needed` and runner stops gracefully.
 
 Loop controls:
 - Stage retries and no-output timeouts are bounded.

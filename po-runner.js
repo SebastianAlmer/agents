@@ -21,8 +21,8 @@ const {
   normalizeStatus,
   listQueueFiles,
   getActivePauseState,
-  readPauseState,
-  clearPauseState,
+  isAutoResumePauseReason,
+  isHumanEscalationPauseReason,
   readBundleRegistry,
   writeBundleRegistry,
   formatBundleId,
@@ -412,19 +412,18 @@ function log(controls, message) {
   }
 }
 
-function resetGlobalPauseOnStartup(runtime, controls) {
-  const state = readPauseState(runtime.agentsRoot);
-  if (!state || !state.active) {
+function preserveGlobalPauseOnStartup(runtime, controls) {
+  const state = getActivePauseState(runtime.agentsRoot);
+  if (!state) {
     return;
   }
   const reason = String(state.reason || "unknown").replace(/_/g, "-");
   const source = String(state.source || "unknown");
   const resumeAfter = String(state.resumeAfter || "unknown");
-  clearPauseState(runtime.agentsRoot);
   process.stdout.write(
-    `${timestampMinute()} PO-RUNNER: startup pause reset (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
+    `${timestampMinute()} PO-RUNNER: startup pause preserved (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
   );
-  log(controls, "global pause state cleared on startup");
+  log(controls, "global pause state preserved on startup");
 }
 
 function timestampMinute() {
@@ -459,18 +458,6 @@ function formatPauseLine(pauseState) {
     : 0;
   const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
   return `global pause active reason=${reason} source=${source} resume_after=${resumeAfter || "unknown"} remaining~${remainingMin}m`;
-}
-
-function isEscalationPauseReason(reason) {
-  return new Set([
-    "auth_forbidden",
-    "usage_limit",
-    "rate_limit",
-    "insufficient_quota",
-    "quota_exceeded",
-    "too_many_requests",
-    "retry_later",
-  ]).has(String(reason || ""));
 }
 
 function writePauseEscalationForHumanDecision(runtime, pauseState, runnerLabel) {
@@ -584,7 +571,7 @@ async function waitIfGloballyPaused(runtime, controls) {
   }
   process.stdout.write(`${timestampMinute()} PO-RUNNER: ${formatPauseLine(pauseState)}\n`);
   const reason = String((pauseState && pauseState.reason) || "");
-  if (isEscalationPauseReason(reason)) {
+  if (isHumanEscalationPauseReason(reason)) {
     const escalationPath = writePauseEscalationForHumanDecision(runtime, pauseState, "PO-RUNNER");
     if (escalationPath) {
       process.stdout.write(
@@ -1182,6 +1169,13 @@ function pausedLimit(runtime) {
       10
     ) || 2
   );
+}
+
+function shouldEscalatePausedPoRun(runtime, reason, pausedCount) {
+  if (isAutoResumePauseReason(reason)) {
+    return false;
+  }
+  return Math.max(0, Number.parseInt(String(pausedCount || 0), 10) || 0) >= pausedLimit(runtime);
 }
 
 function fileHash(filePath) {
@@ -2477,7 +2471,8 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
   });
 
   if (result.paused) {
-    log(controls, `PO intake paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
+    const pauseReason = (result.pauseState && result.pauseState.reason) || "limit";
+    log(controls, `PO intake paused by token guard (${pauseReason})`);
     if (state && state.items) {
       const key = requirementKey(sourceBefore);
       const pausedCount = registerPausedOccurrence(state, "po-intake", key);
@@ -2486,8 +2481,9 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
         item_key: key,
         result: "paused",
         attempt: pausedCount,
+        reason: pauseReason,
       });
-      if (pausedCount >= pausedLimit(runtime)) {
+      if (shouldEscalatePausedPoRun(runtime, pauseReason, pausedCount)) {
         const targetQueue = runtime.loopPolicy && runtime.loopPolicy.escalateBusinessLoopToHumanDecision
           ? "humanDecisionNeeded"
           : "refinement";
@@ -3045,9 +3041,10 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
     if (planningFillNeeded || releasedChanged) {
       const cycle = await runVisionCycle(runtime, controls);
       if (cycle.paused) {
+        const pauseReason = (cycle.pauseState && cycle.pauseState.reason) || "limit";
         log(
           controls,
-          `vision cycle paused by token guard (${(cycle.pauseState && cycle.pauseState.reason) || "limit"})`
+          `vision cycle paused by token guard (${pauseReason})`
         );
         const pausedCount = registerPausedOccurrence(state, "po-vision", "VISION-GLOBAL");
         appendRunnerMetric(runtime, {
@@ -3055,8 +3052,9 @@ async function runVisionMode(runtime, controls, args, lowWatermark, highWatermar
           item_key: "VISION-GLOBAL",
           result: "paused",
           attempt: pausedCount,
+          reason: pauseReason,
         });
-        if (pausedCount >= pausedLimit(runtime)) {
+        if (shouldEscalatePausedPoRun(runtime, pauseReason, pausedCount)) {
           writeVisionClarification(
             runtime,
             `PO vision paused too often (${pausedCount}/${pausedLimit(runtime)}); escalated for human decision.`
@@ -3179,7 +3177,7 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
-  resetGlobalPauseOnStartup(runtime, controls);
+  preserveGlobalPauseOnStartup(runtime, controls);
   cleanupRequirementJsonArtifacts(runtime, controls, "startup");
 
   log(controls, `mode=${mode}`);
@@ -3226,5 +3224,7 @@ module.exports = {
     waitReason,
     tryPrepareReadyBundle,
     poIdleWaitMs,
+    preserveGlobalPauseOnStartup,
+    shouldEscalatePausedPoRun,
   },
 };

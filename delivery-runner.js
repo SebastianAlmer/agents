@@ -18,8 +18,8 @@ const {
   parseFrontMatter,
   normalizeStatus,
   getActivePauseState,
-  readPauseState,
-  clearPauseState,
+  isAutoResumePauseReason,
+  isHumanEscalationPauseReason,
   readBundleRegistry,
   writeBundleRegistry,
 } = require("./lib/flow-core");
@@ -241,19 +241,27 @@ function pausedLimit(runtime) {
   );
 }
 
+function shouldEscalatePausedStage(runtime, reason, pausedCount) {
+  if (isAutoResumePauseReason(reason)) {
+    return false;
+  }
+  return Math.max(0, Number.parseInt(String(pausedCount || 0), 10) || 0) >= pausedLimit(runtime);
+}
+
 function handlePausedStage(runtime, controls, stageName, queueName, reason = "paused") {
   const itemKey = stageItemKey(runtime, queueName);
   const current = registerPausedOccurrence(runtime, stageName, itemKey);
+  const pauseReason = String(reason || "paused");
   appendRunnerMetric(runtime, {
     stage: stageName,
     queue: queueName,
     item_key: itemKey,
     result: "paused",
     attempt: current,
-    reason,
+    reason: pauseReason,
   });
   const limit = pausedLimit(runtime);
-  if (current >= limit) {
+  if (shouldEscalatePausedStage(runtime, pauseReason, current)) {
     return escalateStageLoop(
       runtime,
       stageName,
@@ -765,19 +773,18 @@ function log(controls, message) {
   }
 }
 
-function resetGlobalPauseOnStartup(runtime, controls) {
-  const state = readPauseState(runtime.agentsRoot);
-  if (!state || !state.active) {
+function preserveGlobalPauseOnStartup(runtime, controls) {
+  const state = getActivePauseState(runtime.agentsRoot);
+  if (!state) {
     return;
   }
   const reason = String(state.reason || "unknown").replace(/_/g, "-");
   const source = String(state.source || "unknown");
   const resumeAfter = String(state.resumeAfter || "unknown");
-  clearPauseState(runtime.agentsRoot);
   process.stdout.write(
-    `${timestampMinute()} DELIVERY: startup pause reset (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
+    `${timestampMinute()} DELIVERY: startup pause preserved (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
   );
-  log(controls, "global pause state cleared on startup");
+  log(controls, "global pause state preserved on startup");
 }
 
 function completeReleasedBundleWithoutDeploy(runtime, controls) {
@@ -814,18 +821,6 @@ function formatPauseLine(pauseState) {
     : 0;
   const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
   return `global pause active reason=${reason} source=${source} resume_after=${resumeAfter || "unknown"} remaining~${remainingMin}m`;
-}
-
-function isEscalationPauseReason(reason) {
-  return new Set([
-    "auth_forbidden",
-    "usage_limit",
-    "rate_limit",
-    "insufficient_quota",
-    "quota_exceeded",
-    "too_many_requests",
-    "retry_later",
-  ]).has(String(reason || ""));
 }
 
 function writePauseEscalationForHumanDecision(runtime, pauseState, runnerLabel) {
@@ -939,7 +934,7 @@ async function waitIfGloballyPaused(runtime, controls) {
   }
   process.stdout.write(`${timestampMinute()} DELIVERY: ${formatPauseLine(pauseState)}\n`);
   const reason = String((pauseState && pauseState.reason) || "");
-  if (isEscalationPauseReason(reason)) {
+  if (isHumanEscalationPauseReason(reason)) {
     const escalationPath = writePauseEscalationForHumanDecision(runtime, pauseState, "DELIVERY-RUNNER");
     if (escalationPath) {
       process.stdout.write(
@@ -2346,7 +2341,7 @@ async function runArch(runtime, controls) {
       }
       if (result.paused) {
         log(controls, `ARCH paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-        if (handlePausedStage(runtime, controls, "arch", "arch", "token-guard")) {
+        if (handlePausedStage(runtime, controls, "arch", "arch", (result.pauseState && result.pauseState.reason) || "token-guard")) {
           progressed = true;
           continue;
         }
@@ -2561,7 +2556,7 @@ async function runUxBatch(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `UX paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return handlePausedStage(runtime, controls, "ux", "ux", "token-guard");
+      return handlePausedStage(runtime, controls, "ux", "ux", (result.pauseState && result.pauseState.reason) || "token-guard");
     }
     appendRunnerMetric(runtime, {
       stage: "ux",
@@ -2649,7 +2644,7 @@ async function runSecBatch(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `SEC paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return handlePausedStage(runtime, controls, "sec", "sec", "token-guard");
+      return handlePausedStage(runtime, controls, "sec", "sec", (result.pauseState && result.pauseState.reason) || "token-guard");
     }
     appendRunnerMetric(runtime, {
       stage: "sec",
@@ -4580,7 +4575,7 @@ async function runQaBundle(runtime, controls) {
   }
   if (result.paused) {
     log(controls, `QA paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-    const escalated = handlePausedStage(runtime, controls, "qa", "qa", "token-guard");
+    const escalated = handlePausedStage(runtime, controls, "qa", "qa", (result.pauseState && result.pauseState.reason) || "token-guard");
     return {
       progressed: escalated,
       gate: null,
@@ -4709,7 +4704,7 @@ async function runUatBundle(runtime, controls) {
   }
   if (result.paused) {
     log(controls, `UAT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-    const escalated = handlePausedStage(runtime, controls, "uat", "deploy", "token-guard");
+    const escalated = handlePausedStage(runtime, controls, "uat", "deploy", (result.pauseState && result.pauseState.reason) || "token-guard");
     return {
       progressed: escalated,
       gate: null,
@@ -5539,7 +5534,7 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
   }
   if (result.paused) {
     log(controls, `MAINT paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-    const escalated = handlePausedStage(runtime, controls, "maint", "released", "token-guard");
+    const escalated = handlePausedStage(runtime, controls, "maint", "released", (result.pauseState && result.pauseState.reason) || "token-guard");
     return {
       progressed: escalated,
       signature: lastSignature,
@@ -6188,7 +6183,7 @@ async function runDeployBundle(runtime, controls) {
     }
     if (result.paused) {
       log(controls, `DEPLOY paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-      return handlePausedStage(runtime, controls, "deploy", "deploy", "token-guard");
+      return handlePausedStage(runtime, controls, "deploy", "deploy", (result.pauseState && result.pauseState.reason) || "token-guard");
     }
     appendRunnerMetric(runtime, {
       stage: "deploy",
@@ -6368,7 +6363,7 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
 
   if (result.paused) {
     log(controls, `QA post-bundle paused by token guard (${(result.pauseState && result.pauseState.reason) || "limit"})`);
-    const escalated = handlePausedStage(runtime, controls, "qa-post", "released", "token-guard");
+    const escalated = handlePausedStage(runtime, controls, "qa-post", "released", (result.pauseState && result.pauseState.reason) || "token-guard");
     return {
       progressed: escalated,
       signature: lastSignature,
@@ -6541,7 +6536,7 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
-  resetGlobalPauseOnStartup(runtime, controls);
+  preserveGlobalPauseOnStartup(runtime, controls);
   cleanupRequirementJsonArtifacts(runtime, controls, "startup");
   pruneStaleWorkspaceBranches(runtime, controls, "startup");
   sanitizeBundleRegistryState(runtime, controls, "startup");
@@ -6739,5 +6734,8 @@ module.exports = {
     sanitizeBundleRegistryState,
     runUatBundle,
     runUatFullRegression,
+    preserveGlobalPauseOnStartup,
+    handlePausedStage,
+    shouldEscalatePausedStage,
   },
 };

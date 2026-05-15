@@ -74,7 +74,8 @@ default_mode = "full"
 agent_timeout_seconds = 1800
 # OPTIONAL: Stuck-Guard - wenn ein Agentprozess laenger ohne Ausgabe laeuft, wird er abgebrochen.
 no_output_timeout_seconds = 600
-# OPTIONAL: Wie oft ein Item wegen token-guard/pause warten darf, bevor es eskaliert wird.
+# OPTIONAL: Wie oft ein Item wegen nicht-auto-resume token-guard/pause warten darf, bevor es eskaliert wird.
+# Auto-resume Provider-Limits wie usage/rate/quota warten global bis resumeAfter und werden nicht ueber dieses Limit geroutet.
 max_paused_cycles_per_item = 2
 # OPTIONAL: false = kein lokaler Workspace-Branch pro Bundle; Delivery bleibt auf dem aktuell ausgecheckten Branch.
 workspace_branches_enabled = true
