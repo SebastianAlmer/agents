@@ -176,6 +176,8 @@ test("evaluateAlreadyImplementedEvidence fails on not-fulfilled or invalid evide
 
 test("normalizeWontDoDecisionReason allows only configured enum reasons", () => {
   assert.equal(__test.normalizeWontDoDecisionReason("duplicate"), "duplicate");
+  assert.equal(__test.normalizeWontDoDecisionReason("duplicate_of_released_carrier"), "duplicate");
+  assert.equal(__test.normalizeWontDoDecisionReason("duplicate-of-canonical-carrier"), "duplicate");
   assert.equal(__test.normalizeWontDoDecisionReason("already-implemented"), "already_implemented");
   assert.equal(__test.normalizeWontDoDecisionReason("random"), "");
 });

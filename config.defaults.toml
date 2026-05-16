@@ -397,6 +397,28 @@ reqeng = "gpt-5.4"
 #ux = "gpt-5.3-codex-spark"
 #deploy = "gpt-5.3-codex-spark"
 
+[model_fallback]
+# OPTIONAL: Nur aktiv, wenn ein Runner mit --allow-model-fallback gestartet wird.
+max_attempts_per_codex_run = 1
+reuse_thread = true
+trigger_reasons = ["usage_limit", "rate_limit", "too_many_requests", "retry_later", "insufficient_quota", "quota_exceeded"]
+
+[model_fallback.models]
+# OPTIONAL: Leer bedeutet: fuer diese Rolle gibt es keinen Fallback.
+default = ""
+po = ""
+arch = ""
+reqeng = ""
+sec = ""
+dev_fe = ""
+dev_be = ""
+dev_fs = ""
+qa = ""
+uat = ""
+maint = ""
+ux = ""
+deploy = ""
+
 [codex]
 # OPTIONAL: Basisprofil fuer generierte Codex-Configs.
 model = "gpt-5.3-codex-spark"

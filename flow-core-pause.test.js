@@ -165,6 +165,31 @@ test("startup pause probe respects probe cooldown", async () => {
   assert.equal(readPauseState(root).active, true);
 });
 
+test("startup pause probe can be forced for model fallback", async () => {
+  const root = mkTempRoot("agents-pause-probe-force-");
+  const now = new Date("2026-05-16T08:01:00.000Z");
+  writePauseState(root, {
+    active: true,
+    reason: "usage_limit",
+    source: "qa.js",
+    resumeAfter: "2026-05-16T09:00:00.000Z",
+    lastProbeAt: "2026-05-16T08:00:00.000Z",
+    nextProbeAfter: "2026-05-16T08:05:00.000Z",
+  });
+
+  const result = await probeActivePauseState({
+    agentsRoot: root,
+    repoRoot: root,
+    now,
+    cooldownMs: 300_000,
+    forceProbe: true,
+    runProbe: async () => ({ ok: true, exitCode: 0, stdout: "READY", stderr: "" }),
+  });
+
+  assert.equal(result.status, "cleared_probe_ok");
+  assert.equal(readPauseState(root), null);
+});
+
 test("delivery and PO do not escalate auto-resume pauses", () => {
   const runtime = {
     deliveryRunner: { maxPausedCyclesPerItem: 1 },

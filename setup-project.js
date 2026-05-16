@@ -712,6 +712,25 @@ function main() {
     models[key] = candidate || fallback;
   }
 
+  const baseModelFallback = base.model_fallback && typeof base.model_fallback === "object"
+    ? base.model_fallback
+    : {};
+  const baseFallbackModels = baseModelFallback.models && typeof baseModelFallback.models === "object"
+    ? baseModelFallback.models
+    : {};
+  const fallbackModels = {};
+  for (const key of Object.keys(modelDefaults)) {
+    fallbackModels[key] = String(baseFallbackModels[key] || "").trim();
+  }
+  const fallbackTriggerReasons = Array.isArray(baseModelFallback.trigger_reasons)
+    ? baseModelFallback.trigger_reasons.map((x) => String(x || "").trim()).filter(Boolean)
+    : ["usage_limit", "rate_limit", "too_many_requests", "retry_later", "insufficient_quota", "quota_exceeded"];
+  const fallbackMaxAttempts = Math.max(
+    0,
+    Number.parseInt(String(baseModelFallback.max_attempts_per_codex_run || 1), 10) || 1
+  );
+  const fallbackReuseThread = normalizeBool(baseModelFallback.reuse_thread, true);
+
   const codex = {
     model: (base.codex && base.codex.model) || models.default || "gpt-5.3-codex-spark",
     approval_policy: (base.codex && base.codex.approval_policy) || "never",
@@ -932,6 +951,26 @@ function main() {
     `maint = ${toTomlString(models.maint)}`,
     `ux = ${toTomlString(models.ux)}`,
     `deploy = ${toTomlString(models.deploy)}`,
+    "",
+    "[model_fallback]",
+    `max_attempts_per_codex_run = ${toTomlInt(fallbackMaxAttempts)}`,
+    `reuse_thread = ${toTomlBool(fallbackReuseThread)}`,
+    `trigger_reasons = [${fallbackTriggerReasons.map(toTomlString).join(", ")}]`,
+    "",
+    "[model_fallback.models]",
+    `default = ${toTomlString(fallbackModels.default)}`,
+    `po = ${toTomlString(fallbackModels.po)}`,
+    `arch = ${toTomlString(fallbackModels.arch)}`,
+    `reqeng = ${toTomlString(fallbackModels.reqeng)}`,
+    `sec = ${toTomlString(fallbackModels.sec)}`,
+    `dev_fe = ${toTomlString(fallbackModels.dev_fe)}`,
+    `dev_be = ${toTomlString(fallbackModels.dev_be)}`,
+    `dev_fs = ${toTomlString(fallbackModels.dev_fs)}`,
+    `qa = ${toTomlString(fallbackModels.qa)}`,
+    `uat = ${toTomlString(fallbackModels.uat)}`,
+    `maint = ${toTomlString(fallbackModels.maint)}`,
+    `ux = ${toTomlString(fallbackModels.ux)}`,
+    `deploy = ${toTomlString(fallbackModels.deploy)}`,
     "",
     "[codex]",
     `model = ${toTomlString(codex.model)}`,

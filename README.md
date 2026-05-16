@@ -255,6 +255,9 @@ Runner hotkeys (TTY):
 - `q` again: force stop
 - `Ctrl+C`: immediate stop
 
+Optional runner flags:
+- `--allow-model-fallback` / `--model-fallback`: on provider usage/rate/quota limits, try the configured per-role fallback model once before entering the global auto-resume pause.
+
 ## Config map (from coarse to fine)
 
 Primary file:
@@ -272,7 +275,7 @@ High-impact sections:
 - `[deploy]`, `[release_automation]`, `[release_history]`: deploy, release automation and release notes
 - `[thread_recovery]`: thread reset/rotation policy
 - `[memory]`: local memory read/update behavior
-- `[models]`, `[codex]`, `[codex.reasoning_effort]`: model/runtime profiles
+- `[models]`, `[model_fallback]`, `[codex]`, `[codex.reasoning_effort]`: model/runtime profiles
 
 ## Git safety
 

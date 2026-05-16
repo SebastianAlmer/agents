@@ -54,6 +54,7 @@ function parseArgs(argv) {
     mode: "",
     minBundle: NaN,
     maxBundle: NaN,
+    allowModelFallback: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -78,6 +79,10 @@ function parseArgs(argv) {
     }
     if (arg === "--no-verbose") {
       args.verbose = false;
+      continue;
+    }
+    if (arg === "--allow-model-fallback" || arg === "--model-fallback") {
+      args.allowModelFallback = true;
       continue;
     }
 
@@ -116,7 +121,7 @@ function parseArgs(argv) {
 
 function usage() {
   console.log(
-    "Usage: node delivery-runner.js [--mode full|fast|test] [--once] [--force] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N]"
+    "Usage: node delivery-runner.js [--mode full|fast|test] [--once] [--force] [--verbose|--no-verbose] [--min-bundle N] [--max-bundle N] [--allow-model-fallback]"
   );
 }
 
@@ -902,6 +907,82 @@ async function probeGlobalPauseOnStartup(runtime, controls, runnerLabel = "DELIV
     timeoutMs: Math.max(1, Number(policy.probeTimeoutSeconds || 45)) * 1000,
     cooldownMs: Math.max(10, Number(policy.probeCooldownSeconds || 300)) * 1000,
   });
+
+  if (result.status === "cleared_expired") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause expired and was cleared\n`);
+  } else if (result.status === "cleared_probe_ok") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause probe succeeded; global pause cleared\n`);
+  } else if (result.status === "still_paused") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause probe still limited; pause preserved\n`);
+  } else if (result.status === "probe_failed") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause probe failed without limit signal; pause preserved\n`);
+  } else if (result.status === "skipped" && result.reason === "probe-cooldown") {
+    log(controls, `startup pause probe skipped by cooldown next=${result.nextProbeAfter || "unknown"}`);
+  }
+  return result;
+}
+
+function resolvePauseProbeConfigArgs(runtime, agentLabel, allowModelFallback = false) {
+  let configPath = "";
+  if (
+    allowModelFallback &&
+    runtime &&
+    typeof runtime.resolveAgentFallbackCodexConfigPath === "function"
+  ) {
+    configPath = runtime.resolveAgentFallbackCodexConfigPath(agentLabel);
+  }
+  if (!configPath && runtime && typeof runtime.resolveAgentCodexConfigPath === "function") {
+    configPath = runtime.resolveAgentCodexConfigPath(agentLabel);
+  }
+  return configPath ? readConfigArgs(configPath) : [];
+}
+
+async function probeGlobalPauseOnStartupWithFallback(runtime, controls, runnerLabel, allowModelFallback) {
+  const policy = runtime && runtime.pausePolicy ? runtime.pausePolicy : {};
+  if (policy.probeOnStartup === false) {
+    return { status: "disabled" };
+  }
+  const state = getActivePauseState(runtime.agentsRoot);
+  if (!state || !isAutoResumePauseReason(state.reason)) {
+    return { status: state ? "skipped" : "none" };
+  }
+  const agentLabel = agentLabelForPauseSource(state.source, "DEPLOY");
+  const configArgs = resolvePauseProbeConfigArgs(runtime, agentLabel, false);
+  const result = await probeActivePauseState({
+    agentsRoot: runtime.agentsRoot,
+    repoRoot: runtime.repoRoot,
+    configArgs,
+    source: `${runnerLabel}:${agentLabel}`,
+    timeoutMs: Math.max(1, Number(policy.probeTimeoutSeconds || 45)) * 1000,
+    cooldownMs: Math.max(10, Number(policy.probeCooldownSeconds || 300)) * 1000,
+    forceProbe: Boolean(allowModelFallback),
+  });
+
+  if (result.status === "still_paused" && allowModelFallback) {
+    const fallbackConfigArgs = resolvePauseProbeConfigArgs(runtime, agentLabel, true);
+    const primaryModel = configArgs.join(" ");
+    const fallbackModel = fallbackConfigArgs.join(" ");
+    if (fallbackConfigArgs.length > 0 && fallbackModel !== primaryModel) {
+      log(controls, `startup pause default probe still limited; trying fallback for ${agentLabel}`);
+      const fallbackResult = await probeActivePauseState({
+        agentsRoot: runtime.agentsRoot,
+        repoRoot: runtime.repoRoot,
+        configArgs: fallbackConfigArgs,
+        source: `${runnerLabel}:${agentLabel}:fallback`,
+        timeoutMs: Math.max(1, Number(policy.probeTimeoutSeconds || 45)) * 1000,
+        cooldownMs: Math.max(10, Number(policy.probeCooldownSeconds || 300)) * 1000,
+        forceProbe: true,
+      });
+      if (fallbackResult.status === "cleared_probe_ok") {
+        process.stdout.write(`${timestampMinute()} DELIVERY: startup fallback probe succeeded; global pause cleared\n`);
+      } else if (fallbackResult.status === "still_paused") {
+        process.stdout.write(`${timestampMinute()} DELIVERY: startup fallback probe still limited; pause preserved\n`);
+      } else if (fallbackResult.status === "probe_failed") {
+        process.stdout.write(`${timestampMinute()} DELIVERY: startup fallback probe failed without limit signal; pause preserved\n`);
+      }
+      return fallbackResult;
+    }
+  }
 
   if (result.status === "cleared_expired") {
     process.stdout.write(`${timestampMinute()} DELIVERY: startup pause expired and was cleared\n`);
@@ -6988,6 +7069,7 @@ async function main() {
     usage();
     process.exit(0);
   }
+  process.env.CODEX_MODEL_FALLBACK_ENABLED = args.allowModelFallback ? "1" : "0";
   const runtime = loadRuntimeConfig(path.resolve(__dirname));
   ensureQueueDirs(runtime.queues);
   const mode = normalizeDeliveryMode(
@@ -7000,7 +7082,12 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
-  await probeGlobalPauseOnStartup(runtime, controls, "DELIVERY-RUNNER");
+  await probeGlobalPauseOnStartupWithFallback(
+    runtime,
+    controls,
+    "DELIVERY-RUNNER",
+    args.allowModelFallback
+  );
   preserveGlobalPauseOnStartup(runtime, controls);
   cleanupRequirementJsonArtifacts(runtime, controls, "startup");
   pruneStaleWorkspaceBranches(runtime, controls, "startup");
@@ -7207,6 +7294,9 @@ module.exports = {
     runUatFullRegression,
     preserveGlobalPauseOnStartup,
     probeGlobalPauseOnStartup,
+    probeGlobalPauseOnStartupWithFallback,
+    resolvePauseProbeConfigArgs,
+    parseArgs,
     agentLabelForPauseSource,
     handlePausedStage,
     shouldEscalatePausedStage,
