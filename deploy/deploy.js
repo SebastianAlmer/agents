@@ -170,6 +170,49 @@ function listReleasedFilesForBundle(releasedDir, bundleId) {
   return files.filter((file) => String(parseFrontMatter(file).bundle_id || "").trim() === normalizedBundleId);
 }
 
+function readBundleRegistrySafe(runtime) {
+  const agentsRoot = String((runtime && runtime.agentsRoot) || "").trim();
+  if (!agentsRoot) {
+    return null;
+  }
+  try {
+    const filePath = path.join(agentsRoot, ".runtime", "bundles", "registry.json");
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function listAdditionalIncompleteReleasedFiles(runtime, bundleId) {
+  const releasedDir = runtime && runtime.queues ? runtime.queues.released : "";
+  const files = listRequirementFiles(releasedDir);
+  const normalizedBundleId = String(bundleId || "").trim();
+  if (!normalizedBundleId || files.length === 0) {
+    return [];
+  }
+
+  const registry = readBundleRegistrySafe(runtime);
+  const bundles = registry && registry.bundles && typeof registry.bundles === "object"
+    ? registry.bundles
+    : {};
+  const incompleteBundleIds = new Set();
+  for (const [id, entry] of Object.entries(bundles)) {
+    const currentId = String(id || "").trim();
+    if (!currentId || currentId === normalizedBundleId) {
+      continue;
+    }
+    const status = String(entry && entry.status || "").trim().toLowerCase();
+    if (["active", "release-pending", "aborted", "blocked", "needs-human"].includes(status)) {
+      incompleteBundleIds.add(currentId);
+    }
+  }
+
+  return files.filter((file) => {
+    const fileBundleId = String(parseFrontMatter(file).bundle_id || "").trim();
+    return fileBundleId && incompleteBundleIds.has(fileBundleId);
+  });
+}
+
 function validateReleaseHistoryInputs(runtime) {
   const cfg = runtime.releaseHistory || {};
   const historyFile = String(cfg.file || "").trim();
@@ -204,6 +247,10 @@ function buildReleaseHistoryContext(runtime, args) {
   const releasedListText = releasedFiles.length > 0
     ? releasedFiles.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
     : "- None";
+  const additionalFiles = listAdditionalIncompleteReleasedFiles(runtime, args.bundleId);
+  const additionalListText = additionalFiles.length > 0
+    ? additionalFiles.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
+    : "- None";
   return [
     "# Context",
     `Repository root: ${runtime.repoRoot}`,
@@ -218,6 +265,8 @@ function buildReleaseHistoryContext(runtime, args) {
     `Released dir: ${runtime.queues.released}`,
     "Released requirements for bundle:",
     releasedListText,
+    "Additional released requirements from incomplete bundles:",
+    additionalListText,
     "Git actions are executed by flow runner, not by this agent.",
     "",
   ].join("\n");
@@ -370,4 +419,5 @@ module.exports = {
   listReleasedFilesForBundle,
   validateReleaseHistoryInputs,
   buildReleaseHistoryContext,
+  listAdditionalIncompleteReleasedFiles,
 };

@@ -670,6 +670,22 @@ function activeBundleDrained(runtime) {
   return true;
 }
 
+function activeBundleReleasedCount(runtime) {
+  const activeId = activeBundleId(runtime);
+  if (!activeId || !runtime || !runtime.queues || !runtime.queues.released) {
+    return 0;
+  }
+  return countFilesByBundle(runtime, "released", activeId);
+}
+
+function activeBundleHasReleasedFiles(runtime) {
+  return activeBundleReleasedCount(runtime) > 0;
+}
+
+function shouldAbortDrainedActiveBundle(runtime) {
+  return activeBundleDrained(runtime) && !activeBundleHasReleasedFiles(runtime);
+}
+
 function collectExecutionBundleIds(runtime) {
   const queues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy"];
   const ids = new Set();
@@ -783,7 +799,8 @@ function sanitizeBundleRegistryState(runtime, controls, reason = "startup") {
   const executionIds = collectExecutionBundleIds(runtime);
   if (activeId) {
     const activeHasFiles = hasBundleFilesInExecutionQueues(runtime, activeId);
-    if (!activeHasFiles) {
+    const activeHasReleasedFiles = countFilesByBundle(runtime, "released", activeId) > 0;
+    if (!activeHasFiles && !activeHasReleasedFiles) {
       if (executionIds.length === 1) {
         registry.active_bundle_id = executionIds[0];
         const current = registry.bundles[executionIds[0]] && typeof registry.bundles[executionIds[0]] === "object"
@@ -6773,6 +6790,112 @@ async function runPendingReleaseBundle(runtime, controls) {
   return true;
 }
 
+async function finalizeActiveReleasedBundle(runtime, controls, options = {}) {
+  const bundleId = activeBundleId(runtime);
+  if (!bundleId || activeBundleReleasedCount(runtime) === 0) {
+    return {
+      progressed: false,
+      reason: "no-active-released-bundle",
+    };
+  }
+  if (!activeBundleDrained(runtime)) {
+    return {
+      progressed: false,
+      reason: "active-bundle-not-drained",
+    };
+  }
+
+  const requireQaGate = options.requireQaGate !== false;
+  if (requireQaGate) {
+    const qaGate = parseGate(qaFinalGatePath(runtime));
+    if (!gatePass(qaGate)) {
+      log(controls, `RELEASE: waiting for final QA pass before releasing ${bundleId}`);
+      return {
+        progressed: false,
+        reason: "qa-final-not-passed",
+      };
+    }
+  }
+
+  const requireMaintGate = options.requireMaintGate !== false;
+  if (requireMaintGate) {
+    const maintPath = maintDecisionPath(runtime);
+    if (!fs.existsSync(maintPath)) {
+      log(controls, `RELEASE: waiting for MAINT post-deploy gate before releasing ${bundleId}`);
+      return {
+        progressed: false,
+        reason: "maint-gate-missing",
+      };
+    }
+    const maintGate = parseGate(maintPath);
+    if (!gatePass(maintGate)) {
+      log(controls, `RELEASE: waiting for MAINT post-deploy pass before releasing ${bundleId}`);
+      return {
+        progressed: false,
+        reason: "maint-gate-not-passed",
+      };
+    }
+  }
+
+  log(controls, `RELEASE: active released bundle ready bundle=${bundleId}`);
+  let deployInfo;
+  if (runtime.releaseAutomation && runtime.releaseAutomation.enabled) {
+    deployInfo = await runReleaseAutomation(runtime, controls, {
+      bundleId,
+      bundleKey: bundleId,
+    });
+    if (!deployInfo || !deployInfo.merged || !deployInfo.pushed) {
+      if (deployInfo && deployInfo.paused && deployInfo.pauseDisposition === "auto_resume") {
+        log(controls, "released bundle waiting for auto-resume pause");
+        return {
+          progressed: true,
+          reason: "release-paused",
+          deployInfo,
+        };
+      }
+      completeActiveBundle(runtime, controls, {
+        status: deployInfo && deployInfo.conflictEscalation ? "needs-human" : "blocked",
+        reason: deployInfo && deployInfo.conflictEscalation
+          ? `release escalation: ${path.basename(deployInfo.conflictEscalation)}`
+          : "released bundle release automation incomplete",
+        lastTransition: "release-blocked",
+        releaseVersion: deployInfo && deployInfo.version,
+        previousVersion: deployInfo && deployInfo.previousVersion,
+        releaseBranch: deployInfo && deployInfo.releaseBranch,
+        releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
+        releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
+        releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed",
+      });
+      return {
+        progressed: true,
+        reason: "release-blocked",
+        deployInfo,
+      };
+    }
+  } else {
+    deployInfo = deployCommitPush(runtime, controls);
+    createPullRequest(runtime, controls, deployInfo);
+  }
+
+  completeActiveBundle(runtime, controls, {
+    status: "completed",
+    reason: "released bundle release/deploy path completed",
+    lastTransition: "release-completed",
+    releaseVersion: deployInfo && deployInfo.version,
+    previousVersion: deployInfo && deployInfo.previousVersion,
+    releaseBranch: deployInfo && deployInfo.releaseBranch,
+    releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
+    releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
+    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+  });
+  clearBundleWorkspaceState(runtime);
+  return {
+    progressed: true,
+    reason: "release-completed",
+    deployInfo,
+  };
+}
+
 function releasedSignature(runtime) {
   const files = listQueueFiles(runtime.queues.released);
   const parts = [];
@@ -7044,6 +7167,16 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
     }
   }
 
+  if (performDeploy) {
+    const releasedFinal = await finalizeActiveReleasedBundle(runtime, controls, {
+      requireQaGate: runQaPost,
+      requireMaintGate: runMaint,
+    });
+    if (releasedFinal.progressed) {
+      progressed = true;
+    }
+  }
+
   return {
     progressed,
     releasedSignature: qaPost.signature || lastReleasedSignature,
@@ -7099,7 +7232,7 @@ async function main() {
 
   let underfilledCycles = 0;
   let lastReleasedSignature = "";
-  let lastMaintSignature = releasedSignature(runtime);
+  let lastMaintSignature = activeBundleHasReleasedFiles(runtime) ? "" : releasedSignature(runtime);
   let forceComprehensiveOnce = Boolean(args.force);
 
   while (!controls.stopRequested) {
@@ -7208,7 +7341,7 @@ async function main() {
       }
     }
 
-    if (activeBundleDrained(runtime)) {
+    if (shouldAbortDrainedActiveBundle(runtime)) {
       completeActiveBundle(runtime, controls, { status: "aborted" });
     }
 
@@ -7280,6 +7413,11 @@ module.exports = {
     ensureBundleWorkspaceBranch,
     enforceActiveWorkspaceBranch,
     completeReleasedBundleWithoutDeploy,
+    activeBundleDrained,
+    activeBundleReleasedCount,
+    activeBundleHasReleasedFiles,
+    shouldAbortDrainedActiveBundle,
+    finalizeActiveReleasedBundle,
     completeActiveBundle,
     activeBundleEntry,
     updateActiveBundleState,

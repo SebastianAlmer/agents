@@ -590,6 +590,145 @@ test("release-pending active bundles are not completed by direct released-drain 
   assert.equal(registry.bundles[bundleId].status, "release-pending");
 });
 
+test("drained active bundles with released files are not aborted", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-released-drain-test-"));
+  const queues = {
+    selected: path.join(root, "requirements", "selected"),
+    arch: path.join(root, "requirements", "arch"),
+    dev: path.join(root, "requirements", "dev"),
+    qa: path.join(root, "requirements", "qa"),
+    ux: path.join(root, "requirements", "ux"),
+    sec: path.join(root, "requirements", "sec"),
+    deploy: path.join(root, "requirements", "deploy"),
+    released: path.join(root, "requirements", "released"),
+  };
+  for (const dir of Object.values(queues)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const bundleId = "B0088";
+  fs.writeFileSync(
+    path.join(queues.released, `${bundleId}-REQ-RELEASED.md`),
+    [
+      "---",
+      "id: REQ-RELEASED",
+      "status: released",
+      `bundle_id: ${bundleId}`,
+      "---",
+      "",
+      "# Goal",
+      "released",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  writeBundleRegistry(root, {
+    active_bundle_id: bundleId,
+    ready_bundle_id: "",
+    bundles: {
+      [bundleId]: {
+        id: bundleId,
+        status: "active",
+      },
+    },
+  });
+
+  const runtime = { agentsRoot: root, queues };
+
+  assert.equal(__test.activeBundleDrained(runtime), true);
+  assert.equal(__test.activeBundleReleasedCount(runtime), 1);
+  assert.equal(__test.activeBundleHasReleasedFiles(runtime), true);
+  assert.equal(__test.shouldAbortDrainedActiveBundle(runtime), false);
+});
+
+test("sanitize preserves active bundles that have reached released", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-sanitize-released-test-"));
+  const queues = {
+    selected: path.join(root, "requirements", "selected"),
+    arch: path.join(root, "requirements", "arch"),
+    dev: path.join(root, "requirements", "dev"),
+    qa: path.join(root, "requirements", "qa"),
+    ux: path.join(root, "requirements", "ux"),
+    sec: path.join(root, "requirements", "sec"),
+    deploy: path.join(root, "requirements", "deploy"),
+    released: path.join(root, "requirements", "released"),
+    backlog: path.join(root, "requirements", "backlog"),
+    humanDecisionNeeded: path.join(root, "requirements", "human-decision-needed"),
+  };
+  for (const dir of Object.values(queues)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const bundleId = "B0090";
+  fs.writeFileSync(
+    path.join(queues.released, `${bundleId}-REQ-RELEASED.md`),
+    [
+      "---",
+      "id: REQ-RELEASED",
+      "status: released",
+      `bundle_id: ${bundleId}`,
+      "---",
+      "",
+      "# Goal",
+      "released",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  writeBundleRegistry(root, {
+    active_bundle_id: bundleId,
+    ready_bundle_id: "",
+    bundles: {
+      [bundleId]: {
+        id: bundleId,
+        status: "active",
+      },
+    },
+  });
+
+  const runtime = { agentsRoot: root, queues };
+  const changed = __test.sanitizeBundleRegistryState(runtime, { verbose: false }, "test");
+  const registry = JSON.parse(fs.readFileSync(path.join(root, ".runtime", "bundles", "registry.json"), "utf8"));
+
+  assert.equal(Boolean(changed), false);
+  assert.equal(registry.active_bundle_id, bundleId);
+  assert.equal(registry.bundles[bundleId].status, "active");
+});
+
+test("drained active bundles without released files can be aborted", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-empty-drain-test-"));
+  const queues = {
+    selected: path.join(root, "requirements", "selected"),
+    arch: path.join(root, "requirements", "arch"),
+    dev: path.join(root, "requirements", "dev"),
+    qa: path.join(root, "requirements", "qa"),
+    ux: path.join(root, "requirements", "ux"),
+    sec: path.join(root, "requirements", "sec"),
+    deploy: path.join(root, "requirements", "deploy"),
+    released: path.join(root, "requirements", "released"),
+  };
+  for (const dir of Object.values(queues)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  writeBundleRegistry(root, {
+    active_bundle_id: "B0089",
+    ready_bundle_id: "",
+    bundles: {
+      B0089: {
+        id: "B0089",
+        status: "active",
+      },
+    },
+  });
+
+  const runtime = { agentsRoot: root, queues };
+
+  assert.equal(__test.activeBundleDrained(runtime), true);
+  assert.equal(__test.activeBundleReleasedCount(runtime), 0);
+  assert.equal(__test.shouldAbortDrainedActiveBundle(runtime), true);
+});
+
 test("quarantineForeignExecutionQueues blocks foreign active-stage bundle files", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-scope-test-"));
   const qaDir = path.join(root, "requirements", "qa");

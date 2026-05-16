@@ -56,9 +56,31 @@ test("buildReleaseHistoryContext includes version, bundle and released requireme
     "---\nid: REQ-TEST\nbundle_id: B0013\n---\n# Goal\n",
     "utf8"
   );
+  fs.mkdirSync(path.join(root, "agents", ".runtime", "bundles"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "agents", ".runtime", "bundles", "registry.json"),
+    JSON.stringify({
+      bundles: {
+        B0012: { id: "B0012", status: "completed" },
+        B0014: { id: "B0014", status: "aborted" },
+      },
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(releasedDir, "REQ-OLD-COMPLETED.md"),
+    "---\nid: REQ-OLD-COMPLETED\nbundle_id: B0012\n---\n# Goal\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(releasedDir, "REQ-OLD-INCOMPLETE.md"),
+    "---\nid: REQ-OLD-INCOMPLETE\nbundle_id: B0014\n---\n# Goal\n",
+    "utf8"
+  );
 
   const context = buildReleaseHistoryContext(
     {
+      agentsRoot: path.join(root, "agents"),
       repoRoot: path.join(root, "repo"),
       releaseHistory: {
         file: path.join(docsDir, "release-history.md"),
@@ -79,4 +101,7 @@ test("buildReleaseHistoryContext includes version, bundle and released requireme
   assert.match(context, /Bundle ID: B0013/);
   assert.match(context, /Version: v0\.1\.13/);
   assert.match(context, /REQ-TEST\.md/);
+  assert.match(context, /Additional released requirements from incomplete bundles:/);
+  assert.match(context, /REQ-OLD-INCOMPLETE\.md/);
+  assert.doesNotMatch(context, /REQ-OLD-COMPLETED\.md/);
 });
