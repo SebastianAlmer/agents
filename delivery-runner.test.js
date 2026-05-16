@@ -538,6 +538,80 @@ test("release history update blocks release when history and source are missing"
   assert.match(result.reason, /source cannot be read/);
 });
 
+test("release history update appends fallback section when deploy agent omits version", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-release-history-fallback-test-"));
+  const repoRoot = path.join(root, "repo");
+  const historyFile = path.join(repoRoot, "docs", "release-history.md");
+  const releasedDir = path.join(root, "requirements", "released");
+  fs.mkdirSync(path.join(root, "deploy"), { recursive: true });
+  fs.mkdirSync(path.dirname(historyFile), { recursive: true });
+  fs.mkdirSync(releasedDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "deploy", "deploy.js"),
+    "process.exit(0);\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    historyFile,
+    [
+      "# Release History",
+      "",
+      "## Fortschreibungsregel",
+      "",
+      "- Keep releases documented.",
+      "",
+      "## v0.1.17",
+      "",
+      "Existing release.",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(releasedDir, "B0021-REQ-BIO-043-align-footer-status-with-standard-runtime-env.md"),
+    [
+      "---",
+      "id: REQ-BIO-043",
+      "status: released",
+      "bundle_id: B0021",
+      "---",
+      "",
+      "# Goal",
+      "Align footer status.",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const runtime = {
+    agentsRoot: root,
+    releaseHistory: {
+      enabled: true,
+      agent: "deploy",
+      file: historyFile,
+      sourceFile: "",
+    },
+    queues: {
+      released: releasedDir,
+    },
+  };
+
+  const result = await __test.runReleaseHistoryUpdate(runtime, { verbose: false }, {
+    bundleId: "B0021",
+    version: "0.1.18",
+    previousVersion: "0.1.17",
+  });
+  const raw = fs.readFileSync(historyFile, "utf8");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, false);
+  assert.match(result.reason, /fallback release history section appended/);
+  assert.match(raw, /## v0\.1\.18/);
+  assert.match(raw, /Bundle: `B0021`/);
+  assert.match(raw, /`REQ-BIO-043`/);
+  assert.ok(raw.indexOf("## v0.1.18") < raw.indexOf("## v0.1.17"));
+});
+
 test("release-pending active bundles are not completed by direct released-drain cleanup", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-release-pending-test-"));
   const releasedDir = path.join(root, "requirements", "released");

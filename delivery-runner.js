@@ -6143,6 +6143,89 @@ function normalizeVersionTag(version) {
   return value.startsWith("v") ? value : `v${value}`;
 }
 
+function releaseHistoryRequirementIds(runtime, bundleId) {
+  const releasedDir = runtime && runtime.queues ? runtime.queues.released : "";
+  const bundle = String(bundleId || "").trim();
+  if (!releasedDir || !bundle || !fs.existsSync(releasedDir)) {
+    return [];
+  }
+  return fs.readdirSync(releasedDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name.startsWith(`${bundle}-`))
+    .map((entry) => {
+      const filePath = path.join(releasedDir, entry.name);
+      const raw = fs.readFileSync(filePath, "utf8");
+      const frontmatterId = raw.match(/^id:\s*(.+)$/m);
+      return frontmatterId ? frontmatterId[1].trim() : entry.name.replace(/\.md$/, "");
+    })
+    .filter(Boolean)
+    .sort();
+}
+
+function buildReleaseHistoryFallbackSection(runtime, context = {}, version = "", previousVersion = "") {
+  const releaseVersion = normalizeVersionTag(version);
+  const priorVersion = normalizeVersionTag(previousVersion);
+  const bundle = String(context.bundleId || context.bundleKey || "unknown").trim() || "unknown";
+  const requirementIds = releaseHistoryRequirementIds(runtime, bundle);
+  const requirementLines = requirementIds.length > 0
+    ? requirementIds.map((id) => `- \`${id}\``)
+    : [`- \`${bundle}\``];
+
+  return [
+    `## ${releaseVersion}`,
+    "",
+    `Bundle/Tag: \`${releaseVersion}\` (Bundle: \`${bundle}\`${priorVersion ? `, previous \`${priorVersion}\`` : ""})`,
+    "",
+    "### Nutzerfunktion",
+    `- Release-History-Fallback: Bundle \`${bundle}\` wurde durch die Runner-Release-Automation fortgefuehrt. Die fachliche Detailbeschreibung kann in einem spaeteren Doku-Pass redaktionell verfeinert werden.`,
+    "",
+    "### Technische Aenderung",
+    `- Der Delivery-Runner hat diesen Abschnitt automatisch ergaenzt, weil der DEPLOY-Agent keinen Eintrag fuer \`${releaseVersion}\` geschrieben hat.`,
+    "- Details bleiben ueber die unten gelisteten Requirements, den Release-Commit und die Build-/Versionsmetadaten nachvollziehbar.",
+    "",
+    "### Bekannte Luecken",
+    "- Dieser Fallback-Abschnitt ist bewusst knapp und ersetzt keine spaetere redaktionelle Release-Notiz.",
+    "",
+    "### Requirements",
+    ...requirementLines,
+    "",
+  ].join("\n");
+}
+
+function appendReleaseHistoryFallback(runtime, controls, context = {}, outcome = {}) {
+  const historyFile = String(outcome.historyFile || "").trim();
+  const version = normalizeVersionTag(outcome.version || context.version || "");
+  if (!historyFile || !version || !fs.existsSync(historyFile)) {
+    return { ok: false, reason: "release history fallback cannot run without existing history file and version" };
+  }
+
+  const raw = fs.readFileSync(historyFile, "utf8");
+  if (raw.includes(version)) {
+    return { ok: true, changed: false, reason: "version already present" };
+  }
+
+  const section = buildReleaseHistoryFallbackSection(
+    runtime,
+    context,
+    version,
+    outcome.previousVersion || context.previousVersion || ""
+  );
+  const firstReleaseIndex = raw.search(/\n## v\d+\.\d+\.\d+\b/);
+  const nextRaw = firstReleaseIndex >= 0
+    ? `${raw.slice(0, firstReleaseIndex + 1)}${section}\n${raw.slice(firstReleaseIndex + 1)}`
+    : `${raw.replace(/\s*$/, "\n\n")}${section}\n`;
+  fs.writeFileSync(historyFile, nextRaw, "utf8");
+  log(controls, `RELEASE: release history fallback appended ${version}`);
+  appendRunnerMetric(runtime, {
+    stage: "release-history",
+    queue: "released",
+    item_key: String(context.bundleId || context.bundleKey || "bundle").trim() || "bundle",
+    result: "fallback-pass",
+    release_history_file: historyFile,
+    release_version: version,
+  });
+  return { ok: true, changed: true, reason: "fallback release history section appended" };
+}
+
 async function runReleaseHistoryUpdate(runtime, controls, context = {}) {
   const cfg = runtime && runtime.releaseHistory ? runtime.releaseHistory : {};
   const outcome = {
@@ -6250,9 +6333,13 @@ async function runReleaseHistoryUpdate(runtime, controls, context = {}) {
   }
   const raw = fs.readFileSync(outcome.historyFile, "utf8");
   if (outcome.version && !raw.includes(outcome.version)) {
-    outcome.ok = false;
-    outcome.reason = `release history does not contain version ${outcome.version}`;
-    return outcome;
+    const fallback = appendReleaseHistoryFallback(runtime, controls, context, outcome);
+    if (!fallback.ok) {
+      outcome.ok = false;
+      outcome.reason = `release history does not contain version ${outcome.version}; fallback failed: ${fallback.reason}`;
+      return outcome;
+    }
+    outcome.reason = fallback.reason;
   }
 
   appendRunnerMetric(runtime, {
