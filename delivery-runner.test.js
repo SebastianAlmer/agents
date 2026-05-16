@@ -511,6 +511,85 @@ test("fast downstream completes active bundle after direct release", async () =>
   assert.equal(fs.existsSync(path.join(runtime.queues.released, `${bundleId}-REQ-DEPLOY.md`)), true);
 });
 
+test("release history update blocks release when history and source are missing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-release-history-missing-test-"));
+  const runtime = {
+    agentsRoot: root,
+    releaseHistory: {
+      enabled: true,
+      agent: "deploy",
+      file: path.join(root, "repo", "docs", "release-history.md"),
+      sourceFile: path.join(root, "repo", "docs", "missing-source.md"),
+    },
+    queues: {
+      released: path.join(root, "requirements", "released"),
+    },
+  };
+  fs.mkdirSync(runtime.queues.released, { recursive: true });
+
+  const result = await __test.runReleaseHistoryUpdate(runtime, { verbose: false }, {
+    bundleId: "B0013",
+    version: "0.1.13",
+    previousVersion: "0.1.12",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, false);
+  assert.match(result.reason, /source cannot be read/);
+});
+
+test("release-pending active bundles are not completed by direct released-drain cleanup", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-release-pending-test-"));
+  const releasedDir = path.join(root, "requirements", "released");
+  fs.mkdirSync(releasedDir, { recursive: true });
+  const bundleId = "B0077";
+  fs.writeFileSync(
+    path.join(releasedDir, `${bundleId}-REQ-RELEASED.md`),
+    [
+      "---",
+      "id: REQ-RELEASED",
+      "status: released",
+      `bundle_id: ${bundleId}`,
+      "---",
+      "",
+      "# Goal",
+      "released",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  writeBundleRegistry(root, {
+    active_bundle_id: bundleId,
+    ready_bundle_id: "",
+    bundles: {
+      [bundleId]: {
+        id: bundleId,
+        status: "release-pending",
+        releaseVersion: "0.1.77",
+      },
+    },
+  });
+
+  const completed = __test.completeReleasedBundleWithoutDeploy({
+    agentsRoot: root,
+    queues: {
+      selected: path.join(root, "requirements", "selected"),
+      arch: path.join(root, "requirements", "arch"),
+      dev: path.join(root, "requirements", "dev"),
+      qa: path.join(root, "requirements", "qa"),
+      ux: path.join(root, "requirements", "ux"),
+      sec: path.join(root, "requirements", "sec"),
+      deploy: path.join(root, "requirements", "deploy"),
+      released: releasedDir,
+    },
+  }, { verbose: false });
+
+  const registry = JSON.parse(fs.readFileSync(path.join(root, ".runtime", "bundles", "registry.json"), "utf8"));
+  assert.equal(completed, false);
+  assert.equal(registry.active_bundle_id, bundleId);
+  assert.equal(registry.bundles[bundleId].status, "release-pending");
+});
+
 test("quarantineForeignExecutionQueues blocks foreign active-stage bundle files", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-scope-test-"));
   const qaDir = path.join(root, "requirements", "qa");

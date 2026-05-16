@@ -18,9 +18,19 @@ const { loadRuntimeConfig, ensureQueueDirs } = require("../lib/runtime");
 installTimestampedConsole();
 
 function parseArgs(argv) {
-  const args = { requirement: "", auto: false, finalPass: false, batch: false };
+  const args = {
+    requirement: "",
+    auto: false,
+    finalPass: false,
+    batch: false,
+    releaseHistory: false,
+    bundleId: "",
+    version: "",
+    previousVersion: "",
+  };
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
+    const raw = String(argv[i] || "");
+    const arg = raw;
     const normalized = arg.toLowerCase();
     if (normalized === "-auto" || normalized === "--auto") {
       args.auto = true;
@@ -34,9 +44,40 @@ function parseArgs(argv) {
       args.batch = true;
       continue;
     }
+    if (normalized === "--release-history" || normalized === "-release-history") {
+      args.releaseHistory = true;
+      continue;
+    }
     if (normalized === "-requirement" || normalized === "--requirement") {
       args.requirement = argv[i + 1] || "";
       i++;
+      continue;
+    }
+    if (normalized === "--bundle-id" || normalized === "-bundle-id") {
+      args.bundleId = argv[i + 1] || "";
+      i++;
+      continue;
+    }
+    if (normalized.startsWith("--bundle-id=")) {
+      args.bundleId = String(raw.split("=", 2)[1] || "");
+      continue;
+    }
+    if (normalized === "--version" || normalized === "-version") {
+      args.version = argv[i + 1] || "";
+      i++;
+      continue;
+    }
+    if (normalized.startsWith("--version=")) {
+      args.version = String(raw.split("=", 2)[1] || "");
+      continue;
+    }
+    if (normalized === "--previous-version" || normalized === "-previous-version") {
+      args.previousVersion = argv[i + 1] || "";
+      i++;
+      continue;
+    }
+    if (normalized.startsWith("--previous-version=")) {
+      args.previousVersion = String(raw.split("=", 2)[1] || "");
       continue;
     }
   }
@@ -120,12 +161,74 @@ function summarizeScopes(files) {
   return summary;
 }
 
+function listReleasedFilesForBundle(releasedDir, bundleId) {
+  const files = listRequirementFiles(releasedDir);
+  const normalizedBundleId = String(bundleId || "").trim();
+  if (!normalizedBundleId) {
+    return files;
+  }
+  return files.filter((file) => String(parseFrontMatter(file).bundle_id || "").trim() === normalizedBundleId);
+}
+
+function validateReleaseHistoryInputs(runtime) {
+  const cfg = runtime.releaseHistory || {};
+  const historyFile = String(cfg.file || "").trim();
+  const sourceFile = String(cfg.sourceFile || "").trim();
+  if (!historyFile) {
+    throw new Error("Release history file is not configured");
+  }
+  if (fs.existsSync(historyFile)) {
+    return {
+      historyFile,
+      sourceFile,
+      historyExists: true,
+      sourceExists: Boolean(sourceFile && fs.existsSync(sourceFile)),
+    };
+  }
+  if (!sourceFile || !fs.existsSync(sourceFile)) {
+    throw new Error(
+      `Release history file missing and source cannot be read: history=${historyFile}, source=${sourceFile || "<none>"}`
+    );
+  }
+  return {
+    historyFile,
+    sourceFile,
+    historyExists: false,
+    sourceExists: true,
+  };
+}
+
+function buildReleaseHistoryContext(runtime, args) {
+  const paths = validateReleaseHistoryInputs(runtime);
+  const releasedFiles = listReleasedFilesForBundle(runtime.queues.released, args.bundleId);
+  const releasedListText = releasedFiles.length > 0
+    ? releasedFiles.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
+    : "- None";
+  return [
+    "# Context",
+    `Repository root: ${runtime.repoRoot}`,
+    "Release history mode: true",
+    `Bundle ID: ${String(args.bundleId || "").trim() || "unknown"}`,
+    `Version: ${String(args.version || "").trim() || "unknown"}`,
+    `Previous version: ${String(args.previousVersion || "").trim() || "unknown"}`,
+    `Release history file: ${paths.historyFile}`,
+    `Release history file exists: ${paths.historyExists ? "yes" : "no"}`,
+    `Release history source file: ${paths.sourceFile || "None"}`,
+    `Release history source exists: ${paths.sourceExists ? "yes" : "no"}`,
+    `Released dir: ${runtime.queues.released}`,
+    "Released requirements for bundle:",
+    releasedListText,
+    "Git actions are executed by flow runner, not by this agent.",
+    "",
+  ].join("\n");
+}
+
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (process.env.CODEX_FLOW_AUTO === "1") {
     parsed.auto = true;
   }
-  const { requirement, auto, finalPass, batch } = parsed;
+  const { requirement, auto, finalPass, batch, releaseHistory } = parsed;
 
   const agentRoot = __dirname;
   const runtime = loadRuntimeConfig(path.resolve(agentRoot, ".."));
@@ -138,7 +241,9 @@ async function main() {
 
   let reqFile = "";
   let deployFiles = [];
-  if (!finalPass) {
+  if (releaseHistory) {
+    console.log("DEPLOY: release history mode");
+  } else if (!finalPass) {
     console.log(`DEPLOY: scan deploy ${deployDir}`);
     deployFiles = listRequirementFiles(deployDir);
 
@@ -202,7 +307,9 @@ async function main() {
   const scopeSummary = summarizeScopes(deployFiles);
   const scopeSummaryText = `frontend=${scopeSummary.frontend}, backend=${scopeSummary.backend}, fullstack=${scopeSummary.fullstack}, unknown=${scopeSummary.unknown}`;
 
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nBatch mode: ${batch}\nDeploy dir: ${deployDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nDeploy mode: ${runtime.deploy.mode}\nFinal push on success: ${runtime.deploy.finalPushOnSuccess}\nDeploy queue files:\n${deployListText}\nBatch scope summary: ${scopeSummaryText}\nGit actions are executed by flow runner, not by this agent.\n`;
+  const context = releaseHistory
+    ? buildReleaseHistoryContext(runtime, parsed)
+    : `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nBatch mode: ${batch}\nRelease history mode: false\nDeploy dir: ${deployDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nDeploy mode: ${runtime.deploy.mode}\nFinal push on success: ${runtime.deploy.finalPushOnSuccess}\nDeploy queue files:\n${deployListText}\nBatch scope summary: ${scopeSummaryText}\nGit actions are executed by flow runner, not by this agent.\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("DEPLOY"));
@@ -211,6 +318,7 @@ async function main() {
     agentsRoot: runtime.agentsRoot,
     agentRoot,
     auto,
+    threadKey: releaseHistory ? "release-history" : "",
   });
   let threadId = readThreadId(threadFile);
 
@@ -250,7 +358,16 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  parseArgs,
+  listReleasedFilesForBundle,
+  validateReleaseHistoryInputs,
+  buildReleaseHistoryContext,
+};

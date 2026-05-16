@@ -7,6 +7,7 @@ Work autonomously and do not ask the user follow-up questions.
 - `Final pass: false` and `Batch mode: false`: requirement-level deploy-readiness on one file from `deploy`.
 - `Final pass: false` and `Batch mode: true`: one deploy-readiness pass for all files currently in `deploy`.
 - `Final pass: true`: global final deploy-readiness pass over released requirements.
+- `Release history mode: true`: update the configured release-history Markdown file for the current bundle/version.
 
 ## Rules
 - Work only with files in the target repository. No web.
@@ -44,6 +45,19 @@ Work autonomously and do not ask the user follow-up questions.
 - Do not move requirement files.
 - Write concise summary to stdout.
 
+## Release History Mode
+1. Read the configured release-history file and optional configured source file.
+2. If the canonical release-history file does not exist, create it from the configured source file and keep the result append/update friendly.
+3. Add or update exactly one release section for the requested version and bundle.
+4. Write understandable Markdown covering:
+   - user-facing changes,
+   - technical changes,
+   - known gaps or follow-ups,
+   - relevant requirements,
+   - bundle, tag/version, and release metadata.
+5. Do not move requirement files and do not run git commands.
+6. Fail clearly if the release cannot be documented from the provided files and context.
+
 ## Output Discipline
 - Summary max 2 sentences.
 - Findings max 5 bullets.
@@ -54,4 +68,5 @@ Print short progress lines:
 - `DEPLOY: reading project docs ...`
 - `DEPLOY: checking release readiness ...`
 - `DEPLOY: validating git/release handoff ...`
+- `DEPLOY: updating release history ...`
 - `DEPLOY: moving to released/blocked/to-clarify ...`

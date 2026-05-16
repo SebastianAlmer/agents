@@ -18,8 +18,10 @@ const {
   parseFrontMatter,
   normalizeStatus,
   getActivePauseState,
+  probeActivePauseState,
   isAutoResumePauseReason,
   isHumanEscalationPauseReason,
+  pauseDispositionForReason,
   readBundleRegistry,
   writeBundleRegistry,
 } = require("./lib/flow-core");
@@ -200,6 +202,31 @@ function appendRunnerMetric(runtime, event) {
       runner: "delivery",
       ...event,
     };
+    let bundleEntry = null;
+    if (!payload.active_bundle_id) {
+      try {
+        bundleEntry = activeBundleEntry(runtime);
+        payload.active_bundle_id = (bundleEntry && bundleEntry.id) || "";
+      } catch {
+        payload.active_bundle_id = "";
+      }
+    }
+    if (!bundleEntry && payload.active_bundle_id) {
+      try {
+        bundleEntry = activeBundleEntry(runtime);
+      } catch {
+        bundleEntry = null;
+      }
+    }
+    if (!payload.last_transition && bundleEntry) {
+      payload.last_transition = String(bundleEntry.lastTransition || "");
+    }
+    if (!payload.release_history_status && bundleEntry) {
+      payload.release_history_status = String(bundleEntry.releaseHistoryStatus || "");
+    }
+    if (!payload.gate_class && payload.failure_type) {
+      payload.gate_class = String(payload.failure_type).startsWith("technical_") ? "technical" : "business";
+    }
     fs.appendFileSync(eventPath, `${JSON.stringify(payload)}\n`, "utf8");
 
     let summary = { totals: { events: 0 }, byRunner: {}, byStage: {}, byResult: {} };
@@ -259,6 +286,7 @@ function handlePausedStage(runtime, controls, stageName, queueName, reason = "pa
     result: "paused",
     attempt: current,
     reason: pauseReason,
+    pause_disposition: pauseDispositionForReason(pauseReason),
   });
   const limit = pausedLimit(runtime);
   if (shouldEscalatePausedStage(runtime, pauseReason, current)) {
@@ -572,10 +600,55 @@ function completeActiveBundle(runtime, controls, details = {}) {
     id: activeId,
     status: String(details.status || "completed").trim() || "completed",
     finishedAt: now,
+    finishedReason: String(details.reason || details.finishedReason || "").trim(),
+    lastTransition: String(details.lastTransition || "bundle-finished").trim(),
+    releaseVersion: String(details.releaseVersion || current.releaseVersion || "").trim(),
+    previousVersion: String(details.previousVersion || current.previousVersion || "").trim(),
+    releaseBranch: String(details.releaseBranch || current.releaseBranch || "").trim(),
+    releaseHistoryFile: String(details.releaseHistoryFile || current.releaseHistoryFile || "").trim(),
+    releaseHistoryStatus: String(details.releaseHistoryStatus || current.releaseHistoryStatus || "").trim(),
+    releaseHistoryUpdated: Boolean(
+      details.releaseHistoryUpdated !== undefined
+        ? details.releaseHistoryUpdated
+        : current.releaseHistoryUpdated
+    ),
   };
   registry.active_bundle_id = "";
   writeBundleRegistryForRuntime(runtime, registry);
   log(controls, `bundle completed id=${activeId} status=${registry.bundles[activeId].status}`);
+}
+
+function updateActiveBundleState(runtime, patch = {}) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const activeId = String(registry.active_bundle_id || "").trim();
+  if (!activeId) {
+    return null;
+  }
+  const current = registry.bundles[activeId] && typeof registry.bundles[activeId] === "object"
+    ? registry.bundles[activeId]
+    : {};
+  registry.bundles[activeId] = {
+    ...current,
+    ...patch,
+    id: activeId,
+  };
+  writeBundleRegistryForRuntime(runtime, registry);
+  return registry.bundles[activeId];
+}
+
+function activeBundleEntry(runtime) {
+  const registry = readBundleRegistryForRuntime(runtime);
+  const activeId = String(registry.active_bundle_id || "").trim();
+  if (!activeId) {
+    return null;
+  }
+  const entry = registry.bundles[activeId] && typeof registry.bundles[activeId] === "object"
+    ? registry.bundles[activeId]
+    : {};
+  return {
+    id: activeId,
+    ...entry,
+  };
 }
 
 function activeBundleDrained(runtime) {
@@ -787,8 +860,69 @@ function preserveGlobalPauseOnStartup(runtime, controls) {
   log(controls, "global pause state preserved on startup");
 }
 
+function agentLabelForPauseSource(source, fallback = "DEPLOY") {
+  const name = path.basename(String(source || "")).toLowerCase().replace(/\.js$/i, "");
+  const map = {
+    po: "PO",
+    arch: "ARCH",
+    qa: "QA",
+    uat: "UAT",
+    sec: "SEC",
+    ux: "UX",
+    deploy: "DEPLOY",
+    maint: "MAINT",
+    reqeng: "REQENG",
+    "dev-agent-runner": "DEV_FS",
+    "dev-fe": "DEV_FE",
+    "dev-be": "DEV_BE",
+    "dev-fs": "DEV_FS",
+  };
+  return map[name] || fallback;
+}
+
+async function probeGlobalPauseOnStartup(runtime, controls, runnerLabel = "DELIVERY-RUNNER") {
+  const policy = runtime && runtime.pausePolicy ? runtime.pausePolicy : {};
+  if (policy.probeOnStartup === false) {
+    return { status: "disabled" };
+  }
+  const state = getActivePauseState(runtime.agentsRoot);
+  if (!state || !isAutoResumePauseReason(state.reason)) {
+    return { status: state ? "skipped" : "none" };
+  }
+  const agentLabel = agentLabelForPauseSource(state.source, "DEPLOY");
+  const configPath = runtime && typeof runtime.resolveAgentCodexConfigPath === "function"
+    ? runtime.resolveAgentCodexConfigPath(agentLabel)
+    : "";
+  const configArgs = configPath ? readConfigArgs(configPath) : [];
+  const result = await probeActivePauseState({
+    agentsRoot: runtime.agentsRoot,
+    repoRoot: runtime.repoRoot,
+    configArgs,
+    source: `${runnerLabel}:${agentLabel}`,
+    timeoutMs: Math.max(1, Number(policy.probeTimeoutSeconds || 45)) * 1000,
+    cooldownMs: Math.max(10, Number(policy.probeCooldownSeconds || 300)) * 1000,
+  });
+
+  if (result.status === "cleared_expired") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause expired and was cleared\n`);
+  } else if (result.status === "cleared_probe_ok") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause probe succeeded; global pause cleared\n`);
+  } else if (result.status === "still_paused") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause probe still limited; pause preserved\n`);
+  } else if (result.status === "probe_failed") {
+    process.stdout.write(`${timestampMinute()} DELIVERY: startup pause probe failed without limit signal; pause preserved\n`);
+  } else if (result.status === "skipped" && result.reason === "probe-cooldown") {
+    log(controls, `startup pause probe skipped by cooldown next=${result.nextProbeAfter || "unknown"}`);
+  }
+  return result;
+}
+
 function completeReleasedBundleWithoutDeploy(runtime, controls) {
   if (!activeBundleId(runtime)) {
+    return false;
+  }
+  const entry = activeBundleEntry(runtime);
+  if (entry && String(entry.status || "").trim() === "release-pending") {
     return false;
   }
   if (!activeBundleDrained(runtime)) {
@@ -4444,6 +4578,7 @@ function handleStrictGateFailure(runtime, controls, options) {
   const maxFixCycles = Math.max(1, Number(runtime.deliveryQuality && runtime.deliveryQuality.maxFixCycles || 1));
   const summary = truncateForQueueNote(String(gate && gate.summary || `${gateName} gate failed`), 240);
   const allowRouteToDev = Boolean(runtime.deliveryQuality && runtime.deliveryQuality.routeToDevOnFail);
+  const gateClass = isTechnicalGateFailure(gate) ? "technical" : "business";
 
   if (allowRouteToDev && attempt <= maxFixCycles) {
     moveAll(
@@ -4453,6 +4588,17 @@ function handleStrictGateFailure(runtime, controls, options) {
       "dev",
       `Delivery runner: ${String(gateName || "").toUpperCase()} strict fail attempt ${attempt}/${maxFixCycles} -> dev (summary: ${summary})`
     );
+    appendRunnerMetric(runtime, {
+      stage: gateName,
+      queue: sourceQueue,
+      item_key: bundleKey,
+      result: "fail",
+      gate_class: gateClass,
+      gate_status: String(gate && gate.status || "fail"),
+      reason: summary,
+      routed_to: "dev",
+      attempt,
+    });
     log(controls, `${String(gateName || "").toUpperCase()} strict fail routed to DEV attempt=${attempt}/${maxFixCycles}`);
     return {
       progressed: true,
@@ -4469,6 +4615,17 @@ function handleStrictGateFailure(runtime, controls, options) {
     "blocked",
     `Delivery runner: ${String(gateName || "").toUpperCase()} strict fail max attempts reached -> blocked (summary: ${summary})`
   );
+  appendRunnerMetric(runtime, {
+    stage: gateName,
+    queue: sourceQueue,
+    item_key: bundleKey,
+    result: "fail",
+    gate_class: gateClass,
+    gate_status: String(gate && gate.status || "fail"),
+    reason: summary,
+    routed_to: "blocked",
+    attempt,
+  });
   log(controls, `${String(gateName || "").toUpperCase()} strict fail escalated to blocked after attempt=${attempt}`);
   return {
     progressed: true,
@@ -5816,6 +5973,143 @@ function readUnmergedConflictFiles(repoRoot) {
     .slice(0, 50);
 }
 
+function releaseHistoryEnabled(runtime) {
+  const cfg = runtime && runtime.releaseHistory ? runtime.releaseHistory : {};
+  return Boolean(cfg.enabled);
+}
+
+function normalizeVersionTag(version) {
+  const value = String(version || "").trim();
+  if (!value) {
+    return "";
+  }
+  return value.startsWith("v") ? value : `v${value}`;
+}
+
+async function runReleaseHistoryUpdate(runtime, controls, context = {}) {
+  const cfg = runtime && runtime.releaseHistory ? runtime.releaseHistory : {};
+  const outcome = {
+    ok: true,
+    skipped: true,
+    paused: false,
+    historyFile: String(cfg.file || "").trim(),
+    sourceFile: String(cfg.sourceFile || "").trim(),
+    version: normalizeVersionTag(context.version || ""),
+    previousVersion: normalizeVersionTag(context.previousVersion || ""),
+    reason: "",
+    pauseDisposition: "",
+  };
+
+  if (!releaseHistoryEnabled(runtime)) {
+    return outcome;
+  }
+  outcome.skipped = false;
+
+  if (String(cfg.agent || "deploy").trim().toLowerCase() !== "deploy") {
+    outcome.ok = false;
+    outcome.reason = `unsupported release_history.agent=${String(cfg.agent || "").trim() || "<empty>"}`;
+    return outcome;
+  }
+  if (!outcome.historyFile) {
+    outcome.ok = false;
+    outcome.reason = "release history file is not configured";
+    return outcome;
+  }
+  if (!fs.existsSync(outcome.historyFile) && (!outcome.sourceFile || !fs.existsSync(outcome.sourceFile))) {
+    outcome.ok = false;
+    outcome.reason = `release history file missing and source cannot be read: history=${outcome.historyFile}, source=${outcome.sourceFile || "<none>"}`;
+    return outcome;
+  }
+
+  log(controls, `RELEASE: release history update start version=${outcome.version || "unknown"}`);
+  appendRunnerMetric(runtime, {
+    stage: "release-history",
+    queue: "released",
+    item_key: String(context.bundleId || context.bundleKey || "bundle").trim() || "bundle",
+    result: "start",
+    release_history_file: outcome.historyFile,
+    release_version: outcome.version,
+  });
+
+  const args = [
+    "--auto",
+    "--release-history",
+    "--bundle-id",
+    String(context.bundleId || "").trim(),
+    "--version",
+    outcome.version,
+    "--previous-version",
+    outcome.previousVersion,
+  ];
+  const result = await runNodeScript({
+    scriptPath: path.join(runtime.agentsRoot, "deploy", "deploy.js"),
+    args,
+    cwd: runtime.agentsRoot,
+    maxRetries: retryMaxForStage(runtime, "deploy", runtime.loops && runtime.loops.maxRetries),
+    retryDelaySeconds: runtime.loops && runtime.loops.retryDelaySeconds,
+    stopSignal: getStopSignal(controls),
+    timeoutSeconds: runnerAgentTimeoutSeconds(runtime),
+    noOutputTimeoutSeconds: runnerNoOutputTimeoutSeconds(runtime),
+  });
+
+  if (result.paused) {
+    const reason = String((result.pauseState && result.pauseState.reason) || "token-guard");
+    outcome.ok = false;
+    outcome.paused = true;
+    outcome.reason = reason;
+    outcome.pauseDisposition = pauseDispositionForReason(reason);
+    appendRunnerMetric(runtime, {
+      stage: "release-history",
+      queue: "released",
+      item_key: String(context.bundleId || context.bundleKey || "bundle").trim() || "bundle",
+      result: "paused",
+      reason,
+      pause_disposition: outcome.pauseDisposition,
+      release_history_file: outcome.historyFile,
+      release_version: outcome.version,
+    });
+    return outcome;
+  }
+
+  if (!result.ok) {
+    outcome.ok = false;
+    outcome.reason = truncateForQueueNote(result.stderr || result.output || "release history update failed", 700);
+    appendRunnerMetric(runtime, {
+      stage: "release-history",
+      queue: "released",
+      item_key: String(context.bundleId || context.bundleKey || "bundle").trim() || "bundle",
+      result: result.timedOut ? "timeout" : "fail",
+      reason: outcome.reason,
+      release_history_file: outcome.historyFile,
+      release_version: outcome.version,
+    });
+    return outcome;
+  }
+
+  if (!fs.existsSync(outcome.historyFile)) {
+    outcome.ok = false;
+    outcome.reason = `release history file was not written: ${outcome.historyFile}`;
+    return outcome;
+  }
+  const raw = fs.readFileSync(outcome.historyFile, "utf8");
+  if (outcome.version && !raw.includes(outcome.version)) {
+    outcome.ok = false;
+    outcome.reason = `release history does not contain version ${outcome.version}`;
+    return outcome;
+  }
+
+  appendRunnerMetric(runtime, {
+    stage: "release-history",
+    queue: "released",
+    item_key: String(context.bundleId || context.bundleKey || "bundle").trim() || "bundle",
+    result: "pass",
+    release_history_file: outcome.historyFile,
+    release_version: outcome.version,
+  });
+  log(controls, `RELEASE: release history updated ${outcome.historyFile}`);
+  return outcome;
+}
+
 function createReleaseConflictHumanDecision(runtime, details) {
   const targetDir = runtime.queues.humanDecisionNeeded || runtime.queues.toClarify;
   if (!targetDir) {
@@ -5846,6 +6140,7 @@ function createReleaseConflictHumanDecision(runtime, details) {
     "implementation_scope: fullstack",
     "visual_change_intent: false",
     "baseline_decision: none",
+    `bundle_id: ${bundle}`,
     "---",
     "",
     "# Goal",
@@ -5874,7 +6169,7 @@ function createReleaseConflictHumanDecision(runtime, details) {
   return filePath;
 }
 
-function runReleaseAutomation(runtime, controls, context = {}) {
+async function runReleaseAutomation(runtime, controls, context = {}) {
   const releaseCfg = runtime.releaseAutomation || {};
   const outcome = {
     committed: false,
@@ -5883,6 +6178,11 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     tagged: false,
     releaseBranch: "",
     version: "",
+    previousVersion: "",
+    paused: false,
+    pauseDisposition: "",
+    releaseHistoryUpdated: false,
+    releaseHistoryFile: "",
     conflictEscalation: "",
   };
   if (!releaseCfg.enabled) {
@@ -5955,8 +6255,8 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     return outcome;
   }
 
-  const oldVersion = readPackageVersion(versionFilePath);
-  if (!oldVersion) {
+  const currentVersion = readPackageVersion(versionFilePath);
+  if (!currentVersion) {
     const humanPath = createReleaseConflictHumanDecision(runtime, {
       bundleId: context.bundleId,
       releaseBranch: "",
@@ -5972,48 +6272,127 @@ function runReleaseAutomation(runtime, controls, context = {}) {
     return outcome;
   }
 
-  const versionCmd = String(releaseCfg.versionCommand || "npm version patch --no-git-tag-version").trim();
-  log(controls, `RELEASE: version bump start command='${versionCmd}' current=${oldVersion}`);
-  const versionResult = runShellCheckCommand(runtime, versionCmd, {
-    cwd: runtime.repoRoot,
-  });
-  if (!versionResult.ok) {
-    const humanPath = createReleaseConflictHumanDecision(runtime, {
-      bundleId: context.bundleId,
-      releaseBranch: "",
-      baseBranch,
-      remote,
-      reason: `version command failed: ${truncateForQueueNote(versionResult.output || "", 300)}`,
-      conflictFiles: [],
-    });
-    if (humanPath) {
-      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
-      outcome.conflictEscalation = humanPath;
-    }
-    return outcome;
-  }
-
-  const newVersion = readPackageVersion(versionFilePath);
-  if (!newVersion || newVersion === oldVersion) {
-    const humanPath = createReleaseConflictHumanDecision(runtime, {
-      bundleId: context.bundleId,
-      releaseBranch: "",
-      baseBranch,
-      remote,
-      reason: `version did not change after bump (old=${oldVersion}, new=${newVersion || "<missing>"})`,
-      conflictFiles: [],
-    });
-    if (humanPath) {
-      log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
-      outcome.conflictEscalation = humanPath;
-    }
-    return outcome;
-  }
-  outcome.version = newVersion;
-
   const bundleLabel = sanitizeRefPart(context.bundleId || context.bundleKey || "bundle", "bundle");
   const releaseBranch = currentBranch;
   outcome.releaseBranch = releaseBranch;
+  const activeEntry = activeBundleEntry(runtime) || {};
+  const pendingVersion = String(activeEntry.releaseVersion || "").trim();
+  const pendingPreviousVersion = String(activeEntry.previousVersion || "").trim();
+  const hasPendingVersion = String(activeEntry.status || "").trim() === "release-pending"
+    && pendingVersion
+    && pendingVersion === currentVersion;
+
+  let oldVersion = currentVersion;
+  let newVersion = "";
+  if (hasPendingVersion) {
+    oldVersion = pendingPreviousVersion || currentVersion;
+    newVersion = pendingVersion;
+    log(controls, `RELEASE: resuming pending release version=${newVersion}`);
+  } else {
+    const versionCmd = String(releaseCfg.versionCommand || "npm version patch --no-git-tag-version").trim();
+    log(controls, `RELEASE: version bump start command='${versionCmd}' current=${currentVersion}`);
+    const versionResult = runShellCheckCommand(runtime, versionCmd, {
+      cwd: runtime.repoRoot,
+    });
+    if (!versionResult.ok) {
+      const humanPath = createReleaseConflictHumanDecision(runtime, {
+        bundleId: context.bundleId,
+        releaseBranch: "",
+        baseBranch,
+        remote,
+        reason: `version command failed: ${truncateForQueueNote(versionResult.output || "", 300)}`,
+        conflictFiles: [],
+      });
+      if (humanPath) {
+        log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
+        outcome.conflictEscalation = humanPath;
+      }
+      return outcome;
+    }
+
+    newVersion = readPackageVersion(versionFilePath);
+    if (!newVersion || newVersion === oldVersion) {
+      const humanPath = createReleaseConflictHumanDecision(runtime, {
+        bundleId: context.bundleId,
+        releaseBranch: "",
+        baseBranch,
+        remote,
+        reason: `version did not change after bump (old=${oldVersion}, new=${newVersion || "<missing>"})`,
+        conflictFiles: [],
+      });
+      if (humanPath) {
+        log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
+        outcome.conflictEscalation = humanPath;
+      }
+      return outcome;
+    }
+    updateActiveBundleState(runtime, {
+      status: "release-pending",
+      lastTransition: "version-bumped",
+      releaseVersion: newVersion,
+      previousVersion: oldVersion,
+      releaseBranch,
+      releaseHistoryStatus: releaseHistoryEnabled(runtime) ? "pending" : "disabled",
+      releaseHistoryUpdated: false,
+    });
+  }
+  outcome.version = newVersion;
+  outcome.previousVersion = oldVersion;
+
+  if (releaseHistoryEnabled(runtime) && !Boolean((activeBundleEntry(runtime) || {}).releaseHistoryUpdated)) {
+    const history = await runReleaseHistoryUpdate(runtime, controls, {
+      bundleId: context.bundleId,
+      bundleKey: context.bundleKey,
+      version: newVersion,
+      previousVersion: oldVersion,
+    });
+    outcome.releaseHistoryUpdated = Boolean(history.ok);
+    outcome.releaseHistoryFile = history.historyFile || "";
+    if (!history.ok) {
+      outcome.paused = Boolean(history.paused);
+      outcome.pauseDisposition = history.pauseDisposition || "";
+      updateActiveBundleState(runtime, {
+        status: "release-pending",
+        lastTransition: history.paused ? "release-history-paused" : "release-history-failed",
+        releaseVersion: newVersion,
+        previousVersion: oldVersion,
+        releaseBranch,
+        releaseHistoryStatus: history.paused ? "paused" : "failed",
+        releaseHistoryFile: history.historyFile || "",
+        releaseHistoryUpdated: false,
+      });
+      if (history.paused && history.pauseDisposition === "auto_resume") {
+        log(controls, `RELEASE: release history paused for auto-resume (${history.reason})`);
+        return outcome;
+      }
+      const humanPath = createReleaseConflictHumanDecision(runtime, {
+        bundleId: context.bundleId,
+        releaseBranch,
+        baseBranch,
+        remote,
+        reason: `release history update failed: ${truncateForQueueNote(history.reason || "unknown", 300)}`,
+        conflictFiles: [],
+      });
+      if (humanPath) {
+        log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
+        outcome.conflictEscalation = humanPath;
+      }
+      return outcome;
+    }
+    updateActiveBundleState(runtime, {
+      status: "release-pending",
+      lastTransition: "release-history-updated",
+      releaseVersion: newVersion,
+      previousVersion: oldVersion,
+      releaseBranch,
+      releaseHistoryStatus: "updated",
+      releaseHistoryFile: history.historyFile || "",
+      releaseHistoryUpdated: true,
+    });
+  } else if (releaseHistoryEnabled(runtime)) {
+    outcome.releaseHistoryUpdated = true;
+    outcome.releaseHistoryFile = String((activeBundleEntry(runtime) || {}).releaseHistoryFile || "").trim();
+  }
 
   runGit(runtime.repoRoot, ["add", "-A"]);
   const commitMessage = `chore(release): ${bundleLabel} v${newVersion}`;
@@ -6161,7 +6540,7 @@ function runReleaseAutomation(runtime, controls, context = {}) {
 
 async function runDeployBundle(runtime, controls) {
   if (countFiles(runtime.queues.deploy) === 0) {
-    return false;
+    return runPendingReleaseBundle(runtime, controls);
   }
   const deployBundleIds = queueBundleIds(runtime, "deploy");
   const deployBundleKey = queueBundleKey(runtime, "deploy");
@@ -6215,7 +6594,7 @@ async function runDeployBundle(runtime, controls) {
   let deployInfo;
   if (runtime.releaseAutomation && runtime.releaseAutomation.enabled) {
     const bundleId = deployBundleIds.length === 1 ? deployBundleIds[0] : deployBundleKey;
-    deployInfo = runReleaseAutomation(runtime, controls, {
+    deployInfo = await runReleaseAutomation(runtime, controls, {
       bundleId,
       bundleKey: deployBundleKey,
     });
@@ -6223,7 +6602,92 @@ async function runDeployBundle(runtime, controls) {
     deployInfo = deployCommitPush(runtime, controls);
     createPullRequest(runtime, controls, deployInfo);
   }
-  completeActiveBundle(runtime, controls, { status: "completed" });
+  if (runtime.releaseAutomation && runtime.releaseAutomation.enabled) {
+    if (!deployInfo || !deployInfo.merged || !deployInfo.pushed) {
+      if (deployInfo && deployInfo.paused && deployInfo.pauseDisposition === "auto_resume") {
+        log(controls, "bundle release waiting for auto-resume pause");
+        return true;
+      }
+      completeActiveBundle(runtime, controls, {
+        status: deployInfo && deployInfo.conflictEscalation ? "needs-human" : "blocked",
+        reason: deployInfo && deployInfo.conflictEscalation
+          ? `release escalation: ${path.basename(deployInfo.conflictEscalation)}`
+          : "release automation incomplete",
+        lastTransition: "release-blocked",
+        releaseVersion: deployInfo && deployInfo.version,
+        previousVersion: deployInfo && deployInfo.previousVersion,
+        releaseBranch: deployInfo && deployInfo.releaseBranch,
+        releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
+        releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
+        releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed",
+      });
+      return true;
+    }
+  }
+  completeActiveBundle(runtime, controls, {
+    status: "completed",
+    reason: "release/deploy path completed",
+    lastTransition: "release-completed",
+    releaseVersion: deployInfo && deployInfo.version,
+    previousVersion: deployInfo && deployInfo.previousVersion,
+    releaseBranch: deployInfo && deployInfo.releaseBranch,
+    releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
+    releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
+    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+  });
+  clearBundleWorkspaceState(runtime);
+  return true;
+}
+
+async function runPendingReleaseBundle(runtime, controls) {
+  const entry = activeBundleEntry(runtime);
+  if (!entry || String(entry.status || "").trim() !== "release-pending") {
+    return false;
+  }
+  const bundleId = String(entry.id || "").trim();
+  if (!bundleId || countFilesByBundle(runtime, "released", bundleId) === 0) {
+    return false;
+  }
+  if (!(runtime.releaseAutomation && runtime.releaseAutomation.enabled)) {
+    return false;
+  }
+
+  log(controls, `RELEASE: resume pending release bundle=${bundleId}`);
+  const deployInfo = await runReleaseAutomation(runtime, controls, {
+    bundleId,
+    bundleKey: bundleId,
+  });
+  if (!deployInfo || !deployInfo.merged || !deployInfo.pushed) {
+    if (deployInfo && deployInfo.paused && deployInfo.pauseDisposition === "auto_resume") {
+      log(controls, "pending release waiting for auto-resume pause");
+      return true;
+    }
+    completeActiveBundle(runtime, controls, {
+      status: deployInfo && deployInfo.conflictEscalation ? "needs-human" : "blocked",
+      reason: deployInfo && deployInfo.conflictEscalation
+        ? `release escalation: ${path.basename(deployInfo.conflictEscalation)}`
+        : "pending release automation incomplete",
+      lastTransition: "release-blocked",
+      releaseVersion: deployInfo && deployInfo.version,
+      previousVersion: deployInfo && deployInfo.previousVersion,
+      releaseBranch: deployInfo && deployInfo.releaseBranch,
+      releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
+      releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
+      releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed",
+    });
+    return true;
+  }
+  completeActiveBundle(runtime, controls, {
+    status: "completed",
+    reason: "pending release completed",
+    lastTransition: "release-completed",
+    releaseVersion: deployInfo.version,
+    previousVersion: deployInfo.previousVersion,
+    releaseBranch: deployInfo.releaseBranch,
+    releaseHistoryUpdated: deployInfo.releaseHistoryUpdated,
+    releaseHistoryFile: deployInfo.releaseHistoryFile,
+    releaseHistoryStatus: deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+  });
   clearBundleWorkspaceState(runtime);
   return true;
 }
@@ -6536,6 +7000,7 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
+  await probeGlobalPauseOnStartup(runtime, controls, "DELIVERY-RUNNER");
   preserveGlobalPauseOnStartup(runtime, controls);
   cleanupRequirementJsonArtifacts(runtime, controls, "startup");
   pruneStaleWorkspaceBranches(runtime, controls, "startup");
@@ -6728,6 +7193,12 @@ module.exports = {
     ensureBundleWorkspaceBranch,
     enforceActiveWorkspaceBranch,
     completeReleasedBundleWithoutDeploy,
+    completeActiveBundle,
+    activeBundleEntry,
+    updateActiveBundleState,
+    runReleaseHistoryUpdate,
+    runReleaseAutomation,
+    runPendingReleaseBundle,
     quarantineForeignExecutionQueues,
     resumeActiveBundleSelectedIntake,
     runFastDownstream,
@@ -6735,6 +7206,8 @@ module.exports = {
     runUatBundle,
     runUatFullRegression,
     preserveGlobalPauseOnStartup,
+    probeGlobalPauseOnStartup,
+    agentLabelForPauseSource,
     handlePausedStage,
     shouldEscalatePausedStage,
   },

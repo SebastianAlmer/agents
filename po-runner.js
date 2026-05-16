@@ -21,6 +21,7 @@ const {
   normalizeStatus,
   listQueueFiles,
   getActivePauseState,
+  probeActivePauseState,
   isAutoResumePauseReason,
   isHumanEscalationPauseReason,
   readBundleRegistry,
@@ -29,6 +30,7 @@ const {
   parseBundleSequence,
 } = require("./lib/flow-core");
 const { loadRuntimeConfig, ensureQueueDirs } = require("./lib/runtime");
+const { readConfigArgs } = require("./lib/agent");
 const {
   stripBundleSuffix,
   stripCarryoverSuffix,
@@ -424,6 +426,63 @@ function preserveGlobalPauseOnStartup(runtime, controls) {
     `${timestampMinute()} PO-RUNNER: startup pause preserved (reason=${reason} source=${source} resume_after=${resumeAfter})\n`
   );
   log(controls, "global pause state preserved on startup");
+}
+
+function agentLabelForPauseSource(source, fallback = "PO") {
+  const name = path.basename(String(source || "")).toLowerCase().replace(/\.js$/i, "");
+  const map = {
+    po: "PO",
+    arch: "ARCH",
+    qa: "QA",
+    uat: "UAT",
+    sec: "SEC",
+    ux: "UX",
+    deploy: "DEPLOY",
+    maint: "MAINT",
+    reqeng: "REQENG",
+    "dev-agent-runner": "DEV_FS",
+    "dev-fe": "DEV_FE",
+    "dev-be": "DEV_BE",
+    "dev-fs": "DEV_FS",
+  };
+  return map[name] || fallback;
+}
+
+async function probeGlobalPauseOnStartup(runtime, controls, runnerLabel = "PO-RUNNER") {
+  const policy = runtime && runtime.pausePolicy ? runtime.pausePolicy : {};
+  if (policy.probeOnStartup === false) {
+    return { status: "disabled" };
+  }
+  const state = getActivePauseState(runtime.agentsRoot);
+  if (!state || !isAutoResumePauseReason(state.reason)) {
+    return { status: state ? "skipped" : "none" };
+  }
+  const agentLabel = agentLabelForPauseSource(state.source, "PO");
+  const configPath = runtime && typeof runtime.resolveAgentCodexConfigPath === "function"
+    ? runtime.resolveAgentCodexConfigPath(agentLabel)
+    : "";
+  const configArgs = configPath ? readConfigArgs(configPath) : [];
+  const result = await probeActivePauseState({
+    agentsRoot: runtime.agentsRoot,
+    repoRoot: runtime.repoRoot,
+    configArgs,
+    source: `${runnerLabel}:${agentLabel}`,
+    timeoutMs: Math.max(1, Number(policy.probeTimeoutSeconds || 45)) * 1000,
+    cooldownMs: Math.max(10, Number(policy.probeCooldownSeconds || 300)) * 1000,
+  });
+
+  if (result.status === "cleared_expired") {
+    process.stdout.write(`${timestampMinute()} PO-RUNNER: startup pause expired and was cleared\n`);
+  } else if (result.status === "cleared_probe_ok") {
+    process.stdout.write(`${timestampMinute()} PO-RUNNER: startup pause probe succeeded; global pause cleared\n`);
+  } else if (result.status === "still_paused") {
+    process.stdout.write(`${timestampMinute()} PO-RUNNER: startup pause probe still limited; pause preserved\n`);
+  } else if (result.status === "probe_failed") {
+    process.stdout.write(`${timestampMinute()} PO-RUNNER: startup pause probe failed without limit signal; pause preserved\n`);
+  } else if (result.status === "skipped" && result.reason === "probe-cooldown") {
+    log(controls, `startup pause probe skipped by cooldown next=${result.nextProbeAfter || "unknown"}`);
+  }
+  return result;
 }
 
 function timestampMinute() {
@@ -3177,6 +3236,7 @@ async function main() {
 
   const controls = createControls(args.verbose, runtime);
   process.on("exit", () => controls.cleanup());
+  await probeGlobalPauseOnStartup(runtime, controls, "PO-RUNNER");
   preserveGlobalPauseOnStartup(runtime, controls);
   cleanupRequirementJsonArtifacts(runtime, controls, "startup");
 
@@ -3225,6 +3285,8 @@ module.exports = {
     tryPrepareReadyBundle,
     poIdleWaitMs,
     preserveGlobalPauseOnStartup,
+    probeGlobalPauseOnStartup,
+    agentLabelForPauseSource,
     shouldEscalatePausedPoRun,
   },
 };

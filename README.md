@@ -176,6 +176,7 @@ Global pause guard:
 - Provider limits/auth failures create `.runtime/pause-state.json`.
 - Usage/rate/quota limits wait until `resumeAfter` and then continue automatically.
 - Active pause state survives runner restarts until it expires.
+- With `[pause_policy].probe_on_startup=true`, runner startup probes whether auto-resume pauses still apply; a successful probe clears the pause early.
 - Auth/access failures escalate to `human-decision-needed` and runner stops gracefully.
 
 Loop controls:
@@ -202,6 +203,7 @@ Routing behavior:
 
 When `[release_automation].enabled=true` and deploy mode allows push:
 - Bumps version (configurable command).
+- Updates the configured release history before the release commit when `[release_history].enabled=true`.
 - Commits on local release workspace branch.
 - Fast-forward merges to base branch.
 - Pushes base branch.
@@ -209,6 +211,7 @@ When `[release_automation].enabled=true` and deploy mode allows push:
 
 On release conflicts/failures:
 - Creates escalation requirement in `human-decision-needed`.
+- Release-history failures block completion; usage/rate/quota pauses wait for auto-resume, auth/access failures escalate.
 
 ## Runtime state and local artifacts
 
@@ -262,10 +265,11 @@ High-impact sections:
 - `[loops]`: polling, retries, bundle sizing
 - `[bundle_flow]`: bundle ids/branches/carryover behavior
 - `[delivery_runner]`: mode and runner timeouts
+- `[pause_policy]`: startup probe/cooldown for global provider-limit pauses
 - `[retry_policy]`, `[loop_policy]`: bounded retries and escalation thresholds
 - `[po]`: intake/vision defaults
 - `[qa]`: mandatory checks and autofix behavior
-- `[deploy]`, `[release_automation]`: deploy and release automation
+- `[deploy]`, `[release_automation]`, `[release_history]`: deploy, release automation and release notes
 - `[thread_recovery]`: thread reset/rotation policy
 - `[memory]`: local memory read/update behavior
 - `[models]`, `[codex]`, `[codex.reasoning_effort]`: model/runtime profiles

@@ -8,6 +8,7 @@ const {
   runNodeScript,
   detectLimitFailure,
   getActivePauseState,
+  probeActivePauseState,
   readPauseState,
   writePauseState,
   isAutoResumePauseReason,
@@ -79,6 +80,89 @@ test("delivery startup preserves active pause state", () => {
   assert.equal(state.active, true);
   assert.equal(state.reason, "usage_limit");
   assert.equal(state.resumeAfter, resumeAfter);
+});
+
+test("startup pause probe clears auto-resume pause when probe succeeds", async () => {
+  const root = mkTempRoot("agents-pause-probe-clear-");
+  const now = new Date("2026-05-16T08:00:00.000Z");
+  writePauseState(root, {
+    active: true,
+    reason: "usage_limit",
+    source: "ux.js",
+    resumeAfter: "2026-05-16T09:00:00.000Z",
+  });
+
+  const result = await probeActivePauseState({
+    agentsRoot: root,
+    repoRoot: root,
+    now,
+    runProbe: async () => ({ ok: true, exitCode: 0, stdout: "READY", stderr: "" }),
+  });
+
+  assert.equal(result.status, "cleared_probe_ok");
+  assert.equal(readPauseState(root), null);
+});
+
+test("startup pause probe preserves pause and records cooldown when limit remains", async () => {
+  const root = mkTempRoot("agents-pause-probe-still-");
+  const now = new Date("2026-05-16T08:00:00.000Z");
+  writePauseState(root, {
+    active: true,
+    reason: "usage_limit",
+    source: "ux.js",
+    resumeAfter: "2026-05-16T09:00:00.000Z",
+  });
+
+  const result = await probeActivePauseState({
+    agentsRoot: root,
+    repoRoot: root,
+    now,
+    cooldownMs: 300_000,
+    runProbe: async () => ({
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "Usage limit reached. Please try again later.",
+    }),
+  });
+
+  const state = readPauseState(root);
+  assert.equal(result.status, "still_paused");
+  assert.equal(state.active, true);
+  assert.equal(state.reason, "usage_limit");
+  assert.equal(state.source, "ux.js");
+  assert.equal(state.lastProbeResult, "still-paused");
+  assert.equal(state.nextProbeAfter, "2026-05-16T08:05:00.000Z");
+});
+
+test("startup pause probe respects probe cooldown", async () => {
+  const root = mkTempRoot("agents-pause-probe-cooldown-");
+  const now = new Date("2026-05-16T08:01:00.000Z");
+  writePauseState(root, {
+    active: true,
+    reason: "usage_limit",
+    source: "ux.js",
+    resumeAfter: "2026-05-16T09:00:00.000Z",
+    lastProbeAt: "2026-05-16T08:00:00.000Z",
+    nextProbeAfter: "2026-05-16T08:05:00.000Z",
+  });
+  let probeCount = 0;
+
+  const result = await probeActivePauseState({
+    agentsRoot: root,
+    repoRoot: root,
+    now,
+    cooldownMs: 300_000,
+    runProbe: async () => {
+      probeCount += 1;
+      return { ok: true, exitCode: 0, stdout: "READY", stderr: "" };
+    },
+  });
+
+  assert.equal(result.status, "skipped");
+  assert.equal(result.reason, "probe-cooldown");
+  assert.equal(probeCount, 0);
+  assert.equal(readPauseState(root).active, true);
 });
 
 test("delivery and PO do not escalate auto-resume pauses", () => {

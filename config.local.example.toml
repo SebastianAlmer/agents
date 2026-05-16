@@ -55,6 +55,12 @@ max_paused_cycles_per_item = 2
 # false = keine lokalen Workspace-Branches; Delivery arbeitet immer auf dem aktuell ausgecheckten Branch.
 workspace_branches_enabled = true
 
+[pause_policy]
+# Beim Runner-Start pruefen, ob eine globale usage/rate/quota Pause noch gilt.
+probe_on_startup = true
+probe_cooldown_seconds = 300
+probe_timeout_seconds = 45
+
 [retry_policy]
 arch_retry_max = 1
 ux_retry_max = 0
@@ -154,6 +160,13 @@ tag_prefix = "v"
 auto_resolve_conflicts = true
 max_conflict_fix_attempts = 1
 allow_release_with_human_decision_needed = true
+
+[release_history]
+# Optional: Release-Historie im Zielrepo vor Release-Commit aktualisieren lassen.
+enabled = false
+file = "docs/release-history.md"
+source_file = ""
+agent = "deploy"
 
 [thread_recovery]
 # Rotiert Auto-Threads nach N erfolgreichen Runs (0 = aus).

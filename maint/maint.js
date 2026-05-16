@@ -51,6 +51,30 @@ function parseArgs(argv) {
   return args;
 }
 
+function normalizeGateDecisionText(rawText) {
+  const text = String(rawText || "");
+  return text.includes("\\`") ? text.replace(/\\`/g, "`") : text;
+}
+
+function parseDecisionFile(decisionFile) {
+  const raw = fs.readFileSync(decisionFile, "utf8");
+  try {
+    return {
+      parsed: JSON.parse(raw),
+      normalized: null,
+    };
+  } catch (parseErr) {
+    const normalized = normalizeGateDecisionText(raw);
+    if (normalized === raw) {
+      throw parseErr;
+    }
+    return {
+      parsed: JSON.parse(normalized),
+      normalized,
+    };
+  }
+}
+
 function usage() {
   console.log(
     "Usage: node maint/maint.js [--auto] [--post-deploy] [--decision-file /abs/path.json]"
@@ -64,11 +88,15 @@ function validateDecisionFile(decisionFile) {
   if (!fs.existsSync(decisionFile)) {
     throw new Error(`MAINT decision file missing: ${decisionFile}`);
   }
-  let parsed;
+  let parsedResult;
   try {
-    parsed = JSON.parse(fs.readFileSync(decisionFile, "utf8"));
+    parsedResult = parseDecisionFile(decisionFile);
   } catch (err) {
     throw new Error(`MAINT decision file invalid JSON: ${err.message}`);
+  }
+  const parsed = parsedResult.parsed;
+  if (!parsed || typeof parsed !== "object" || parsed === null) {
+    throw new Error("MAINT decision file invalid JSON shape");
   }
 
   const status = String(parsed.status || "").toLowerCase();
@@ -87,6 +115,14 @@ function validateDecisionFile(decisionFile) {
   }
   if (!Array.isArray(parsed.manual_uat)) {
     throw new Error("MAINT decision requires manual_uat array");
+  }
+
+  if (parsedResult.normalized !== null) {
+    fs.writeFileSync(
+      decisionFile,
+      `${JSON.stringify(parsed, null, 2)}\n`,
+      "utf8"
+    );
   }
 }
 
@@ -186,7 +222,16 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  parseArgs,
+  normalizeGateDecisionText,
+  parseDecisionFile,
+  validateDecisionFile,
+};
