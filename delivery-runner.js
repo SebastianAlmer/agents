@@ -686,6 +686,65 @@ function shouldAbortDrainedActiveBundle(runtime) {
   return activeBundleDrained(runtime) && !activeBundleHasReleasedFiles(runtime);
 }
 
+function incompleteReleasedBundleIdsForRelease(runtime, currentBundleId) {
+  const releasedDir = runtime && runtime.queues ? runtime.queues.released : "";
+  const registry = readBundleRegistryForRuntime(runtime);
+  const bundles = registry && registry.bundles && typeof registry.bundles === "object"
+    ? registry.bundles
+    : {};
+  const normalizedCurrent = String(currentBundleId || "").trim();
+  const eligibleStatuses = new Set(["active", "release-pending", "aborted", "blocked", "needs-human"]);
+  const ids = new Set();
+  for (const filePath of listQueueFiles(releasedDir)) {
+    const id = String(fileBundleId(filePath) || "").trim();
+    if (!id || id === normalizedCurrent) {
+      continue;
+    }
+    const status = String((bundles[id] && bundles[id].status) || "").trim().toLowerCase();
+    if (eligibleStatuses.has(status)) {
+      ids.add(id);
+    }
+  }
+  return Array.from(ids).sort();
+}
+
+function markAdditionalReleasedBundlesCompleted(runtime, controls, currentBundleId, details = {}) {
+  const ids = incompleteReleasedBundleIdsForRelease(runtime, currentBundleId);
+  if (ids.length === 0) {
+    return [];
+  }
+  const registry = readBundleRegistryForRuntime(runtime);
+  const now = new Date().toISOString();
+  const releaseVersion = String(details.releaseVersion || "").trim();
+  const previousVersion = String(details.previousVersion || "").trim();
+  const releaseBranch = String(details.releaseBranch || "").trim();
+  const releaseHistoryFile = String(details.releaseHistoryFile || "").trim();
+  const releaseHistoryStatus = String(details.releaseHistoryStatus || "").trim();
+  const releaseHistoryUpdated = Boolean(details.releaseHistoryUpdated);
+  for (const id of ids) {
+    const current = registry.bundles[id] && typeof registry.bundles[id] === "object"
+      ? registry.bundles[id]
+      : {};
+    registry.bundles[id] = {
+      ...current,
+      id,
+      status: "completed",
+      finishedAt: String(current.finishedAt || now).trim() || now,
+      finishedReason: `included in release ${String(currentBundleId || "").trim() || "current bundle"}`,
+      lastTransition: `release-completed-via-${String(currentBundleId || "").trim() || "current"}`,
+      releaseVersion: releaseVersion || String(current.releaseVersion || "").trim(),
+      previousVersion: previousVersion || String(current.previousVersion || "").trim(),
+      releaseBranch: releaseBranch || String(current.releaseBranch || "").trim(),
+      releaseHistoryFile: releaseHistoryFile || String(current.releaseHistoryFile || "").trim(),
+      releaseHistoryStatus: releaseHistoryStatus || String(current.releaseHistoryStatus || "").trim(),
+      releaseHistoryUpdated: releaseHistoryUpdated || Boolean(current.releaseHistoryUpdated),
+    };
+  }
+  writeBundleRegistryForRuntime(runtime, registry);
+  log(controls, `bundle release completed carried bundles=${ids.join(",")}`);
+  return ids;
+}
+
 function collectExecutionBundleIds(runtime) {
   const queues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy"];
   const ids = new Set();
@@ -6722,6 +6781,14 @@ async function runDeployBundle(runtime, controls) {
       return true;
     }
   }
+  markAdditionalReleasedBundlesCompleted(runtime, controls, activeBundleId(runtime) || (deployInfo && deployInfo.bundleId) || deployBundleKey, {
+    releaseVersion: deployInfo && deployInfo.version,
+    previousVersion: deployInfo && deployInfo.previousVersion,
+    releaseBranch: deployInfo && deployInfo.releaseBranch,
+    releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
+    releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
+    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+  });
   completeActiveBundle(runtime, controls, {
     status: "completed",
     reason: "release/deploy path completed",
@@ -6775,6 +6842,14 @@ async function runPendingReleaseBundle(runtime, controls) {
     });
     return true;
   }
+  markAdditionalReleasedBundlesCompleted(runtime, controls, bundleId, {
+    releaseVersion: deployInfo.version,
+    previousVersion: deployInfo.previousVersion,
+    releaseBranch: deployInfo.releaseBranch,
+    releaseHistoryUpdated: deployInfo.releaseHistoryUpdated,
+    releaseHistoryFile: deployInfo.releaseHistoryFile,
+    releaseHistoryStatus: deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+  });
   completeActiveBundle(runtime, controls, {
     status: "completed",
     reason: "pending release completed",
@@ -6877,6 +6952,14 @@ async function finalizeActiveReleasedBundle(runtime, controls, options = {}) {
     createPullRequest(runtime, controls, deployInfo);
   }
 
+  markAdditionalReleasedBundlesCompleted(runtime, controls, bundleId, {
+    releaseVersion: deployInfo && deployInfo.version,
+    previousVersion: deployInfo && deployInfo.previousVersion,
+    releaseBranch: deployInfo && deployInfo.releaseBranch,
+    releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
+    releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
+    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+  });
   completeActiveBundle(runtime, controls, {
     status: "completed",
     reason: "released bundle release/deploy path completed",
@@ -7417,6 +7500,8 @@ module.exports = {
     activeBundleReleasedCount,
     activeBundleHasReleasedFiles,
     shouldAbortDrainedActiveBundle,
+    incompleteReleasedBundleIdsForRelease,
+    markAdditionalReleasedBundlesCompleted,
     finalizeActiveReleasedBundle,
     completeActiveBundle,
     activeBundleEntry,

@@ -729,6 +729,70 @@ test("drained active bundles without released files can be aborted", () => {
   assert.equal(__test.shouldAbortDrainedActiveBundle(runtime), true);
 });
 
+test("successful release marks prior incomplete released bundles as completed", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-carried-release-test-"));
+  const queues = {
+    released: path.join(root, "requirements", "released"),
+  };
+  fs.mkdirSync(queues.released, { recursive: true });
+
+  const writeReq = (bundleId) => {
+    fs.writeFileSync(
+      path.join(queues.released, `${bundleId}-REQ.md`),
+      [
+        "---",
+        `id: ${bundleId}-REQ`,
+        "status: released",
+        `bundle_id: ${bundleId}`,
+        "---",
+        "",
+        "# Goal",
+        "released",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+  };
+  writeReq("B0001");
+  writeReq("B0002");
+  writeReq("B0003");
+
+  writeBundleRegistry(root, {
+    active_bundle_id: "B0003",
+    ready_bundle_id: "",
+    bundles: {
+      B0001: { id: "B0001", status: "aborted", finishedAt: "2026-03-29T16:00:00Z" },
+      B0002: { id: "B0002", status: "completed", releaseVersion: "0.1.1" },
+      B0003: { id: "B0003", status: "active" },
+    },
+  });
+
+  const runtime = { agentsRoot: root, queues };
+  assert.deepEqual(__test.incompleteReleasedBundleIdsForRelease(runtime, "B0003"), ["B0001"]);
+
+  const marked = __test.markAdditionalReleasedBundlesCompleted(runtime, { verbose: false }, "B0003", {
+    releaseVersion: "0.1.3",
+    previousVersion: "0.1.2",
+    releaseBranch: "rb/b0003",
+    releaseHistoryUpdated: true,
+    releaseHistoryFile: path.join(root, "repo", "docs", "release-history.md"),
+    releaseHistoryStatus: "updated",
+  });
+  const registry = JSON.parse(fs.readFileSync(path.join(root, ".runtime", "bundles", "registry.json"), "utf8"));
+
+  assert.deepEqual(marked, ["B0001"]);
+  assert.equal(registry.bundles.B0001.status, "completed");
+  assert.equal(registry.bundles.B0001.releaseVersion, "0.1.3");
+  assert.equal(registry.bundles.B0001.previousVersion, "0.1.2");
+  assert.equal(registry.bundles.B0001.releaseBranch, "rb/b0003");
+  assert.equal(registry.bundles.B0001.releaseHistoryUpdated, true);
+  assert.equal(registry.bundles.B0001.releaseHistoryStatus, "updated");
+  assert.equal(registry.bundles.B0001.lastTransition, "release-completed-via-B0003");
+  assert.equal(registry.bundles.B0002.status, "completed");
+  assert.equal(registry.bundles.B0002.releaseVersion, "0.1.1");
+  assert.equal(registry.bundles.B0003.status, "active");
+});
+
 test("quarantineForeignExecutionQueues blocks foreign active-stage bundle files", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-scope-test-"));
   const qaDir = path.join(root, "requirements", "qa");

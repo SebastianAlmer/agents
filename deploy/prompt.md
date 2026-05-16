@@ -49,14 +49,16 @@ Work autonomously and do not ask the user follow-up questions.
 1. Read the configured release-history file and optional configured source file.
 2. If the canonical release-history file does not exist, create it from the configured source file and keep the result append/update friendly.
 3. Add or update exactly one release section for the requested version and bundle.
-4. Write understandable Markdown covering:
+4. Treat `Release requirements to document in this release` as the complete required scope for that release section.
+5. If `Prior incomplete bundle requirements already in released queue and included in this release` is not `None`, include those prior released requirements in the same release section as carried/included work for this release.
+6. Write understandable Markdown covering:
    - user-facing changes,
    - technical changes,
    - known gaps or follow-ups,
    - relevant requirements,
    - bundle, tag/version, and release metadata.
-5. Do not move requirement files and do not run git commands.
-6. Fail clearly if the release cannot be documented from the provided files and context.
+7. Do not move requirement files and do not run git commands.
+8. Fail clearly if the release cannot be documented from the provided files and context.
 
 ## Output Discipline
 - Summary max 2 sentences.

@@ -101,7 +101,9 @@ test("buildReleaseHistoryContext includes version, bundle and released requireme
   assert.match(context, /Bundle ID: B0013/);
   assert.match(context, /Version: v0\.1\.13/);
   assert.match(context, /REQ-TEST\.md/);
-  assert.match(context, /Additional released requirements from incomplete bundles:/);
+  assert.match(context, /Release requirements to document in this release:/);
+  assert.match(context, /Primary bundle requirements:/);
+  assert.match(context, /Prior incomplete bundle requirements already in released queue and included in this release:/);
   assert.match(context, /REQ-OLD-INCOMPLETE\.md/);
   assert.doesNotMatch(context, /REQ-OLD-COMPLETED\.md/);
 });

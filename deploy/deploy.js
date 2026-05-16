@@ -213,6 +213,26 @@ function listAdditionalIncompleteReleasedFiles(runtime, bundleId) {
   });
 }
 
+function listReleaseHistoryRequirementFiles(runtime, bundleId) {
+  const primary = listReleasedFilesForBundle(runtime.queues.released, bundleId);
+  const additional = listAdditionalIncompleteReleasedFiles(runtime, bundleId);
+  const seen = new Set();
+  const combined = [];
+  for (const file of [...primary, ...additional]) {
+    const key = path.resolve(file);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    combined.push(file);
+  }
+  return {
+    primary,
+    additional,
+    combined,
+  };
+}
+
 function validateReleaseHistoryInputs(runtime) {
   const cfg = runtime.releaseHistory || {};
   const historyFile = String(cfg.file || "").trim();
@@ -243,13 +263,15 @@ function validateReleaseHistoryInputs(runtime) {
 
 function buildReleaseHistoryContext(runtime, args) {
   const paths = validateReleaseHistoryInputs(runtime);
-  const releasedFiles = listReleasedFilesForBundle(runtime.queues.released, args.bundleId);
-  const releasedListText = releasedFiles.length > 0
-    ? releasedFiles.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
+  const releaseFiles = listReleaseHistoryRequirementFiles(runtime, args.bundleId);
+  const primaryListText = releaseFiles.primary.length > 0
+    ? releaseFiles.primary.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
     : "- None";
-  const additionalFiles = listAdditionalIncompleteReleasedFiles(runtime, args.bundleId);
-  const additionalListText = additionalFiles.length > 0
-    ? additionalFiles.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
+  const additionalListText = releaseFiles.additional.length > 0
+    ? releaseFiles.additional.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
+    : "- None";
+  const combinedListText = releaseFiles.combined.length > 0
+    ? releaseFiles.combined.map((file) => `- ${path.basename(file)} (${file})`).join("\n")
     : "- None";
   return [
     "# Context",
@@ -263,10 +285,13 @@ function buildReleaseHistoryContext(runtime, args) {
     `Release history source file: ${paths.sourceFile || "None"}`,
     `Release history source exists: ${paths.sourceExists ? "yes" : "no"}`,
     `Released dir: ${runtime.queues.released}`,
-    "Released requirements for bundle:",
-    releasedListText,
-    "Additional released requirements from incomplete bundles:",
+    "Release requirements to document in this release:",
+    combinedListText,
+    "Primary bundle requirements:",
+    primaryListText,
+    "Prior incomplete bundle requirements already in released queue and included in this release:",
     additionalListText,
+    "If the prior incomplete list is not empty, the release section must cover both the primary bundle and those prior incomplete released requirements.",
     "Git actions are executed by flow runner, not by this agent.",
     "",
   ].join("\n");
@@ -420,4 +445,5 @@ module.exports = {
   validateReleaseHistoryInputs,
   buildReleaseHistoryContext,
   listAdditionalIncompleteReleasedFiles,
+  listReleaseHistoryRequirementFiles,
 };
