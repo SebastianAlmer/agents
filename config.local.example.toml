@@ -164,6 +164,8 @@ allow_release_with_human_decision_needed = true
 [release_history]
 # Optional: Release-Historie im Zielrepo vor Release-Commit aktualisieren lassen.
 enabled = false
+# Optional: Wenn true, blockiert ein fehlgeschlagenes Release-History-Update den Release.
+required = false
 file = "docs/release-history.md"
 source_file = ""
 agent = "deploy"

@@ -103,6 +103,60 @@ function writeNoItemsPassGate(gateFile, label, queueName) {
   return true;
 }
 
+function pendingGateFailure(label) {
+  const normalizedLabel = String(label || "gate").trim() || "gate";
+  const title = `UAT ${normalizedLabel} did not write final gate result`;
+  return {
+    status: "fail",
+    summary: `${title}.`,
+    blocking_findings: [`P1: ${title}.`],
+    findings: [
+      {
+        severity: "P1",
+        title,
+        details: "UAT completed without replacing the pending gate template. Treat as runner/gate orchestration failure, not a product decision.",
+      },
+    ],
+    manual_uat: [],
+    failure_type: "technical_gate_pending",
+  };
+}
+
+function readGateFile(gateFile, label) {
+  if (!gateFile) {
+    throw new Error(`UAT ${label} requires --gate-file`);
+  }
+  if (!fs.existsSync(gateFile)) {
+    throw new Error(`UAT ${label} gate file missing: ${gateFile}`);
+  }
+  try {
+    return JSON.parse(fs.readFileSync(gateFile, "utf8"));
+  } catch (err) {
+    throw new Error(`UAT ${label} gate file invalid JSON: ${err.message}`);
+  }
+}
+
+function isPendingGatePayload(parsed) {
+  return String(parsed && parsed.status || "").toLowerCase() === "fail"
+    && String(parsed && parsed.summary || "").trim().toLowerCase() === FINAL_GATE_PENDING_SUMMARY
+    && Array.isArray(parsed && parsed.blocking_findings)
+    && parsed.blocking_findings.length === 0
+    && Array.isArray(parsed && parsed.findings)
+    && parsed.findings.length === 0
+    && Array.isArray(parsed && parsed.manual_uat)
+    && parsed.manual_uat.length === 0;
+}
+
+function finalizeGateFile(gateFile, label) {
+  const parsed = readGateFile(gateFile, label);
+  if (isPendingGatePayload(parsed)) {
+    writeGatePayload(gateFile, pendingGateFailure(label));
+    return { recoveredPendingGate: true };
+  }
+  validateGatePayload(parsed, label);
+  return { recoveredPendingGate: false };
+}
+
 function resolveRequirementPath(requirement, candidateDirs) {
   if (!requirement) {
     return "";
@@ -128,18 +182,11 @@ function normalizeSourceQueue(value) {
 }
 
 function validateGateFile(gateFile, label) {
-  if (!gateFile) {
-    throw new Error(`UAT ${label} requires --gate-file`);
-  }
-  if (!fs.existsSync(gateFile)) {
-    throw new Error(`UAT ${label} gate file missing: ${gateFile}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(fs.readFileSync(gateFile, "utf8"));
-  } catch (err) {
-    throw new Error(`UAT ${label} gate file invalid JSON: ${err.message}`);
-  }
+  const parsed = readGateFile(gateFile, label);
+  validateGatePayload(parsed, label);
+}
+
+function validateGatePayload(parsed, label) {
   const status = String(parsed.status || "").toLowerCase();
   if (!["pass", "fail"].includes(status)) {
     throw new Error(`UAT ${label} gate file has invalid status: ${status || "<empty>"}`);
@@ -297,11 +344,16 @@ async function main() {
     autoMode: auto,
   });
 
-  if (batch || fullRegression) {
-    validateGateFile(gateFile, batch ? "batch" : "full-regression");
-  }
+  const gateFinalizeResult = (batch || fullRegression)
+    ? finalizeGateFile(gateFile, batch ? "batch" : "full-regression")
+    : { recoveredPendingGate: false };
 
-  if (result.threadId) {
+  if (gateFinalizeResult.recoveredPendingGate) {
+    if (threadFile && fs.existsSync(threadFile)) {
+      fs.unlinkSync(threadFile);
+      console.log(`UAT: reset thread after pending gate ${threadFile}`);
+    }
+  } else if (result.threadId) {
     writeThreadId(threadFile, result.threadId);
     console.log(`UAT: thread saved ${result.threadId}`);
   } else {
@@ -318,6 +370,7 @@ if (require.main === module) {
 
 module.exports = {
   FINAL_GATE_PENDING_SUMMARY,
+  finalizeGateFile,
   terminalPassGate,
   writeGatePayload,
   writeNoItemsPassGate,

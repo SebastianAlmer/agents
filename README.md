@@ -87,7 +87,8 @@ Queue intent:
 
 Human ownership rules:
 - `human-input` is manual input for PO re-steering.
-- Automatic escalations from runners go to `human-decision-needed`.
+- Automatic product/business decisions go to `human-decision-needed`.
+- Automatic runner/gate/process failures go to `blocked`.
 
 ## Requirements artifact contract (critical)
 
@@ -142,7 +143,8 @@ Modes:
 Downstream path in `full`:
 - `selected -> arch -> dev -> ux -> sec -> qa -> uat -> deploy -> released`
 - Recovery loops reroute failed bundles back to `dev` until thresholds are reached.
-- Exhausted technical/business conflicts escalate to `human-decision-needed`.
+- Business conflicts escalate to `human-decision-needed`.
+- Technical gate/process failures route to `blocked` with auto-recovery disabled when the product requirement itself is not the failing surface.
 
 UAT toggle:
 - Set `[delivery_quality].uat_enabled = false` to skip both bundle UAT and full-regression UAT.
@@ -185,7 +187,8 @@ Loop controls:
 - `blocked` queue is used for technical recovery, then escalation when exhausted.
 
 Technical failure routing:
-- Automatic runner/gate/process failures are routed to `human-decision-needed`.
+- Automatic runner/gate/process failures are routed to `blocked`.
+- Gate-orchestration failures are marked `technical_auto_recovery: disabled` so the blocked recovery loop does not recycle product requirements through `dev`.
 - `human-input` is not used for automatic runner output.
 
 ## Visual baseline policy
@@ -204,6 +207,7 @@ Routing behavior:
 When `[release_automation].enabled=true` and deploy mode allows push:
 - Bumps version (configurable command).
 - Updates the configured release history before the release commit when `[release_history].enabled=true`.
+- Treats release-history failures as non-blocking by default; set `[release_history].required=true` to make them block completion.
 - Commits on local release workspace branch.
 - Fast-forward merges to base branch.
 - Pushes base branch.
@@ -211,7 +215,7 @@ When `[release_automation].enabled=true` and deploy mode allows push:
 
 On release conflicts/failures:
 - Creates escalation requirement in `human-decision-needed`.
-- Release-history failures block completion; usage/rate/quota pauses wait for auto-resume, auth/access failures escalate.
+- Required release-history failures block completion; optional failures are recorded and the release continues.
 
 ## Runtime state and local artifacts
 

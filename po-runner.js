@@ -2301,6 +2301,99 @@ function updatePoStateAfterDirectMove({ runtime, state, cycle, sourcePath, sourc
   writePoRunnerState(runtime, state);
 }
 
+function poIntakeSameQueueLoopThreshold(runtime) {
+  const raw = runtime && runtime.loopPolicy
+    ? runtime.loopPolicy.loopThreshold
+    : 3;
+  const parsed = Number.parseInt(String(raw || 3), 10);
+  return Math.max(2, Number.isFinite(parsed) ? parsed : 3);
+}
+
+function isPoIntakeSameQueueLoopCandidate(sourceQueue, targetQueue) {
+  const source = String(sourceQueue || "").trim();
+  const target = String(targetQueue || "").trim();
+  if (!source || source !== target) {
+    return false;
+  }
+  return source === "refinement" || source === "toClarify" || source === "humanInput";
+}
+
+function shouldEscalatePoIntakeSameQueueLoop(
+  runtime,
+  itemState,
+  currentHash,
+  sourceQueue,
+  targetQueue,
+  projectedIncrement = 0
+) {
+  if (!itemState || !isPoIntakeSameQueueLoopCandidate(sourceQueue, targetQueue)) {
+    return false;
+  }
+  const previousHash = String(itemState.lastHash || "");
+  if (!previousHash || previousHash !== String(currentHash || "")) {
+    return false;
+  }
+  if (
+    String(itemState.lastSourceQueue || "") !== String(sourceQueue || "") ||
+    String(itemState.lastTargetQueue || "") !== String(targetQueue || "")
+  ) {
+    return false;
+  }
+  const repeatCount = Math.max(0, Number.parseInt(String(itemState.repeatCount || 0), 10));
+  return repeatCount + Math.max(0, projectedIncrement) >= poIntakeSameQueueLoopThreshold(runtime);
+}
+
+function escalatePoIntakeSameQueueLoop(runtime, controls, state, cycle, filePath, sourceQueue, reason = "same_queue_loop") {
+  const currentPath = resolveSourcePath(runtime, filePath) || filePath;
+  if (!currentPath || !fs.existsSync(currentPath)) {
+    return false;
+  }
+  const key = requirementKey(currentPath);
+  const targetQueue = runtime.queues.humanDecisionNeeded ? "humanDecisionNeeded" : "toClarify";
+  const targetStatus = targetQueue === "humanDecisionNeeded" ? "human-decision-needed" : "to-clarify";
+  const summary = `Repeated PO intake produced ${sourceQueue}->${sourceQueue} without changing the requirement. Human routing decision is required.`;
+
+  writeCanonicalPoResults(currentPath, {
+    status: "blocked",
+    targetQueue,
+    sourceQueue,
+    decisionReason: "po_intake_same_queue_loop",
+    summary,
+    alreadyImplementedClaim: false,
+    evidenceReport: null,
+  });
+
+  moveWithFallback(runtime, currentPath, targetQueue, targetStatus, [
+    "PO runner repeated intake loop guard",
+    `- reason: ${reason}`,
+    `- repeated outcome: ${sourceQueue}->${sourceQueue}`,
+    `- repeat_count >= ${poIntakeSameQueueLoopThreshold(runtime)}`,
+    "- routed out of PO intake to avoid an infinite loop",
+  ]);
+
+  const movedPath = resolveSourcePath(runtime, currentPath)
+    || path.join(runtime.queues[targetQueue] || runtime.queues.toClarify, path.basename(currentPath));
+  ensureHumanDecisionRequest(movedPath, { summary });
+  updatePoStateAfterDirectMove({
+    runtime,
+    state,
+    cycle,
+    sourcePath: movedPath,
+    sourceQueue,
+    targetQueue,
+  });
+  appendRunnerMetric(runtime, {
+    stage: "po-intake",
+    item_key: key,
+    result: "escalated",
+    reason: "same-queue-loop",
+    source_queue: sourceQueue,
+    target_queue: targetQueue,
+  });
+  log(controls, `same-queue loop escalated ${path.basename(currentPath)} ${sourceQueue}->${targetQueue}`);
+  return true;
+}
+
 function promoteBacklogForProgress(runtime, controls, state, cycle) {
   if (countFiles(runtime.queues.selected) > 0) {
     return false;
@@ -2555,6 +2648,20 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
   const existingState = state && state.items && state.items[key] ? state.items[key] : null;
   if (
     runtime.po.intakeIdempotenceEnabled &&
+    shouldEscalatePoIntakeSameQueueLoop(runtime, existingState, beforeHash, originQueue, originQueue, 0)
+  ) {
+    return escalatePoIntakeSameQueueLoop(
+      runtime,
+      controls,
+      state,
+      cycle,
+      sourceBefore,
+      originQueue,
+      "pre-run repeated same-queue outcome"
+    );
+  }
+  if (
+    runtime.po.intakeIdempotenceEnabled &&
     existingState &&
     existingState.lastHash === beforeHash &&
     existingState.lastSourceQueue === originQueue &&
@@ -2701,7 +2808,7 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
 
   const explicitTargetFromRequirement = inferPoTargetFromRequirementFile(currentPath);
   let targetQueue = forcedEscalationQueue || explicitTargetFromRequirement;
-  const forcedEscalationActive = Boolean(forcedEscalationQueue);
+  let forcedEscalationActive = Boolean(forcedEscalationQueue);
   let decisionReason = extractDecisionReasonFromRequirement(currentPath);
 
   if (!forcedEscalationActive && !result.ok) {
@@ -2791,6 +2898,32 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
     decisionReason = defaultDecisionReasonForTarget(targetQueue);
   }
 
+  let sameQueueLoopEscalationActive = false;
+  if (state && state.items && runtime.po.intakeIdempotenceEnabled) {
+    const projectedHash = fileHash(currentPath);
+    const previous = state.items[key] || {};
+    if (shouldEscalatePoIntakeSameQueueLoop(runtime, previous, projectedHash, sourceQueue, targetQueue, 1)) {
+      targetQueue = "humanDecisionNeeded";
+      decisionReason = "po_intake_same_queue_loop";
+      forcedEscalationActive = true;
+      sameQueueLoopEscalationActive = true;
+      appendQueueSection(currentPath, [
+        "PO runner repeated intake loop guard",
+        `- repeated outcome: ${sourceQueue}->${sourceQueue}`,
+        `- projected repeat_count >= ${poIntakeSameQueueLoopThreshold(runtime)}`,
+        "- routed to human-decision-needed to avoid an infinite PO intake loop",
+      ]);
+      appendRunnerMetric(runtime, {
+        stage: "po-intake",
+        item_key: key,
+        result: "escalated",
+        reason: "same-queue-loop",
+        source_queue: sourceQueue,
+        target_queue: targetQueue,
+      });
+    }
+  }
+
   // To-clarify requires an actionable question + recommendation.
   if (targetQueue === "toClarify" && !hardVisionConflict && !isActionableClarifyDecision(decision)) {
     targetQueue = sourceQueue === "toClarify" ? "backlog" : "refinement";
@@ -2823,9 +2956,11 @@ async function runPoIntakeOnFile(runtime, filePath, controls, sourceHint = "", s
   if (targetQueue === "humanDecisionNeeded" && (hardVisionConflict || forcedEscalationActive)) {
     appendQueueSection(currentPath, [
       "PO runner escalation confirmed",
-      forcedEscalationActive
+      sameQueueLoopEscalationActive
+        ? "- repeated same-queue PO intake exceeded loop threshold; awaiting explicit human decision"
+        : (forcedEscalationActive
         ? "- repeated execution failures exceeded loop policy threshold; awaiting explicit human decision"
-        : "- hard vision conflict confirmed; awaiting explicit human decision",
+        : "- hard vision conflict confirmed; awaiting explicit human decision"),
     ]);
   }
 
@@ -3374,6 +3509,10 @@ module.exports = {
     parseAcEvidenceEntriesFromRaw,
     isValidAcEvidenceReference,
     evaluateAlreadyImplementedEvidence,
+    fileHash,
+    poIntakeSameQueueLoopThreshold,
+    shouldEscalatePoIntakeSameQueueLoop,
+    escalatePoIntakeSameQueueLoop,
     isManualBundleCleanupBacklogItem,
     promoteBacklogForProgress,
     topUpSelectedFromBacklogForBundle,

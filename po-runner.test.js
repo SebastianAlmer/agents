@@ -182,6 +182,77 @@ test("normalizeWontDoDecisionReason allows only configured enum reasons", () => 
   assert.equal(__test.normalizeWontDoDecisionReason("random"), "");
 });
 
+test("same-queue PO intake loop detection only applies to active intake queues", () => {
+  const runtime = createRuntimeWithQueues();
+  runtime.loopPolicy = { loopThreshold: 3 };
+  const itemState = {
+    lastHash: "abc123",
+    lastSourceQueue: "refinement",
+    lastTargetQueue: "refinement",
+    repeatCount: 2,
+  };
+
+  assert.equal(
+    __test.shouldEscalatePoIntakeSameQueueLoop(runtime, itemState, "abc123", "refinement", "refinement", 1),
+    true
+  );
+  assert.equal(
+    __test.shouldEscalatePoIntakeSameQueueLoop(runtime, itemState, "abc123", "backlog", "backlog", 1),
+    false
+  );
+  assert.equal(
+    __test.shouldEscalatePoIntakeSameQueueLoop(runtime, itemState, "changed", "refinement", "refinement", 1),
+    false
+  );
+});
+
+test("same-queue PO intake loop escalates requirement to human-decision-needed", () => {
+  const runtime = createRuntimeWithQueues();
+  runtime.po.intakeIdempotenceEnabled = true;
+  runtime.loopPolicy = { loopThreshold: 3 };
+  const sourcePath = path.join(runtime.queues.refinement, "REQ-LOOP.md");
+  writeRequirement(sourcePath, "REQ-LOOP", "refinement");
+  const state = {
+    version: 1,
+    cycle: 10,
+    bundleLocked: false,
+    underfilledSelectedCycles: 0,
+    items: {
+      "REQ-LOOP": {
+        lastHash: __test.fileHash(sourcePath),
+        lastSourceQueue: "refinement",
+        lastTargetQueue: "refinement",
+        lastProcessedCycle: 9,
+        repeatCount: 3,
+        skipUntilCycle: 12,
+      },
+    },
+    pausedCounts: {},
+    loopCounters: {},
+  };
+
+  const escalated = __test.escalatePoIntakeSameQueueLoop(
+    runtime,
+    { verbose: false },
+    state,
+    10,
+    sourcePath,
+    "refinement",
+    "test repeated same-queue outcome"
+  );
+  const movedPath = path.join(runtime.queues.humanDecisionNeeded, "REQ-LOOP.md");
+  const raw = fs.readFileSync(movedPath, "utf8");
+
+  assert.equal(escalated, true);
+  assert.equal(fs.existsSync(sourcePath), false);
+  assert.equal(fs.existsSync(movedPath), true);
+  assert.match(raw, /status: human-decision-needed/);
+  assert.match(raw, /decision_reason: po_intake_same_queue_loop/);
+  assert.match(raw, /repeated outcome: refinement->refinement/);
+  assert.equal(state.items["REQ-LOOP"].lastTargetQueue, "humanDecisionNeeded");
+  assert.equal(state.items["REQ-LOOP"].repeatCount, 0);
+});
+
 test("findDecisionArtifactForRequirement reports disabled sidecar lookup", () => {
   const runtime = createRuntimeWithQueues();
   const requirementPath = path.join(runtime.queues.backlog, "B0100-REQ-NEW-routing-hardening.md");

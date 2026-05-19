@@ -10,7 +10,7 @@ const {
   gateFromAgentResult,
   createQaExecutionFailureGate,
   isTechnicalGateFailure,
-  routeTechnicalGateFailureToHumanInput,
+  routeTechnicalGateFailureToBlocked,
   findingsFingerprint,
   shouldSkipMaintForReleasedBundle,
   __test,
@@ -20,13 +20,15 @@ function mkTempQueues() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-test-"));
   const qaDir = path.join(root, "requirements", "qa");
   const devDir = path.join(root, "requirements", "dev");
+  const blockedDir = path.join(root, "requirements", "blocked");
   const humanInputDir = path.join(root, "requirements", "human-input");
   const humanDecisionNeededDir = path.join(root, "requirements", "human-decision-needed");
   fs.mkdirSync(qaDir, { recursive: true });
   fs.mkdirSync(devDir, { recursive: true });
+  fs.mkdirSync(blockedDir, { recursive: true });
   fs.mkdirSync(humanInputDir, { recursive: true });
   fs.mkdirSync(humanDecisionNeededDir, { recursive: true });
-  return { root, qaDir, devDir, humanInputDir, humanDecisionNeededDir };
+  return { root, qaDir, devDir, blockedDir, humanInputDir, humanDecisionNeededDir };
 }
 
 test("gateFromAgentResult marks pending gate as technical process failure", () => {
@@ -76,8 +78,8 @@ test("gateFromAgentResult keeps a definitive parsed gate even when the runner ex
   assert.equal(isTechnicalGateFailure(gate), true);
 });
 
-test("technical gate failure routes to dev first, then escalates after retries", () => {
-  const { root, qaDir, devDir, humanDecisionNeededDir } = mkTempQueues();
+test("technical gate failure routes to blocked and disables blocked auto-recovery", () => {
+  const { root, qaDir, devDir, blockedDir, humanDecisionNeededDir } = mkTempQueues();
 
   const writeReq = (dir) => {
     const reqPath = path.join(dir, "REQ-TEST.md");
@@ -112,6 +114,7 @@ test("technical gate failure routes to dev first, then escalates after retries",
     queues: {
       qa: qaDir,
       dev: devDir,
+      blocked: blockedDir,
       humanDecisionNeeded: humanDecisionNeededDir,
     },
   });
@@ -125,38 +128,28 @@ test("technical gate failure routes to dev first, then escalates after retries",
     failure_type: "technical_gate_pending",
   };
 
-  // First failure: should route to dev
   writeReq(qaDir);
-  const routed1 = routeTechnicalGateFailureToHumanInput(mkRuntime(), controls, {
+  const routed = routeTechnicalGateFailureToBlocked(mkRuntime(), controls, {
     gateName: "qa",
     sourceQueue: "qa",
     gate,
   });
-  assert.equal(routed1.progressed, true);
-  assert.equal(routed1.routedTo, "dev");
-  assert.equal(fs.existsSync(path.join(devDir, "REQ-TEST.md")), true);
+  assert.equal(routed.progressed, true);
+  assert.equal(routed.routedTo, "blocked");
+  assert.equal(fs.existsSync(path.join(blockedDir, "REQ-TEST.md")), true);
   assert.equal(fs.existsSync(path.join(qaDir, "REQ-TEST.md")), false);
+  assert.equal(fs.existsSync(path.join(devDir, "REQ-TEST.md")), false);
+  assert.equal(fs.existsSync(path.join(humanDecisionNeededDir, "REQ-TEST.md")), false);
 
-  // Second failure: still routes to dev (attempt 2 <= maxFixCycles 2)
-  fs.renameSync(path.join(devDir, "REQ-TEST.md"), path.join(qaDir, "REQ-TEST.md"));
-  const routed2 = routeTechnicalGateFailureToHumanInput(mkRuntime(), controls, {
-    gateName: "qa",
-    sourceQueue: "qa",
-    gate,
-  });
-  assert.equal(routed2.progressed, true);
-  assert.equal(routed2.routedTo, "dev");
+  const blockedRaw = fs.readFileSync(path.join(blockedDir, "REQ-TEST.md"), "utf8");
+  assert.match(blockedRaw, /technical_auto_recovery: disabled/);
+  assert.match(blockedRaw, /not product decision/);
 
-  // Third failure: retries exhausted, escalates to human-decision-needed
-  fs.renameSync(path.join(devDir, "REQ-TEST.md"), path.join(qaDir, "REQ-TEST.md"));
-  const routed3 = routeTechnicalGateFailureToHumanInput(mkRuntime(), controls, {
-    gateName: "qa",
-    sourceQueue: "qa",
-    gate,
-  });
-  assert.equal(routed3.progressed, true);
-  assert.equal(routed3.routedTo, "human-decision-needed");
-  assert.equal(fs.existsSync(path.join(humanDecisionNeededDir, "REQ-TEST.md")), true);
+  const recovered = __test.enforceBlockedQueuePolicy(mkRuntime(), controls);
+  assert.equal(recovered, false);
+  assert.equal(fs.existsSync(path.join(blockedDir, "REQ-TEST.md")), true);
+  assert.equal(fs.existsSync(path.join(devDir, "REQ-TEST.md")), false);
+  assert.equal(fs.existsSync(path.join(humanDecisionNeededDir, "REQ-TEST.md")), false);
 });
 
 function mkTempReleasedQueue() {
@@ -538,6 +531,49 @@ test("release history update blocks release when history and source are missing"
   assert.match(result.reason, /source cannot be read/);
 });
 
+test("release history update accepts manually prefilled version", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-release-history-present-test-"));
+  const repoRoot = path.join(root, "repo");
+  const historyFile = path.join(repoRoot, "docs", "release-history.md");
+  fs.mkdirSync(path.dirname(historyFile), { recursive: true });
+  fs.writeFileSync(
+    historyFile,
+    [
+      "# Release History",
+      "",
+      "## v0.1.21",
+      "",
+      "Manual release notes.",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const runtime = {
+    agentsRoot: root,
+    releaseHistory: {
+      enabled: true,
+      required: false,
+      agent: "deploy",
+      file: historyFile,
+      sourceFile: "",
+    },
+    queues: {
+      released: path.join(root, "requirements", "released"),
+    },
+  };
+
+  const result = await __test.runReleaseHistoryUpdate(runtime, { verbose: false }, {
+    bundleId: "B0024",
+    version: "0.1.21",
+    previousVersion: "0.1.20",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, false);
+  assert.match(result.reason, /version already present/);
+});
+
 test("release history update appends fallback section when deploy agent omits version", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-release-history-fallback-test-"));
   const repoRoot = path.join(root, "repo");
@@ -712,6 +748,56 @@ test("drained active bundles with released files are not aborted", () => {
   assert.equal(__test.activeBundleDrained(runtime), true);
   assert.equal(__test.activeBundleReleasedCount(runtime), 1);
   assert.equal(__test.activeBundleHasReleasedFiles(runtime), true);
+  assert.equal(__test.shouldAbortDrainedActiveBundle(runtime), false);
+});
+
+test("active bundle with blocked files is not treated as drained", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-blocked-drain-test-"));
+  const queues = {
+    selected: path.join(root, "requirements", "selected"),
+    arch: path.join(root, "requirements", "arch"),
+    dev: path.join(root, "requirements", "dev"),
+    qa: path.join(root, "requirements", "qa"),
+    ux: path.join(root, "requirements", "ux"),
+    sec: path.join(root, "requirements", "sec"),
+    deploy: path.join(root, "requirements", "deploy"),
+    blocked: path.join(root, "requirements", "blocked"),
+    released: path.join(root, "requirements", "released"),
+  };
+  for (const dir of Object.values(queues)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const bundleId = "B0087";
+  fs.writeFileSync(
+    path.join(queues.blocked, `${bundleId}-REQ-BLOCKED.md`),
+    [
+      "---",
+      "id: REQ-BLOCKED",
+      "status: blocked",
+      `bundle_id: ${bundleId}`,
+      "---",
+      "",
+      "# Goal",
+      "blocked",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  writeBundleRegistry(root, {
+    active_bundle_id: bundleId,
+    ready_bundle_id: "",
+    bundles: {
+      [bundleId]: {
+        id: bundleId,
+        status: "blocked",
+      },
+    },
+  });
+
+  const runtime = { agentsRoot: root, queues };
+
+  assert.equal(__test.activeBundleDrained(runtime), false);
   assert.equal(__test.shouldAbortDrainedActiveBundle(runtime), false);
 });
 

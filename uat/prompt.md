@@ -54,6 +54,7 @@ Write JSON to `Final gate file`:
   - `evidence`: string[]
   - `human_question`
   - `recommendation`
+- Before finishing, re-open `Final gate file` and verify it is no longer the pending template.
 
 Single requirement mode
 - Validate one requirement against implementation behavior and docs.

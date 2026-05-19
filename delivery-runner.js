@@ -44,6 +44,7 @@ const {
 
 const DELIVERY_IDLE_WAIT_MS = 5 * 60 * 1000;
 const MAINT_FOLLOWUP_ID_RE = /^REQ-MAINT-(HOTFIX|FOLLOWUP)-/i;
+const TECHNICAL_GATE_AUTO_RECOVERY_DISABLED = "technical_auto_recovery: disabled";
 
 function parseArgs(argv) {
   const args = {
@@ -661,7 +662,7 @@ function activeBundleDrained(runtime) {
   if (!activeId) {
     return false;
   }
-  const executionQueues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy"];
+  const executionQueues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy", "blocked"];
   for (const queueName of executionQueues) {
     if (countFilesByBundle(runtime, queueName, activeId) > 0) {
       return false;
@@ -2361,6 +2362,20 @@ function applyBlockedHumanDecisionSection(filePath, details = {}) {
   ]);
 }
 
+function hasTechnicalGateAutoRecoveryDisabled(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+  let raw = "";
+  try {
+    raw = fs.readFileSync(filePath, "utf8").toLowerCase();
+  } catch {
+    return false;
+  }
+  return raw.includes(TECHNICAL_GATE_AUTO_RECOVERY_DISABLED)
+    || raw.includes("process/tooling/gate-orchestration issue (not product decision)");
+}
+
 function enforceBlockedQueuePolicy(runtime, controls) {
   const blockedFiles = listQueueFiles(runtime.queues.blocked);
   if (blockedFiles.length === 0) {
@@ -2372,9 +2387,14 @@ function enforceBlockedQueuePolicy(runtime, controls) {
   let clarified = 0;
   let escalated = 0;
   let routeFailed = 0;
+  let technicalFrozen = 0;
 
   for (const file of blockedFiles) {
     const itemKey = blockedRecoveryItemKey(file) || path.basename(file);
+    if (hasTechnicalGateAutoRecoveryDisabled(file)) {
+      technicalFrozen += 1;
+      continue;
+    }
     const attempts = registerLoopFailure(runtime, "blocked-recovery", itemKey, "recover");
     const businessUnclear = hasBusinessClarificationEvidence(file);
     if (businessUnclear) {
@@ -2472,8 +2492,8 @@ function enforceBlockedQueuePolicy(runtime, controls) {
     });
   }
 
-  if (recovered > 0 || clarified > 0 || escalated > 0 || routeFailed > 0) {
-    log(controls, `blocked policy: recovered=${recovered} clarified=${clarified} escalated=${escalated} route_failed=${routeFailed}`);
+  if (recovered > 0 || clarified > 0 || escalated > 0 || routeFailed > 0 || technicalFrozen > 0) {
+    log(controls, `blocked policy: recovered=${recovered} clarified=${clarified} escalated=${escalated} route_failed=${routeFailed} technical_frozen=${technicalFrozen}`);
   }
   return recovered > 0 || clarified > 0 || escalated > 0;
 }
@@ -3773,7 +3793,7 @@ function technicalGateFailureFingerprint(gateName, gate) {
   return stableHash(`${String(gateName || "gate").toLowerCase()}|${normalizedType}|${normalizedSummary}|${normalizedFindings}`);
 }
 
-function routeTechnicalGateFailureToHumanInput(runtime, controls, options = {}) {
+function routeTechnicalGateFailureToBlocked(runtime, controls, options = {}) {
   const gateName = String(options.gateName || "gate").trim().toLowerCase();
   const sourceQueue = String(options.sourceQueue || "").trim();
   const gate = options.gate && typeof options.gate === "object" ? options.gate : {};
@@ -3794,61 +3814,43 @@ function routeTechnicalGateFailureToHumanInput(runtime, controls, options = {}) 
     240
   );
   const failureType = String(gate.failure_type || "technical_unknown").trim() || "technical_unknown";
-  const maxFixCycles = Math.max(1, Number(runtime.deliveryQuality && runtime.deliveryQuality.maxFixCycles || 2));
-  const allowRouteToDev = Boolean(runtime.deliveryQuality && runtime.deliveryQuality.routeToDevOnFail);
 
-  if (allowRouteToDev && repeatCount <= maxFixCycles) {
-    const retryNote = [
-      `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> dev (retry ${repeatCount}/${maxFixCycles})`,
-      `- failure_type: ${failureType}`,
-      `- summary: ${summary}`,
-      "- classification: process/tooling/gate-orchestration issue (not product decision)",
-    ].join(" ");
-    const moved = moveAll(runtime, sourceQueue, "dev", "dev", retryNote);
-    if (moved > 0) {
-      appendRunnerMetric(runtime, {
-        stage: gateName,
-        queue: sourceQueue,
-        item_key: bundleKey,
-        result: "technical-retry",
-        retried_to: "dev",
-        reason: `${failureType}#${repeatCount}/${maxFixCycles}`,
-      });
-      log(
-        controls,
-        `${gateName.toUpperCase()} technical gate failure routed -> dev for retry attempt=${repeatCount}/${maxFixCycles} moved=${moved}`
-      );
-      return { progressed: true, gate, routedTo: "dev", repeatCount };
-    }
-  }
-
-  const escalationNote = [
-    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> human-decision-needed (retries exhausted)`,
+  const blockedNote = [
+    `Delivery runner: ${gateName.toUpperCase()} technical gate failure -> blocked`,
     `- failure_type: ${failureType}`,
     `- repeat_count: ${repeatCount}`,
     `- summary: ${summary}`,
     "- classification: process/tooling/gate-orchestration issue (not product decision)",
+    `- ${TECHNICAL_GATE_AUTO_RECOVERY_DISABLED}`,
+    "- next_action: fix or rerun runner/gate orchestration; do not route as product decision",
   ].join(" ");
 
-  const moved = moveAll(runtime, sourceQueue, "humanDecisionNeeded", "human-decision-needed", escalationNote);
+  const moved = moveAll(runtime, sourceQueue, "blocked", "blocked", blockedNote);
   if (moved > 0) {
+    updateActiveBundleState(runtime, {
+      status: "blocked",
+      lastTransition: "technical-gate-blocked",
+      finishedReason: `${gateName}-technical-gate-failure`,
+    });
     appendRunnerMetric(runtime, {
       stage: gateName,
       queue: sourceQueue,
       item_key: bundleKey,
-      result: "escalated",
-      escalated_to: "human-decision-needed",
+      result: "technical-blocked",
+      routed_to: "blocked",
       reason: `${failureType}#${repeatCount}`,
     });
     log(
       controls,
-      `${gateName.toUpperCase()} technical gate failure routed -> human-decision-needed moved=${moved} repeat=${repeatCount} (retries exhausted)`
+      `${gateName.toUpperCase()} technical gate failure routed -> blocked moved=${moved} repeat=${repeatCount}`
     );
-    return { progressed: true, gate, routedTo: "human-decision-needed", repeatCount };
+    return { progressed: true, gate, routedTo: "blocked", repeatCount };
   }
 
   return { progressed: false, gate, routedTo: "", repeatCount };
 }
+
+const routeTechnicalGateFailureToHumanInput = routeTechnicalGateFailureToBlocked;
 
 function deliveryQualityStatePath(runtime) {
   const dir = path.join(runtime.agentsRoot, ".runtime", "delivery-quality");
@@ -4932,7 +4934,7 @@ async function runQaBundle(runtime, controls) {
       reason: queueNote("qa gate fail", gate),
     });
     if (isTechnicalGateFailure(gate)) {
-      const routed = routeTechnicalGateFailureToHumanInput(runtime, controls, {
+      const routed = routeTechnicalGateFailureToBlocked(runtime, controls, {
         gateName: "qa",
         sourceQueue: "qa",
         gate,
@@ -5061,7 +5063,7 @@ async function runUatBundle(runtime, controls) {
       reason: queueNote("uat gate fail", gate),
     });
     if (isTechnicalGateFailure(gate)) {
-      const routed = routeTechnicalGateFailureToHumanInput(runtime, controls, {
+      const routed = routeTechnicalGateFailureToBlocked(runtime, controls, {
         gateName: "uat",
         sourceQueue: "deploy",
         gate,
@@ -6135,6 +6137,11 @@ function releaseHistoryEnabled(runtime) {
   return Boolean(cfg.enabled);
 }
 
+function releaseHistoryRequired(runtime) {
+  const cfg = runtime && runtime.releaseHistory ? runtime.releaseHistory : {};
+  return Boolean(cfg.required);
+}
+
 function normalizeVersionTag(version) {
   const value = String(version || "").trim();
   if (!value) {
@@ -6259,6 +6266,22 @@ async function runReleaseHistoryUpdate(runtime, controls, context = {}) {
     outcome.ok = false;
     outcome.reason = `release history file missing and source cannot be read: history=${outcome.historyFile}, source=${outcome.sourceFile || "<none>"}`;
     return outcome;
+  }
+  if (outcome.version && fs.existsSync(outcome.historyFile)) {
+    const raw = fs.readFileSync(outcome.historyFile, "utf8");
+    if (raw.includes(outcome.version)) {
+      outcome.reason = "version already present";
+      appendRunnerMetric(runtime, {
+        stage: "release-history",
+        queue: "released",
+        item_key: String(context.bundleId || context.bundleKey || "bundle").trim() || "bundle",
+        result: "already-present",
+        release_history_file: outcome.historyFile,
+        release_version: outcome.version,
+      });
+      log(controls, `RELEASE: release history already contains ${outcome.version}`);
+      return outcome;
+    }
   }
 
   log(controls, `RELEASE: release history update start version=${outcome.version || "unknown"}`);
@@ -6427,6 +6450,7 @@ async function runReleaseAutomation(runtime, controls, context = {}) {
     pauseDisposition: "",
     releaseHistoryUpdated: false,
     releaseHistoryFile: "",
+    releaseHistoryStatus: releaseHistoryEnabled(runtime) ? "pending" : "disabled",
     conflictEscalation: "",
   };
   if (!releaseCfg.enabled) {
@@ -6592,50 +6616,71 @@ async function runReleaseAutomation(runtime, controls, context = {}) {
     });
     outcome.releaseHistoryUpdated = Boolean(history.ok);
     outcome.releaseHistoryFile = history.historyFile || "";
+    outcome.releaseHistoryStatus = history.ok
+      ? "updated"
+      : (history.paused ? "optional-paused" : "optional-failed");
     if (!history.ok) {
       outcome.paused = Boolean(history.paused);
       outcome.pauseDisposition = history.pauseDisposition || "";
       updateActiveBundleState(runtime, {
         status: "release-pending",
-        lastTransition: history.paused ? "release-history-paused" : "release-history-failed",
+        lastTransition: releaseHistoryRequired(runtime)
+          ? (history.paused ? "release-history-paused" : "release-history-failed")
+          : (history.paused ? "release-history-optional-paused" : "release-history-optional-failed"),
         releaseVersion: newVersion,
         previousVersion: oldVersion,
         releaseBranch,
-        releaseHistoryStatus: history.paused ? "paused" : "failed",
+        releaseHistoryStatus: releaseHistoryRequired(runtime)
+          ? (history.paused ? "paused" : "failed")
+          : (history.paused ? "optional-paused" : "optional-failed"),
         releaseHistoryFile: history.historyFile || "",
         releaseHistoryUpdated: false,
       });
-      if (history.paused && history.pauseDisposition === "auto_resume") {
+      if (releaseHistoryRequired(runtime) && history.paused && history.pauseDisposition === "auto_resume") {
         log(controls, `RELEASE: release history paused for auto-resume (${history.reason})`);
         return outcome;
       }
-      const humanPath = createReleaseConflictHumanDecision(runtime, {
-        bundleId: context.bundleId,
-        releaseBranch,
-        baseBranch,
-        remote,
-        reason: `release history update failed: ${truncateForQueueNote(history.reason || "unknown", 300)}`,
-        conflictFiles: [],
-      });
-      if (humanPath) {
-        log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
-        outcome.conflictEscalation = humanPath;
+      if (releaseHistoryRequired(runtime)) {
+        const humanPath = createReleaseConflictHumanDecision(runtime, {
+          bundleId: context.bundleId,
+          releaseBranch,
+          baseBranch,
+          remote,
+          reason: `release history update failed: ${truncateForQueueNote(history.reason || "unknown", 300)}`,
+          conflictFiles: [],
+        });
+        if (humanPath) {
+          log(controls, `RELEASE: escalated to human-decision-needed ${path.basename(humanPath)}`);
+          outcome.conflictEscalation = humanPath;
+        }
+        return outcome;
       }
-      return outcome;
+      log(controls, `RELEASE: optional release history update failed; continuing (${truncateForQueueNote(history.reason || "unknown", 240)})`);
+      appendRunnerMetric(runtime, {
+        stage: "release-history",
+        queue: "released",
+        item_key: String(context.bundleId || context.bundleKey || "bundle").trim() || "bundle",
+        result: history.paused ? "optional-paused-continue" : "optional-fail-continue",
+        reason: truncateForQueueNote(history.reason || "unknown", 240),
+        release_history_file: history.historyFile || "",
+        release_version: normalizeVersionTag(newVersion),
+      });
+    } else {
+      updateActiveBundleState(runtime, {
+        status: "release-pending",
+        lastTransition: "release-history-updated",
+        releaseVersion: newVersion,
+        previousVersion: oldVersion,
+        releaseBranch,
+        releaseHistoryStatus: "updated",
+        releaseHistoryFile: history.historyFile || "",
+        releaseHistoryUpdated: true,
+      });
     }
-    updateActiveBundleState(runtime, {
-      status: "release-pending",
-      lastTransition: "release-history-updated",
-      releaseVersion: newVersion,
-      previousVersion: oldVersion,
-      releaseBranch,
-      releaseHistoryStatus: "updated",
-      releaseHistoryFile: history.historyFile || "",
-      releaseHistoryUpdated: true,
-    });
   } else if (releaseHistoryEnabled(runtime)) {
     outcome.releaseHistoryUpdated = true;
     outcome.releaseHistoryFile = String((activeBundleEntry(runtime) || {}).releaseHistoryFile || "").trim();
+    outcome.releaseHistoryStatus = String((activeBundleEntry(runtime) || {}).releaseHistoryStatus || "updated").trim() || "updated";
   }
 
   runGit(runtime.repoRoot, ["add", "-A"]);
@@ -6863,7 +6908,8 @@ async function runDeployBundle(runtime, controls) {
         releaseBranch: deployInfo && deployInfo.releaseBranch,
         releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
         releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
-        releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed",
+        releaseHistoryStatus: (deployInfo && deployInfo.releaseHistoryStatus)
+          || (deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed"),
       });
       return true;
     }
@@ -6874,7 +6920,8 @@ async function runDeployBundle(runtime, controls) {
     releaseBranch: deployInfo && deployInfo.releaseBranch,
     releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
     releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
-    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+    releaseHistoryStatus: (deployInfo && deployInfo.releaseHistoryStatus)
+      || (deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled"),
   });
   completeActiveBundle(runtime, controls, {
     status: "completed",
@@ -6885,7 +6932,8 @@ async function runDeployBundle(runtime, controls) {
     releaseBranch: deployInfo && deployInfo.releaseBranch,
     releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
     releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
-    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+    releaseHistoryStatus: (deployInfo && deployInfo.releaseHistoryStatus)
+      || (deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled"),
   });
   clearBundleWorkspaceState(runtime);
   return true;
@@ -6925,7 +6973,8 @@ async function runPendingReleaseBundle(runtime, controls) {
       releaseBranch: deployInfo && deployInfo.releaseBranch,
       releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
       releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
-      releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed",
+      releaseHistoryStatus: (deployInfo && deployInfo.releaseHistoryStatus)
+        || (deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed"),
     });
     return true;
   }
@@ -6935,7 +6984,8 @@ async function runPendingReleaseBundle(runtime, controls) {
     releaseBranch: deployInfo.releaseBranch,
     releaseHistoryUpdated: deployInfo.releaseHistoryUpdated,
     releaseHistoryFile: deployInfo.releaseHistoryFile,
-    releaseHistoryStatus: deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+    releaseHistoryStatus: deployInfo.releaseHistoryStatus
+      || (deployInfo.releaseHistoryUpdated ? "updated" : "disabled"),
   });
   completeActiveBundle(runtime, controls, {
     status: "completed",
@@ -6946,7 +6996,8 @@ async function runPendingReleaseBundle(runtime, controls) {
     releaseBranch: deployInfo.releaseBranch,
     releaseHistoryUpdated: deployInfo.releaseHistoryUpdated,
     releaseHistoryFile: deployInfo.releaseHistoryFile,
-    releaseHistoryStatus: deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+    releaseHistoryStatus: deployInfo.releaseHistoryStatus
+      || (deployInfo.releaseHistoryUpdated ? "updated" : "disabled"),
   });
   clearBundleWorkspaceState(runtime);
   return true;
@@ -7026,7 +7077,8 @@ async function finalizeActiveReleasedBundle(runtime, controls, options = {}) {
         releaseBranch: deployInfo && deployInfo.releaseBranch,
         releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
         releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
-        releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed",
+        releaseHistoryStatus: (deployInfo && deployInfo.releaseHistoryStatus)
+          || (deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "failed"),
       });
       return {
         progressed: true,
@@ -7045,7 +7097,8 @@ async function finalizeActiveReleasedBundle(runtime, controls, options = {}) {
     releaseBranch: deployInfo && deployInfo.releaseBranch,
     releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
     releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
-    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+    releaseHistoryStatus: (deployInfo && deployInfo.releaseHistoryStatus)
+      || (deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled"),
   });
   completeActiveBundle(runtime, controls, {
     status: "completed",
@@ -7056,7 +7109,8 @@ async function finalizeActiveReleasedBundle(runtime, controls, options = {}) {
     releaseBranch: deployInfo && deployInfo.releaseBranch,
     releaseHistoryUpdated: deployInfo && deployInfo.releaseHistoryUpdated,
     releaseHistoryFile: deployInfo && deployInfo.releaseHistoryFile,
-    releaseHistoryStatus: deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled",
+    releaseHistoryStatus: (deployInfo && deployInfo.releaseHistoryStatus)
+      || (deployInfo && deployInfo.releaseHistoryUpdated ? "updated" : "disabled"),
   });
   clearBundleWorkspaceState(runtime);
   return {
@@ -7571,6 +7625,7 @@ module.exports = {
   evaluateVisualBaselinePolicy,
   handleVisualBaselineFailureRoute,
   isTechnicalGateFailure,
+  routeTechnicalGateFailureToBlocked,
   routeTechnicalGateFailureToHumanInput,
   normalizeFindingTextForFingerprint,
   findingsFingerprint,
@@ -7593,6 +7648,8 @@ module.exports = {
     completeActiveBundle,
     activeBundleEntry,
     updateActiveBundleState,
+    enforceBlockedQueuePolicy,
+    hasTechnicalGateAutoRecoveryDisabled,
     runReleaseHistoryUpdate,
     runReleaseAutomation,
     runPendingReleaseBundle,
