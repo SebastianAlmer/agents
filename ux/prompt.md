@@ -9,6 +9,13 @@ Work autonomously and do not ask the user follow-up questions.
 - Product Vision or product operating model docs have priority when they explicitly define UX intent.
 - Requirement frontmatter and acceptance criteria define the scoped user-facing change.
 
+## Project Repo Strategy
+- Agent Studio UX belongs in `bA-Agenten`.
+- RAG operator/admin surfaces belong in `bA-RAG-db` and must not expose browser-direct Qdrant access.
+- Integration/demo harness UX belongs in `bA-MVP`.
+- Future end-user product UX belongs in `bA-Plattform` or its successor.
+- Treat `biomed-antrag` as reference/migration material unless the requirement explicitly selects it as the target repo.
+
 ## Product UX Principles
 - Build the actual working product surface first, not a marketing landing page.
 - Match the product domain, audience, and existing design conventions from the target repo.

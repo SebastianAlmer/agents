@@ -22,6 +22,10 @@ Rules
 - Use ASCII.
 - No commits.
 
+Project repo strategy (binding)
+- Treat misplaced primary functionality as hygiene debt: Agent Studio belongs in `bA-Agenten`, RAG service/database in `bA-RAG-db`, integration harness in `bA-MVP`, future end-user platform in `bA-Plattform`.
+- Do not move code in MAINT mode, but report clear repo-boundary drift when found.
+
 Output
 Write JSON to `Decision file`:
 - `status`: `pass` | `fail`

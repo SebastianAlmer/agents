@@ -487,6 +487,76 @@ function fileBundleId(filePath) {
   return String(fm.bundle_id || "").trim();
 }
 
+function requirementTargetStatus(runtime, filePath) {
+  if (runtime && typeof runtime.requirementTargetRepoStatus === "function") {
+    return runtime.requirementTargetRepoStatus(filePath);
+  }
+  return { ok: true, key: "default", raw: "default", target: null, reason: "" };
+}
+
+function validateTargetRepoForFiles(runtime, files, preferredTargetRepo = "") {
+  const keys = new Set();
+  const invalid = [];
+  for (const filePath of files || []) {
+    const status = requirementTargetStatus(runtime, filePath);
+    if (!status.ok) {
+      invalid.push({ filePath, reason: status.reason || "invalid target_repo" });
+      continue;
+    }
+    if (status.key) {
+      keys.add(status.key);
+    }
+  }
+  const preferred = String(preferredTargetRepo || "").trim();
+  if (preferred) {
+    keys.add(preferred);
+  }
+  const sortedKeys = Array.from(keys).sort((a, b) => a.localeCompare(b));
+  if (invalid.length > 0) {
+    return { ok: false, targetRepo: "", reason: invalid[0].reason, keys: sortedKeys, invalid };
+  }
+  if (sortedKeys.length > 1) {
+    return { ok: false, targetRepo: "", reason: `mixed target_repo values: ${sortedKeys.join(", ")}`, keys: sortedKeys, invalid };
+  }
+  return { ok: true, targetRepo: sortedKeys[0] || "default", reason: "", keys: sortedKeys, invalid };
+}
+
+function runtimeForTargetRepo(runtime, targetRepo) {
+  if (runtime && typeof runtime.withTargetRepo === "function") {
+    return runtime.withTargetRepo(targetRepo || (runtime.activeTarget && runtime.activeTarget.key) || runtime.targetRepoKey || "default");
+  }
+  return runtime;
+}
+
+function inferTargetRepoForBundle(runtime, bundleId) {
+  const id = String(bundleId || "").trim();
+  if (!id) {
+    return "";
+  }
+  const queues = ["selected", "arch", "dev", "qa", "ux", "sec", "deploy", "released"];
+  const files = [];
+  for (const queueName of queues) {
+    for (const filePath of listQueueFilesByBundle(runtime, queueName, id)) {
+      files.push(filePath);
+    }
+  }
+  const check = validateTargetRepoForFiles(runtime, files);
+  return check.ok ? check.targetRepo : "";
+}
+
+function runtimeForActiveBundle(runtime) {
+  const entry = activeBundleEntry(runtime);
+  const targetRepo = entry && entry.targetRepo
+    ? entry.targetRepo
+    : inferTargetRepoForBundle(runtime, entry && entry.id);
+  return runtimeForTargetRepo(runtime, targetRepo || runtime.targetRepoKey || "default");
+}
+
+function targetEnv(runtime) {
+  const key = String((runtime && (runtime.targetRepoKey || (runtime.activeTarget && runtime.activeTarget.key))) || "").trim();
+  return key ? { AGENTS_TARGET_REPO_KEY: key } : {};
+}
+
 function listQueueFilesByBundle(runtime, queueName, bundleId) {
   const files = listQueueFiles(runtime.queues[queueName]);
   const normalized = String(bundleId || "").trim();
@@ -558,6 +628,31 @@ function activateReadyBundle(runtime, controls) {
     ? readyEntry.sourceReqIds.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
   const selectedFiles = listQueueFilesByBundle(runtime, "selected", readyId);
+  const targetCheck = validateTargetRepoForFiles(runtime, selectedFiles, readyEntry.targetRepo);
+  if (selectedFiles.length > 0 && !targetCheck.ok) {
+    for (const filePath of selectedFiles) {
+      clearRequirementBundleAssignment(filePath, [
+        "Delivery runner: target repo bundle guard",
+        `- Previous bundle: ${readyId}.`,
+        `- Bundle aborted before start: ${targetCheck.reason}.`,
+        "- Requirement remains in selected for a repo-homogeneous bundle rebuild.",
+      ]);
+    }
+    registry.ready_bundle_id = "";
+    registry.bundles[readyId] = {
+      ...readyEntry,
+      id: readyId,
+      status: "aborted",
+      finishedAt: new Date().toISOString(),
+      finishedReason: `target_repo guard: ${targetCheck.reason}`,
+      lastTransition: "target-repo-guard-aborted",
+    };
+    writeBundleRegistryForRuntime(runtime, registry);
+    process.stdout.write(
+      `${timestampMinute()} DELIVERY: target_repo guard aborted ready bundle id=${readyId} (${targetCheck.reason})\n`
+    );
+    return { started: false, bundleId: "", reason: "target-repo-guard" };
+  }
   if (sourceReqIds.length === 0 && selectedFiles.length === 0) {
     registry.ready_bundle_id = "";
     registry.bundles[readyId] = {
@@ -585,6 +680,7 @@ function activateReadyBundle(runtime, controls) {
     status: "active",
     startedAt: now,
     createdAt: String(current.createdAt || now).trim() || now,
+    targetRepo: targetCheck.targetRepo || String(current.targetRepo || "").trim(),
   };
   writeBundleRegistryForRuntime(runtime, registry);
   log(controls, `bundle activated id=${readyId}`);
@@ -618,6 +714,7 @@ function completeActiveBundle(runtime, controls, details = {}) {
         ? details.releaseHistoryUpdated
         : current.releaseHistoryUpdated
     ),
+    targetRepo: String(details.targetRepo || current.targetRepo || "").trim(),
   };
   registry.active_bundle_id = "";
   writeBundleRegistryForRuntime(runtime, registry);
@@ -722,6 +819,7 @@ function markAdditionalReleasedBundlesCompleted(runtime, controls, currentBundle
   const releaseHistoryFile = String(details.releaseHistoryFile || "").trim();
   const releaseHistoryStatus = String(details.releaseHistoryStatus || "").trim();
   const releaseHistoryUpdated = Boolean(details.releaseHistoryUpdated);
+  const targetRepo = String(details.targetRepo || "").trim();
   for (const id of ids) {
     const current = registry.bundles[id] && typeof registry.bundles[id] === "object"
       ? registry.bundles[id]
@@ -739,6 +837,7 @@ function markAdditionalReleasedBundlesCompleted(runtime, controls, currentBundle
       releaseHistoryFile: releaseHistoryFile || String(current.releaseHistoryFile || "").trim(),
       releaseHistoryStatus: releaseHistoryStatus || String(current.releaseHistoryStatus || "").trim(),
       releaseHistoryUpdated: releaseHistoryUpdated || Boolean(current.releaseHistoryUpdated),
+      targetRepo: targetRepo || String(current.targetRepo || "").trim(),
     };
   }
   writeBundleRegistryForRuntime(runtime, registry);
@@ -1754,12 +1853,7 @@ function queueSignature(runtime, queueNames) {
     const files = listQueueFiles(dir);
     parts.push(`${queueName}:${files.length}`);
     for (const file of files) {
-      try {
-        const stat = fs.statSync(file);
-        parts.push(`${queueName}:${path.basename(file)}|${stat.size}|${Math.round(stat.mtimeMs)}`);
-      } catch {
-        parts.push(`${queueName}:${path.basename(file)}|missing`);
-      }
+      parts.push(`${queueName}:${path.basename(file)}`);
     }
   }
   return parts.join("\n");
@@ -1818,6 +1912,14 @@ function noProgressFallbackThreshold(runtime) {
   return Math.max(2, Math.min(4, normalized));
 }
 
+function resolveNoProgressFallbackThreshold(runtime, options) {
+  const configured = Number.parseInt(String(options && options.fallbackThreshold || ""), 10);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1, Math.min(4, configured));
+  }
+  return noProgressFallbackThreshold(runtime);
+}
+
 function handleSuccessfulStageNoProgress(runtime, controls, options) {
   const stageName = String(options && options.stageName || "stage").toLowerCase();
   const queueName = String(options && options.queueName || "").trim();
@@ -1843,7 +1945,7 @@ function handleSuccessfulStageNoProgress(runtime, controls, options) {
   );
 
   resetAgentAutoThread(runtime, agentRoleDir, controls, `no-progress attempt ${attempts}`);
-  const threshold = noProgressFallbackThreshold(runtime);
+  const threshold = resolveNoProgressFallbackThreshold(runtime, options);
   if (attempts < threshold) {
     return false;
   }
@@ -2636,6 +2738,7 @@ async function runArch(runtime, controls) {
       scriptPath: path.join(runtime.agentsRoot, "arch", "arch.js"),
       args: ["--auto", "--requirement", sourceFile],
       cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
       maxRetries: retryMaxForStage(
         runtime,
         "arch",
@@ -2738,6 +2841,7 @@ async function runDev(runtime, controls) {
         scriptPath,
         args: ["--auto", "--requirement", activeSource],
         cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
         maxRetries: 0,
         retryDelaySeconds: runtime.loops.retryDelaySeconds,
         stopSignal: getStopSignal(controls),
@@ -2854,6 +2958,7 @@ async function runUxBatch(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "ux", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -2910,6 +3015,7 @@ async function runUxBatch(runtime, controls) {
       fallbackTargetQueue: "sec",
       fallbackStatus: "sec",
       fallbackLabel: "ux -> sec",
+      fallbackThreshold: 1,
     });
   }
 
@@ -2942,6 +3048,7 @@ async function runSecBatch(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "sec", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -2998,6 +3105,7 @@ async function runSecBatch(runtime, controls) {
       fallbackTargetQueue: "qa",
       fallbackStatus: "qa",
       fallbackLabel: "sec -> qa",
+      fallbackThreshold: 1,
     });
   }
 
@@ -3960,14 +4068,15 @@ function readBundleWorkspaceState(runtime) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || typeof parsed !== "object") {
-      return { bundleKey: "", branch: "" };
+      return { bundleKey: "", branch: "", targetRepo: "" };
     }
     return {
       bundleKey: String(parsed.bundleKey || "").trim(),
       branch: String(parsed.branch || "").trim(),
+      targetRepo: String(parsed.targetRepo || "").trim(),
     };
   } catch {
-    return { bundleKey: "", branch: "" };
+    return { bundleKey: "", branch: "", targetRepo: "" };
   }
 }
 
@@ -3977,13 +4086,14 @@ function writeBundleWorkspaceState(runtime, state) {
   const payload = {
     bundleKey: String(normalized.bundleKey || "").trim(),
     branch: String(normalized.branch || "").trim(),
+    targetRepo: String(normalized.targetRepo || (runtime && runtime.targetRepoKey) || "").trim(),
     updatedAt: new Date().toISOString(),
   };
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
 function clearBundleWorkspaceState(runtime) {
-  writeBundleWorkspaceState(runtime, { bundleKey: "", branch: "" });
+  writeBundleWorkspaceState(runtime, { bundleKey: "", branch: "", targetRepo: (runtime && runtime.targetRepoKey) || "" });
 }
 
 function escapeRegExp(value) {
@@ -4174,7 +4284,12 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
   const baseBranch = String(releaseCfg.baseBranch || "dev").trim() || "dev";
   const remote = String(releaseCfg.remote || "origin").trim() || "origin";
   const state = readBundleWorkspaceState(runtime);
-  const rawRememberedBranch = state.bundleKey === normalizedBundleKey ? String(state.branch || "").trim() : "";
+  const currentTargetRepo = String(runtime.targetRepoKey || (runtime.activeTarget && runtime.activeTarget.key) || "").trim();
+  const stateTargetRepo = String(state.targetRepo || "").trim();
+  const stateMatchesTarget = !stateTargetRepo || !currentTargetRepo || stateTargetRepo === currentTargetRepo;
+  const rawRememberedBranch = state.bundleKey === normalizedBundleKey && stateMatchesTarget
+    ? String(state.branch || "").trim()
+    : "";
   const rememberedBranch = rawRememberedBranch && rawRememberedBranch !== baseBranch
     ? rawRememberedBranch
     : "";
@@ -4193,7 +4308,7 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
     return outcome;
   }
   if (currentBranch === targetBranch && currentBranch !== baseBranch) {
-    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch, targetRepo: currentTargetRepo });
     outcome.ok = true;
     outcome.branch = targetBranch;
     return outcome;
@@ -4209,7 +4324,7 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
       outcome.reason = `checkout existing branch failed: ${truncateForQueueNote(checkoutExisting.output || "", 300)}`;
       return outcome;
     }
-    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+    writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch, targetRepo: currentTargetRepo });
     outcome.ok = true;
     outcome.branch = targetBranch;
     log(controls, `BUNDLE BRANCH: switched to existing ${targetBranch}`);
@@ -4238,7 +4353,7 @@ function ensureBundleWorkspaceBranch(runtime, controls, bundleKey, options = {})
     return outcome;
   }
 
-  writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch });
+  writeBundleWorkspaceState(runtime, { bundleKey: normalizedBundleKey, branch: targetBranch, targetRepo: currentTargetRepo });
   outcome.ok = true;
   outcome.branch = targetBranch;
   log(controls, `BUNDLE BRANCH: created and switched ${targetBranch} (base=${baseBranch})`);
@@ -4877,6 +4992,7 @@ async function runQaBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--batch-tests", "--batch-queue", "qa", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "qa", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -5006,6 +5122,7 @@ async function runUatBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
     args: ["--auto", "--batch", "--source-queue", "deploy", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "uat", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -5121,6 +5238,7 @@ async function runUxFinalPass(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "ux", "ux.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "ux-final", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -5172,6 +5290,7 @@ async function runSecFinalPass(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "sec", "sec.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "sec-final", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -5231,6 +5350,7 @@ async function runUatFullRegression(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "uat", "uat.js"),
     args: ["--auto", "--full-regression", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "uat-full", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -5834,6 +5954,7 @@ async function runMaintPostDeploy(runtime, controls, lastSignature) {
     scriptPath: path.join(runtime.agentsRoot, "maint", "maint.js"),
     args: ["--auto", "--post-deploy", "--decision-file", decisionPath],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "maint", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -5903,6 +6024,104 @@ function runGit(repoRoot, args) {
     ok: false,
     output: `${String(result.stdout || "").trim()}\n${String(result.stderr || "").trim()}`.trim(),
   };
+}
+
+const POST_RELEASE_GENERATED_FILES = [
+  "app/build-info.json",
+  "web/public/build-info.json",
+];
+
+function gitNameList(repoRoot, args) {
+  const result = runGit(repoRoot, args);
+  if (!result.ok) {
+    return null;
+  }
+  return String(result.output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function restorePostReleaseGeneratedFiles(runtime, controls) {
+  const repoRoot = runtime && runtime.repoRoot ? runtime.repoRoot : "";
+  if (!repoRoot || !gitRoot(repoRoot)) {
+    return false;
+  }
+  const generated = POST_RELEASE_GENERATED_FILES.filter((relativePath) => fs.existsSync(path.join(repoRoot, relativePath)));
+  if (generated.length === 0) {
+    return false;
+  }
+
+  const unstaged = gitNameList(repoRoot, ["diff", "--name-only"]);
+  const staged = gitNameList(repoRoot, ["diff", "--cached", "--name-only"]);
+  if (!unstaged || !staged) {
+    return false;
+  }
+  const dirty = Array.from(new Set([...unstaged, ...staged])).sort((a, b) => a.localeCompare(b));
+  if (dirty.length === 0) {
+    return false;
+  }
+
+  const generatedSet = new Set(generated);
+  if (!dirty.every((relativePath) => generatedSet.has(relativePath))) {
+    return false;
+  }
+
+  const restore = runGit(repoRoot, ["restore", "--staged", "--worktree", "--", ...dirty]);
+  if (!restore.ok) {
+    log(controls, `RELEASE: generated build-info cleanup failed ${truncateForQueueNote(restore.output || "", 240)}`);
+    return false;
+  }
+  log(controls, `RELEASE: restored generated post-check files ${dirty.join(", ")}`);
+  return true;
+}
+
+function refreshReleaseBuildInfoFiles(runtime, controls, context = {}) {
+  const repoRoot = runtime && runtime.repoRoot ? runtime.repoRoot : "";
+  if (!repoRoot) {
+    return false;
+  }
+  const version = String(context.version || "").trim();
+  const tagName = normalizeVersionTag(version);
+  const env = {
+    ...process.env,
+    ROOT_RELEASE_VERSION: version,
+    RELEASE_VERSION: version,
+    RELEASE_TAG: tagName,
+    RELEASE_BUNDLE_ID: String(context.bundleId || context.bundleKey || "").trim(),
+  };
+  const jobs = [
+    {
+      script: path.join(repoRoot, "app", "scripts", "generate-build-info.js"),
+      args: ["--service", "api", "--out", "build-info.json"],
+    },
+    {
+      script: path.join(repoRoot, "web", "scripts", "generate-build-info.js"),
+      args: ["--service", "web", "--out", "public/build-info.json"],
+    },
+  ];
+  let refreshed = false;
+  for (const job of jobs) {
+    if (!fs.existsSync(job.script)) {
+      continue;
+    }
+    const result = spawnSync(process.execPath, [job.script, ...job.args], {
+      cwd: repoRoot,
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.status !== 0) {
+      const output = `${String(result.stdout || "").trim()}\n${String(result.stderr || "").trim()}`.trim();
+      log(controls, `RELEASE: build-info refresh warning ${truncateForQueueNote(output || job.script, 240)}`);
+      continue;
+    }
+    refreshed = true;
+  }
+  if (refreshed) {
+    log(controls, "RELEASE: refreshed build-info metadata before release commit");
+  }
+  return refreshed;
 }
 
 function runCli(cmd, args, cwd) {
@@ -6308,6 +6527,7 @@ async function runReleaseHistoryUpdate(runtime, controls, context = {}) {
     scriptPath: path.join(runtime.agentsRoot, "deploy", "deploy.js"),
     args,
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "deploy", runtime.loops && runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops && runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -6396,6 +6616,7 @@ function createReleaseConflictHumanDecision(runtime, details) {
   const baseBranch = String(details.baseBranch || "dev").trim() || "dev";
   const bundle = String(details.bundleId || "unknown").trim();
   const remote = String(details.remote || "origin").trim() || "origin";
+  const targetRepo = String((runtime && runtime.targetRepoKey) || (runtime && runtime.activeTarget && runtime.activeTarget.key) || "").trim();
 
   const content = [
     "---",
@@ -6407,6 +6628,7 @@ function createReleaseConflictHumanDecision(runtime, details) {
     "implementation_scope: fullstack",
     "visual_change_intent: false",
     "baseline_decision: none",
+    targetRepo ? `target_repo: ${targetRepo}` : "",
     `bundle_id: ${bundle}`,
     "---",
     "",
@@ -6683,6 +6905,11 @@ async function runReleaseAutomation(runtime, controls, context = {}) {
     outcome.releaseHistoryStatus = String((activeBundleEntry(runtime) || {}).releaseHistoryStatus || "updated").trim() || "updated";
   }
 
+  refreshReleaseBuildInfoFiles(runtime, controls, {
+    bundleId: context.bundleId,
+    bundleKey: context.bundleKey,
+    version: newVersion,
+  });
   runGit(runtime.repoRoot, ["add", "-A"]);
   const commitMessage = `chore(release): ${bundleLabel} v${newVersion}`;
   const commit = runGit(runtime.repoRoot, ["commit", "-m", commitMessage]);
@@ -6838,6 +7065,7 @@ async function runDeployBundle(runtime, controls) {
     scriptPath: path.join(runtime.agentsRoot, "deploy", "deploy.js"),
     args: ["--auto", "--batch"],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "deploy", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -7238,6 +7466,7 @@ async function runQaPostBundle(runtime, controls, lastSignature, options = {}) {
     scriptPath: path.join(runtime.agentsRoot, "qa", "qa.js"),
     args: ["--auto", "--final-pass", "--gate-file", gatePath],
     cwd: runtime.agentsRoot,
+    env: targetEnv(runtime),
     maxRetries: retryMaxForStage(runtime, "qa-post", runtime.loops.maxRetries),
     retryDelaySeconds: runtime.loops.retryDelaySeconds,
     stopSignal: getStopSignal(controls),
@@ -7399,6 +7628,7 @@ async function runFullDownstream(runtime, controls, lastReleasedSignature, lastM
     if (releasedFinal.progressed) {
       progressed = true;
     }
+    restorePostReleaseGeneratedFiles(runtime, controls);
   }
 
   return {
@@ -7447,7 +7677,9 @@ async function main() {
   );
   preserveGlobalPauseOnStartup(runtime, controls);
   cleanupRequirementJsonArtifacts(runtime, controls, "startup");
-  pruneStaleWorkspaceBranches(runtime, controls, "startup");
+  if (runtime.targetRepoRouting && runtime.targetRepoRouting.mode === "fixed") {
+    pruneStaleWorkspaceBranches(runtimeForTargetRepo(runtime, runtime.targetRepoKey || "default"), controls, "startup");
+  }
   sanitizeBundleRegistryState(runtime, controls, "startup");
   reportConflictingRequirementDuplicates(runtime, controls, "startup");
 
@@ -7492,10 +7724,16 @@ async function main() {
     );
     underfilledCycles = bundle.underfilledCycles;
     const resumed = resumeActiveBundleSelectedIntake(runtime, controls);
+    const fallbackTargetRepo = runtime.targetRepoRouting && runtime.targetRepoRouting.fixedTargetRepo
+      ? runtime.targetRepoRouting.fixedTargetRepo
+      : (runtime.targetRepoKey || "default");
+    const cycleRuntime = activeBundleId(runtime)
+      ? runtimeForActiveBundle(runtime)
+      : runtimeForTargetRepo(runtime, fallbackTargetRepo);
 
     const workspaceBundleKey = bundle.bundleKey || (resumed.progressed ? resumed.bundleKey : "");
     if (workspaceBundleKey) {
-      const workspace = ensureBundleWorkspaceBranch(runtime, controls, workspaceBundleKey);
+      const workspace = ensureBundleWorkspaceBranch(cycleRuntime, controls, workspaceBundleKey);
       if (!workspace.ok) {
         log(controls, `BUNDLE BRANCH: setup failed for ${workspaceBundleKey}: ${workspace.reason}`);
         await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
@@ -7503,25 +7741,25 @@ async function main() {
       }
     }
 
-    const workspaceGuard = enforceActiveWorkspaceBranch(runtime, controls);
+    const workspaceGuard = enforceActiveWorkspaceBranch(cycleRuntime, controls);
     if (!workspaceGuard.ok) {
       log(controls, `BUNDLE BRANCH: enforcement failed: ${workspaceGuard.reason}`);
       await sleepWithStopCheck(Math.max(1, runtime.loops.deliveryPollSeconds) * 1000, controls);
       continue;
     }
 
-    quarantineForeignExecutionQueues(runtime, controls);
+    quarantineForeignExecutionQueues(cycleRuntime, controls);
 
-    await runArch(runtime, controls);
-    await runDev(runtime, controls);
+    await runArch(cycleRuntime, controls);
+    await runDev(cycleRuntime, controls);
 
-    if (mode === "fast" && !planningInProgress(runtime)) {
-      await runFastDownstream(runtime, controls);
+    if (mode === "fast" && !planningInProgress(cycleRuntime)) {
+      await runFastDownstream(cycleRuntime, controls);
     }
 
-    if ((mode === "full" || mode === "test") && !planningInProgress(runtime)) {
+    if ((mode === "full" || mode === "test") && !planningInProgress(cycleRuntime)) {
       const downstream = await runFullDownstream(
-        runtime,
+        cycleRuntime,
         controls,
         lastReleasedSignature,
         lastMaintSignature,
@@ -7535,29 +7773,29 @@ async function main() {
       if (downstream.maintSignature) {
         lastMaintSignature = downstream.maintSignature;
       }
-      if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
-        clearBundleWorkspaceState(runtime);
+      if (!planningInProgress(cycleRuntime) && !downstreamInProgress(cycleRuntime)) {
+        clearBundleWorkspaceState(cycleRuntime);
       }
     }
 
-    if (mode === "test" && !planningInProgress(runtime) && !downstreamInProgress(runtime)) {
-      const result = await maybeRunComprehensiveSystemTest(runtime, controls, {
+    if (mode === "test" && !planningInProgress(cycleRuntime) && !downstreamInProgress(cycleRuntime)) {
+      const result = await maybeRunComprehensiveSystemTest(cycleRuntime, controls, {
         reason: "test-mode",
         force: forceComprehensiveOnce,
         nonMutating: true,
         runDeterministicE2e: true,
-        requireDeterministicE2e: Boolean(runtime.e2e && runtime.e2e.requiredInTestMode),
+        requireDeterministicE2e: Boolean(cycleRuntime.e2e && cycleRuntime.e2e.requiredInTestMode),
       });
       if (forceComprehensiveOnce && result.reason !== "no-signature") {
         forceComprehensiveOnce = false;
       }
     }
 
-    if (mode === "full" && shouldTriggerVisionFinalComprehensiveTest(runtime)) {
-      const result = await maybeRunComprehensiveSystemTest(runtime, controls, {
+    if (mode === "full" && shouldTriggerVisionFinalComprehensiveTest(cycleRuntime)) {
+      const result = await maybeRunComprehensiveSystemTest(cycleRuntime, controls, {
         reason: "vision-complete",
         force: forceComprehensiveOnce,
-        runDeterministicE2e: Boolean(runtime.e2e && runtime.e2e.runOnFullCompletion),
+        runDeterministicE2e: Boolean(cycleRuntime.e2e && cycleRuntime.e2e.runOnFullCompletion),
         requireDeterministicE2e: false,
       });
       if (forceComprehensiveOnce && result.reason !== "no-signature") {
@@ -7565,13 +7803,13 @@ async function main() {
       }
     }
 
-    if (shouldAbortDrainedActiveBundle(runtime)) {
-      completeActiveBundle(runtime, controls, { status: "aborted" });
+    if (shouldAbortDrainedActiveBundle(cycleRuntime)) {
+      completeActiveBundle(cycleRuntime, controls, { status: "aborted", targetRepo: cycleRuntime.targetRepoKey || "" });
     }
 
-    if (!planningInProgress(runtime) && !downstreamInProgress(runtime)) {
-      clearBundleWorkspaceState(runtime);
-      pruneStaleWorkspaceBranches(runtime, controls, "idle");
+    if (!planningInProgress(cycleRuntime) && !downstreamInProgress(cycleRuntime)) {
+      clearBundleWorkspaceState(cycleRuntime);
+      pruneStaleWorkspaceBranches(cycleRuntime, controls, "idle");
     }
 
     if (args.once) {
@@ -7653,12 +7891,19 @@ module.exports = {
     runReleaseHistoryUpdate,
     runReleaseAutomation,
     runPendingReleaseBundle,
+    validateTargetRepoForFiles,
+    runtimeForTargetRepo,
+    runtimeForActiveBundle,
     quarantineForeignExecutionQueues,
     resumeActiveBundleSelectedIntake,
     runFastDownstream,
     sanitizeBundleRegistryState,
     runUatBundle,
     runUatFullRegression,
+    queueSignature,
+    handleSuccessfulStageNoProgress,
+    restorePostReleaseGeneratedFiles,
+    refreshReleaseBuildInfoFiles,
     preserveGlobalPauseOnStartup,
     probeGlobalPauseOnStartup,
     probeGlobalPauseOnStartupWithFallback,

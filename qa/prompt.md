@@ -20,6 +20,11 @@ Rules
 - No commits.
 - Keep outputs concise.
 
+Project repo strategy (binding)
+- Check that changed files match the intended repo boundary.
+- Agent Studio changes should be in `bA-Agenten`; RAG DB/service changes should be in `bA-RAG-db`; integration harness changes should be in `bA-MVP`; future end-user platform changes should be in `bA-Plattform`.
+- Treat new primary Agent Studio or RAG-Service behavior in `biomed-antrag` as a QA finding unless the requirement explicitly allows it.
+
 Visual baseline policy (mandatory)
 - If visual regression fails (Playwright screenshot mismatch), classify by requirement frontmatter:
   - `visual_change_intent=false` + `baseline_decision=none` -> regression fix required.
@@ -52,6 +57,7 @@ Batch mode (`Batch tests: true`)
 - `blocking_findings`: array (empty on pass)
 - `findings`: array of objects with `severity`, `title`, `details`
 - `manual_uat`: empty array `[]` (QA does not escalate manual UAT directly)
+- Before finishing, re-open `Final gate file` and verify it is no longer the pending template.
 
 Review-only mode
 - Do not move requirement files.
@@ -77,6 +83,7 @@ Final mode (`Final pass: true`)
 - `blocking_findings`: array (empty on pass)
 - `findings`: array of objects with `severity`, `title`, `details`
 - `manual_uat`: empty array `[]`
+- Before finishing, re-open `Final gate file` and verify it is no longer the pending template.
 
 Logging
 Print short progress lines, for example:

@@ -78,6 +78,27 @@ test("gateFromAgentResult keeps a definitive parsed gate even when the runner ex
   assert.equal(isTechnicalGateFailure(gate), true);
 });
 
+test("target repo validation rejects mixed bundle files", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-target-repo-test-"));
+  const a = path.join(root, "REQ-A.md");
+  const b = path.join(root, "REQ-B.md");
+  fs.writeFileSync(a, "---\nid: REQ-A\ntarget_repo: agenten\n---\n# A\n", "utf8");
+  fs.writeFileSync(b, "---\nid: REQ-B\ntarget_repo: rag_db\n---\n# B\n", "utf8");
+  const runtime = {
+    requirementTargetRepoStatus(filePath) {
+      const raw = fs.readFileSync(filePath, "utf8");
+      const match = raw.match(/target_repo:\s*([^\n]+)/);
+      const key = match ? match[1].trim() : "";
+      return key ? { ok: true, key, raw: key } : { ok: false, reason: "missing target_repo" };
+    },
+  };
+
+  const result = __test.validateTargetRepoForFiles(runtime, [a, b]);
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /mixed target_repo/);
+});
+
 test("technical gate failure routes to blocked and disables blocked auto-recovery", () => {
   const { root, qaDir, devDir, blockedDir, humanDecisionNeededDir } = mkTempQueues();
 
@@ -150,6 +171,61 @@ test("technical gate failure routes to blocked and disables blocked auto-recover
   assert.equal(fs.existsSync(path.join(blockedDir, "REQ-TEST.md")), true);
   assert.equal(fs.existsSync(path.join(devDir, "REQ-TEST.md")), false);
   assert.equal(fs.existsSync(path.join(humanDecisionNeededDir, "REQ-TEST.md")), false);
+});
+
+test("queue signature ignores in-place requirement edits", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-queue-signature-test-"));
+  const uxDir = path.join(root, "requirements", "ux");
+  const secDir = path.join(root, "requirements", "sec");
+  fs.mkdirSync(uxDir, { recursive: true });
+  fs.mkdirSync(secDir, { recursive: true });
+  const reqPath = path.join(uxDir, "REQ-TEST.md");
+  fs.writeFileSync(reqPath, "---\nid: REQ-TEST\nstatus: ux\n---\n\n# Goal\nInitial\n", "utf8");
+
+  const runtime = { queues: { ux: uxDir, sec: secDir } };
+  const before = __test.queueSignature(runtime, ["ux", "sec"]);
+  fs.appendFileSync(reqPath, "\n## UX Results\nPASS\n", "utf8");
+  const after = __test.queueSignature(runtime, ["ux", "sec"]);
+
+  assert.equal(after, before);
+});
+
+test("successful UX no-progress recovery routes immediately with explicit threshold", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-runner-no-progress-test-"));
+  const uxDir = path.join(root, "requirements", "ux");
+  const secDir = path.join(root, "requirements", "sec");
+  fs.mkdirSync(uxDir, { recursive: true });
+  fs.mkdirSync(secDir, { recursive: true });
+  const reqName = "REQ-TEST.md";
+  fs.writeFileSync(
+    path.join(uxDir, reqName),
+    "---\nid: REQ-TEST\nstatus: ux\n---\n\n# Goal\nRoute me.\n",
+    "utf8"
+  );
+
+  const runtime = {
+    agentsRoot: root,
+    loopPolicy: { loopThreshold: 3 },
+    bundleFlow: { enabled: false },
+    queues: { ux: uxDir, sec: secDir },
+  };
+  const progressed = __test.handleSuccessfulStageNoProgress(runtime, { verbose: false }, {
+    stageName: "ux",
+    queueName: "ux",
+    itemKey: "REQ-TEST",
+    agentRoleDir: "ux",
+    fallbackTargetQueue: "sec",
+    fallbackStatus: "sec",
+    fallbackLabel: "ux -> sec",
+    fallbackThreshold: 1,
+  });
+
+  assert.equal(progressed, true);
+  assert.equal(fs.existsSync(path.join(uxDir, reqName)), false);
+  assert.equal(fs.existsSync(path.join(secDir, reqName)), true);
+  const routed = fs.readFileSync(path.join(secDir, reqName), "utf8");
+  assert.match(routed, /^status: sec$/m);
+  assert.match(routed, /no-progress auto-recovery/);
 });
 
 function mkTempReleasedQueue() {
@@ -311,6 +387,71 @@ function initGitRepoWithBranch(branchName) {
 
   return { root, repoRoot, agentsRoot };
 }
+
+test("post-release cleanup restores generated build-info files when they are the only dirty files", () => {
+  const { repoRoot, agentsRoot } = initGitRepoWithBranch("dev");
+  fs.mkdirSync(path.join(repoRoot, "app"), { recursive: true });
+  fs.mkdirSync(path.join(repoRoot, "web", "public"), { recursive: true });
+  fs.writeFileSync(path.join(repoRoot, "app", "build-info.json"), '{"rootReleaseVersion":"0.1.45"}\n', "utf8");
+  fs.writeFileSync(path.join(repoRoot, "web", "public", "build-info.json"), '{"rootReleaseVersion":"0.1.45"}\n', "utf8");
+  childProcess.execFileSync("git", ["add", "app/build-info.json", "web/public/build-info.json"], { cwd: repoRoot });
+  childProcess.execFileSync("git", ["commit", "-m", "add build info"], { cwd: repoRoot });
+
+  fs.writeFileSync(path.join(repoRoot, "app", "build-info.json"), '{"rootReleaseVersion":"0.1.45","generatedAt":"later"}\n', "utf8");
+  fs.writeFileSync(path.join(repoRoot, "web", "public", "build-info.json"), '{"rootReleaseVersion":"0.1.45","generatedAt":"later"}\n', "utf8");
+
+  const restored = __test.restorePostReleaseGeneratedFiles({ repoRoot, agentsRoot }, { verbose: false });
+  const status = childProcess.execFileSync("git", ["status", "--porcelain"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  }).trim();
+
+  assert.equal(restored, true);
+  assert.equal(status, "");
+});
+
+test("release build-info refresh passes release metadata to generators", () => {
+  const { repoRoot, agentsRoot } = initGitRepoWithBranch("rb/b0001-test");
+  for (const dir of ["app", "web"]) {
+    fs.mkdirSync(path.join(repoRoot, dir, "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, dir, "package.json"), '{"version":"0.1.0"}\n', "utf8");
+    fs.writeFileSync(
+      path.join(repoRoot, dir, "scripts", "generate-build-info.js"),
+      [
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        "const args = process.argv.slice(2);",
+        "const out = args[args.indexOf('--out') + 1];",
+        "const payload = {",
+        "  rootReleaseVersion: process.env.ROOT_RELEASE_VERSION,",
+        "  releaseVersion: process.env.RELEASE_VERSION,",
+        "  tag: process.env.RELEASE_TAG,",
+        "  bundleId: process.env.RELEASE_BUNDLE_ID,",
+        "};",
+        "fs.mkdirSync(path.dirname(path.resolve(__dirname, '..', out)), { recursive: true });",
+        "fs.writeFileSync(path.resolve(__dirname, '..', out), `${JSON.stringify(payload)}\\n`);",
+      ].join("\n"),
+      "utf8"
+    );
+  }
+
+  const refreshed = __test.refreshReleaseBuildInfoFiles(
+    { repoRoot, agentsRoot },
+    { verbose: false },
+    { bundleId: "B0001", version: "0.1.45" }
+  );
+  const apiInfo = JSON.parse(fs.readFileSync(path.join(repoRoot, "app", "build-info.json"), "utf8"));
+  const webInfo = JSON.parse(fs.readFileSync(path.join(repoRoot, "web", "public", "build-info.json"), "utf8"));
+
+  assert.equal(refreshed, true);
+  assert.deepEqual(apiInfo, {
+    rootReleaseVersion: "0.1.45",
+    releaseVersion: "0.1.45",
+    tag: "v0.1.45",
+    bundleId: "B0001",
+  });
+  assert.deepEqual(webInfo, apiInfo);
+});
 
 test("workspace branch setup stays on current branch when disabled in config", () => {
   const { repoRoot, agentsRoot } = initGitRepoWithBranch("feature/manual");

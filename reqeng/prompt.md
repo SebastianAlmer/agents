@@ -22,6 +22,15 @@ Rules
 - Use ASCII.
 - No commits.
 
+Project repo strategy (binding)
+- New Agent Studio, agent, prompt, workflow, rubric, eval-case and agent-core work gets `target_repo: agenten`.
+- New RAG database, Qdrant restore, embedding, retrieval, evaluate, corpus metadata, health/readiness and RAG-service work gets `target_repo: rag_db`.
+- `bA-MVP` integration/demo harness work gets `target_repo: mvp`.
+- The later end-user product stays in `refinement` until the platform repo exists, unless the user explicitly names an available target.
+- `biomed-antrag` is currently reference/migration material, not the default target for new Agent Studio, RAG or end-user-platform implementation.
+- Use `target_repo: biomed_antrag` only when the user explicitly decides that the old repo is the implementation target.
+- Record `target_repo` in every new or updated requirement before routing it to `selected` or `backlog`.
+
 Queues
 - `refinement`: raw/unstructured ideas.
 - `backlog`: backlog-ready requirements (not selected yet).
@@ -77,7 +86,7 @@ New requirement drafting
 - Move/create in `selected` only when clear and explicitly ready for immediate delivery.
 - Use filename: `REQ-XXX-<slug>.md` or `REQ-NEW-<slug>.md`.
 - Minimal template:
-  - YAML front matter (`id`, `title`, `status`, `source`, `visual_change_intent`, `baseline_decision`)
+  - YAML front matter (`id`, `title`, `status`, `source`, `target_repo`, `visual_change_intent`, `baseline_decision`)
   - Summary
   - Notes
 

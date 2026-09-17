@@ -952,11 +952,12 @@ function bundleIdOptions(runtime) {
   };
 }
 
-function reserveNextBundle(runtime) {
+function reserveNextBundle(runtime, targetRepo = "") {
   const registry = readBundleRegistryForRuntime(runtime);
   const seq = Math.max(1, Number.parseInt(String(registry.next_bundle_seq || 1), 10) || 1);
   const id = formatBundleId(seq, bundleIdOptions(runtime));
   const now = new Date().toISOString();
+  const normalizedTargetRepo = String(targetRepo || "").trim();
   registry.next_bundle_seq = seq + 1;
   if (!registry.bundles[id]) {
     registry.bundles[id] = {
@@ -969,13 +970,14 @@ function reserveNextBundle(runtime) {
       sourceReqIds: [],
       carryoversIn: [],
       carryoversOut: [],
+      targetRepo: normalizedTargetRepo,
     };
   }
   writeBundleRegistryForRuntime(runtime, registry);
   return { id, seq };
 }
 
-function updateBundleRegistryReady(runtime, bundleId, sourceReqIds = []) {
+function updateBundleRegistryReady(runtime, bundleId, sourceReqIds = [], targetRepo = "") {
   const registry = readBundleRegistryForRuntime(runtime);
   const seq = parseBundleSequence(bundleId, bundleIdOptions(runtime));
   const now = new Date().toISOString();
@@ -989,6 +991,7 @@ function updateBundleRegistryReady(runtime, bundleId, sourceReqIds = []) {
     status: "ready",
     createdAt: entry.createdAt || now,
     sourceReqIds: Array.isArray(sourceReqIds) ? sourceReqIds : [],
+    targetRepo: String(targetRepo || entry.targetRepo || "").trim(),
   };
   registry.ready_bundle_id = bundleId;
   writeBundleRegistryForRuntime(runtime, registry);
@@ -1100,21 +1103,102 @@ function markRequirementAsCarryover(filePath, controls, reasonLabel = "bundle-ex
   return currentPath;
 }
 
-function assignBundleIdToSelected(runtime, bundleId, bundleSeq) {
+function requirementTargetStatus(runtime, filePath) {
+  if (runtime && typeof runtime.requirementTargetRepoStatus === "function") {
+    return runtime.requirementTargetRepoStatus(filePath);
+  }
+  return { ok: true, key: "default", raw: "default", target: null, reason: "" };
+}
+
+function routeInvalidTargetRepoToClarify(runtime, filePath, controls, status) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return false;
+  }
+  const detail = status && status.reason ? status.reason : "invalid target_repo";
+  const moved = moveWithFallback(
+    runtime,
+    filePath,
+    "toClarify",
+    "to-clarify",
+    [
+      "PO runner target repo guard",
+      `- ${detail}`,
+      "- from_requirement mode requires a valid target_repo before bundling",
+      `- valid targets: ${(runtime.targetRepoKeys || []).filter((key) => key !== "default").join(", ") || "default"}`,
+    ]
+  );
+  if (moved) {
+    log(controls, `target_repo guard routed ${path.basename(filePath)} -> to-clarify (${detail})`);
+  }
+  return moved;
+}
+
+function groupFilesByTargetRepo(runtime, files, controls, options = {}) {
+  const groups = new Map();
+  const invalid = [];
+  for (const filePath of files || []) {
+    const status = requirementTargetStatus(runtime, filePath);
+    if (!status.ok) {
+      invalid.push({ filePath, status });
+      if (options.routeInvalid) {
+        routeInvalidTargetRepoToClarify(runtime, filePath, controls, status);
+      }
+      continue;
+    }
+    const key = String(status.key || "default").trim() || "default";
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(filePath);
+  }
+  const sortedGroups = Array.from(groups.entries())
+    .map(([key, groupFiles]) => ({ key, files: groupFiles }))
+    .sort((a, b) => {
+      if (b.files.length !== a.files.length) {
+        return b.files.length - a.files.length;
+      }
+      return a.key.localeCompare(b.key);
+    });
+  return { groups: sortedGroups, invalid };
+}
+
+function preferredSelectedTargetRepo(runtime) {
+  const grouped = groupFilesByTargetRepo(runtime, listQueueFiles(runtime.queues.selected), null);
+  return grouped.groups.length > 0 ? grouped.groups[0].key : "";
+}
+
+function listAutoSelectableBacklogFilesForTarget(runtime, targetRepo = "") {
+  const normalizedTarget = String(targetRepo || "").trim();
+  return listAutoSelectableBacklogFiles(runtime)
+    .filter((filePath) => {
+      const status = requirementTargetStatus(runtime, filePath);
+      if (!status.ok) {
+        return false;
+      }
+      return !normalizedTarget || status.key === normalizedTarget;
+    });
+}
+
+function assignBundleIdToSelected(runtime, bundleId, bundleSeq, files = [], targetRepo = "") {
   if (!bundleId) {
     return 0;
   }
   let updated = 0;
-  for (const sourcePath of listQueueFiles(runtime.queues.selected)) {
+  const selectedFiles = Array.isArray(files) && files.length > 0
+    ? files
+    : listQueueFiles(runtime.queues.selected);
+  for (const sourcePath of selectedFiles) {
     const filePath = renameRequirementForBundle(sourcePath, bundleId);
     const okBundle = setFrontMatterField(filePath, "bundle_id", bundleId);
     const okSeq = setFrontMatterField(filePath, "bundle_seq", bundleSeq);
+    const okTarget = targetRepo ? setFrontMatterField(filePath, "target_repo", targetRepo) : false;
     const bundleHistoryLines = [
       `- Current bundle: ${bundleId} (seq=${bundleSeq})`,
+      targetRepo ? `- Target repo: ${targetRepo}` : "- Target repo: legacy/default",
       "- This requirement is part of the currently prepared static delivery bundle.",
     ];
     upsertMarkdownSection(filePath, "Bundle Assignment", bundleHistoryLines);
-    if (okBundle || okSeq) {
+    if (okBundle || okSeq || okTarget) {
       updated += 1;
     }
   }
@@ -1125,7 +1209,13 @@ function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
   if (!canPrepareBundle(runtime)) {
     return false;
   }
-  const selectedCount = countFiles(runtime.queues.selected);
+  const grouped = groupFilesByTargetRepo(runtime, listQueueFiles(runtime.queues.selected), controls, { routeInvalid: true });
+  if (grouped.invalid.length > 0) {
+    state.underfilledSelectedCycles = 0;
+    return true;
+  }
+  const selectedGroup = grouped.groups[0] || null;
+  const selectedCount = selectedGroup ? selectedGroup.files.length : 0;
   if (selectedCount <= 0) {
     state.underfilledSelectedCycles = 0;
     return false;
@@ -1144,24 +1234,24 @@ function tryPrepareReadyBundle(runtime, controls, state, highWatermark) {
 
   const allowUnderfilled = partialBundle && state.underfilledSelectedCycles >= forceAfter;
   if (partialBundle && !allowUnderfilled && !allowFinalUnderfilled) {
-    log(controls, `bundle readiness wait selected=${selectedCount} target=${target} min=${minBundle} underfilled_cycles=${state.underfilledSelectedCycles}/${forceAfter}`);
+    log(controls, `bundle readiness wait target_repo=${selectedGroup.key} selected=${selectedCount} target=${target} min=${minBundle} underfilled_cycles=${state.underfilledSelectedCycles}/${forceAfter}`);
     return false;
   }
 
   if (partialBundle && allowUnderfilled) {
-    log(controls, `bundle readiness forced underfilled selected=${selectedCount} target=${target} min=${minBundle} after ${state.underfilledSelectedCycles} cycle(s)`);
+    log(controls, `bundle readiness forced underfilled target_repo=${selectedGroup.key} selected=${selectedCount} target=${target} min=${minBundle} after ${state.underfilledSelectedCycles} cycle(s)`);
   } else if (allowFinalUnderfilled) {
-    log(controls, `bundle readiness final underfilled selected=${selectedCount} target=${target} min=${minBundle} (no intake candidates remain)`);
+    log(controls, `bundle readiness final underfilled target_repo=${selectedGroup.key} selected=${selectedCount} target=${target} min=${minBundle} (no intake candidates remain)`);
   }
 
-  const nextBundle = reserveNextBundle(runtime);
-  const tagged = assignBundleIdToSelected(runtime, nextBundle.id, nextBundle.seq);
-  const sourceReqIds = listQueueFiles(runtime.queues.selected)
+  const nextBundle = reserveNextBundle(runtime, selectedGroup.key);
+  const sourceReqIds = selectedGroup.files
     .map((filePath) => String(parseFrontMatter(filePath).id || "").trim())
     .filter(Boolean);
-  updateBundleRegistryReady(runtime, nextBundle.id, sourceReqIds);
+  const tagged = assignBundleIdToSelected(runtime, nextBundle.id, nextBundle.seq, selectedGroup.files, selectedGroup.key);
+  updateBundleRegistryReady(runtime, nextBundle.id, sourceReqIds, selectedGroup.key);
   state.underfilledSelectedCycles = 0;
-  log(controls, `bundle prepared id=${nextBundle.id} selected_tagged=${tagged}`);
+  log(controls, `bundle prepared id=${nextBundle.id} target_repo=${selectedGroup.key} selected_tagged=${tagged}`);
   return true;
 }
 
@@ -2402,7 +2492,7 @@ function promoteBacklogForProgress(runtime, controls, state, cycle) {
     return false;
   }
 
-  const candidate = listAutoSelectableBacklogFiles(runtime)[0] || "";
+  const candidate = listAutoSelectableBacklogFilesForTarget(runtime, preferredSelectedTargetRepo(runtime))[0] || "";
   if (!candidate) {
     return false;
   }
@@ -2505,7 +2595,8 @@ function promoteBacklogCandidates(runtime, controls, state, cycle, highWatermark
   }
 
   const maxPerCycle = Math.max(1, runtime.po.backlogPromoteMaxPerCycle || 1);
-  const backlogFiles = listAutoSelectableBacklogFiles(runtime)
+  const selectedTargetRepo = preferredSelectedTargetRepo(runtime);
+  const backlogFiles = listAutoSelectableBacklogFilesForTarget(runtime, selectedTargetRepo)
     .sort((a, b) => {
       const scoreDelta = parseBusinessScoreFromRequirement(b) - parseBusinessScoreFromRequirement(a);
       if (scoreDelta !== 0) {
@@ -2569,7 +2660,8 @@ function topUpSelectedFromBacklogForBundle(runtime, controls, state, cycle, high
     return 0;
   }
 
-  const backlogFiles = listAutoSelectableBacklogFiles(runtime)
+  const selectedTargetRepo = preferredSelectedTargetRepo(runtime);
+  const backlogFiles = listAutoSelectableBacklogFilesForTarget(runtime, selectedTargetRepo)
     .sort((a, b) => {
       const scoreDelta = parseBusinessScoreFromRequirement(b) - parseBusinessScoreFromRequirement(a);
       if (scoreDelta !== 0) {

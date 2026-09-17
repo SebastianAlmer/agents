@@ -28,6 +28,24 @@ product_vision_dir = ""
 # OPTIONAL: Nur aendern, wenn du die Requirements bewusst woanders verwalten willst.
 requirements_root = "./requirements"
 
+[target_repo_routing]
+# fixed: nutze immer fixed_target_repo.
+# from_requirement: target_repo im Requirement entscheidet.
+mode = "fixed"
+fixed_target_repo = "default"
+
+# Beispiel fuer multi-repo Routing:
+# [target_repos.agenten]
+# path = "/home/you/git/bA-Agenten"
+# aliases = ["bA-Agenten", "agenten"]
+#
+# [target_repos.rag_db]
+# path = "/home/you/git/bA-RAG-db"
+# aliases = ["bA-RAG-db", "rag_db"]
+#
+# [target_repos.agenten.qa]
+# mandatory_checks = ["npm run lint", "npm run test", "npm run build"]
+
 [loops]
 # Typischer Startwert fuer produktive Batches.
 bundle_min_size = 10

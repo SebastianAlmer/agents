@@ -391,6 +391,45 @@ function persistTechnicalGateFailure(gateFile, errorOrReasons, gateLabel = "batc
   return finalReasons.join("; ");
 }
 
+function readGateFile(gateFile, label) {
+  if (!gateFile) {
+    throw new Error(`QA ${label} requires --gate-file`);
+  }
+  if (!fs.existsSync(gateFile)) {
+    throw new Error(`QA ${label} gate file missing: ${gateFile}`);
+  }
+  try {
+    return JSON.parse(fs.readFileSync(gateFile, "utf8"));
+  } catch (err) {
+    throw new Error(`QA ${label} gate file invalid JSON: ${err.message}`);
+  }
+}
+
+function isPendingGatePayload(parsed) {
+  return String(parsed && parsed.status || "").toLowerCase() === "fail"
+    && String(parsed && parsed.summary || "").trim().toLowerCase() === FINAL_GATE_PENDING_SUMMARY
+    && Array.isArray(parsed && parsed.blocking_findings)
+    && parsed.blocking_findings.length === 0
+    && Array.isArray(parsed && parsed.findings)
+    && parsed.findings.length === 0
+    && Array.isArray(parsed && parsed.manual_uat)
+    && parsed.manual_uat.length === 0;
+}
+
+function finalizeGateFile(gateFile, label) {
+  const parsed = readGateFile(gateFile, label);
+  if (isPendingGatePayload(parsed)) {
+    persistTechnicalGateFailure(
+      gateFile,
+      `QA ${label} gate file must not remain pending`,
+      label,
+    );
+    return { recoveredPendingGate: true };
+  }
+  validateGatePayload(parsed, label);
+  return { recoveredPendingGate: false };
+}
+
 function listRequirementFiles(dir) {
   if (!dir || !fs.existsSync(dir)) {
     return [];
@@ -446,18 +485,11 @@ function resolveRequirementPath(requirement, candidateDirs) {
 }
 
 function validateGateFile(gateFile, label) {
-  if (!gateFile) {
-    throw new Error(`QA ${label} requires --gate-file`);
-  }
-  if (!fs.existsSync(gateFile)) {
-    throw new Error(`QA ${label} gate file missing: ${gateFile}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(fs.readFileSync(gateFile, "utf8"));
-  } catch (err) {
-    throw new Error(`QA ${label} gate file invalid JSON: ${err.message}`);
-  }
+  const parsed = readGateFile(gateFile, label);
+  validateGatePayload(parsed, label);
+}
+
+function validateGatePayload(parsed, label) {
   const status = String(parsed.status || "").toLowerCase();
   if (!["pass", "fail"].includes(status)) {
     throw new Error(`QA ${label} gate file has invalid status: ${status || "<empty>"}`);
@@ -615,7 +647,7 @@ async function main() {
   const batchListText = batchTargets.length > 0
     ? batchTargets.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nBatch queue: ${batchQueueName}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
+  const context = `# Context\nTarget repo key: ${runtime.targetRepoKey || "default"}\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nQuick review: ${quickReview}\nBatch tests: ${batchTests}\nBatch queue: ${batchQueueName}\nQA dir: ${qaDir}\nSec dir: ${secDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nBatch test targets:\n${batchListText}\nMandatory QA checks (run in order where applicable):\n${checksText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("QA"));
@@ -643,6 +675,7 @@ async function main() {
   }
 
   let result;
+  let resetThreadAfterGate = false;
   if (finalPass) {
     try {
       result = await runCodexExec({
@@ -698,7 +731,8 @@ async function main() {
       });
 
       if (batchTests) {
-        validateGateFile(gateFile, "batch-tests");
+        const batchGateResult = finalizeGateFile(gateFile, "batch-tests");
+        resetThreadAfterGate = Boolean(batchGateResult.recoveredPendingGate);
       }
       if (reviewOnly) {
         validateReviewDecisionFile(decisionFile);
@@ -712,11 +746,17 @@ async function main() {
         `QA batch-tests execution failed: ${String(error && error.message ? error.message : error)}`,
         "batch-tests",
       );
+      resetThreadAfterGate = true;
       console.error(reason);
     }
   }
 
-  if (result.threadId) {
+  if (resetThreadAfterGate) {
+    if (threadFile && fs.existsSync(threadFile)) {
+      fs.unlinkSync(threadFile);
+      console.log(`QA: reset thread after technical gate failure ${threadFile}`);
+    }
+  } else if (result.threadId) {
     writeThreadId(threadFile, result.threadId);
     console.log(`QA: thread saved ${result.threadId}`);
   } else {
@@ -735,6 +775,7 @@ module.exports = {
   FINAL_GATE_PENDING_SUMMARY,
   normalizeArray,
   terminalPassGate,
+  finalizeGateFile,
   writeGatePayload,
   writeNoItemsPassGate,
   isDefinitiveFinalGatePayload,

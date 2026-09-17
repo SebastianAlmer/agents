@@ -33,6 +33,29 @@ The system is split into three orchestration layers:
 
 All requirements are queue files under `requirements/`.
 
+## Current project repository strategy
+
+The active biomedAntrag work is multi-repo. Agents must not assume that `/home/sebas/biomed/biomed-antrag` is the default implementation target for new work.
+
+Repo boundaries (see `/home/sebas/biomed/CLAUDE.md` + `ARCHITECTURE.md` for the binding split):
+- `bA-Agenten`: Agent-Service + Agent Studio (Control Plane). Owns agents/personas, prompts, prompt bundles, workflows, rubrics, eval cases, the stateless runtime (`POST /api/runs`, `/assist`, `/pubmed/*`) and agent-core contracts.
+- `bA-MVP`: **the platform (Data Plane)** — TVA document model, three-pane web UI, login/users/orgs, review workflow (Antragsteller/Revisor), persistence of Threads/Runs/Memory. Most product requirements target this repo.
+- `bA-RAG-db`: RAG database and RAG service (deferred; only the seam exists). Owns embeddings, retrieval, corpus metadata.
+- `bA-worker` (planned, parked in backlog next): background-job executor without its own DB; jobs live in the bA-MVP DB behind a token-gated job API.
+- `biomed-antrag`: historical/reference implementation and migration source unless the human explicitly selects it as the target for a new requirement.
+
+Requirement source of truth:
+- Product requirements are curated by the REQ engineer (Claude) in `/home/sebas/biomed/bA-docs/requirements/{now,next,later}` (kanban states todo/in_progress/done).
+- Commissioned work is handed off as markdown copies into `requirements/backlog` here (frontmatter is compatible: `target_repo`, `business_score`, `implementation_scope`, `visual_change_intent`, `baseline_decision`). The bA-docs card stays the source of truth for product state.
+
+Runner behavior:
+- Requirements should name the target repo in frontmatter as `target_repo`.
+- In `[target_repo_routing].mode = "from_requirement"`, every executable requirement must resolve to a configured target repo.
+- One delivery bundle may contain exactly one target repo; mixed-target bundles are aborted and rebuilt.
+- Do not add new Agent Studio or RAG-Service primary functionality to `biomed-antrag` without an explicit docs/requirement decision.
+- Direct browser-to-Qdrant access, committing dumps/snapshots/secrets, and cross-repo direct DB coupling are invalid defaults.
+- If a requirement is in the wrong repo boundary, ARCH/DEV should stop and route for clarification or create a migration/extraction follow-up instead of implementing in the wrong place.
+
 ## Architecture model (roles and responsibilities)
 
 Shared role agents used by runners:
@@ -269,6 +292,7 @@ Primary file:
 
 High-impact sections:
 - `[paths]`: repo and queue roots
+- `[target_repo_routing]`, `[target_repos.*]`: fixed target repo or requirement-driven multi-repo routing
 - `[loops]`: polling, retries, bundle sizing
 - `[bundle_flow]`: bundle ids/branches/carryover behavior
 - `[delivery_runner]`: mode and runner timeouts
@@ -285,7 +309,8 @@ High-impact sections:
 
 - Requirement payloads are local queue files.
 - `.runtime/**` is local runtime state.
-- Delivery git actions run in `paths.repo_root`, never in this orchestration repo.
+- Delivery git actions run in the active target repo, never in this orchestration repo.
+- Legacy configs without `[target_repos]` still use `paths.repo_root`.
 
 ## Windows
 

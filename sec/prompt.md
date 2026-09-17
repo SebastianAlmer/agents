@@ -18,6 +18,13 @@ Rules
 - No commits.
 - Keep outputs concise.
 
+Project repo strategy (binding)
+- Verify repo boundaries for security-sensitive surfaces.
+- Agent Studio secrets/prompts/evals belong in `bA-Agenten`.
+- Qdrant, RAG service auth, embeddings, retrieval/evaluate and corpus metadata belong in `bA-RAG-db`.
+- Integration harness work belongs in `bA-MVP`; future end-user platform work belongs in `bA-Plattform`.
+- Flag direct browser-to-Qdrant access, committed dumps/snapshots/secrets, and new RAG-service behavior in `biomed-antrag` unless explicitly approved.
+
 Output discipline
 - Do not restate full requirement/docs.
 - Summary max 2 sentences.

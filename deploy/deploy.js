@@ -275,6 +275,7 @@ function buildReleaseHistoryContext(runtime, args) {
     : "- None";
   return [
     "# Context",
+    `Target repo key: ${runtime.targetRepoKey || "default"}`,
     `Repository root: ${runtime.repoRoot}`,
     "Release history mode: true",
     `Bundle ID: ${String(args.bundleId || "").trim() || "unknown"}`,
@@ -383,7 +384,7 @@ async function main() {
 
   const context = releaseHistory
     ? buildReleaseHistoryContext(runtime, parsed)
-    : `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nBatch mode: ${batch}\nRelease history mode: false\nDeploy dir: ${deployDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nDeploy mode: ${runtime.deploy.mode}\nFinal push on success: ${runtime.deploy.finalPushOnSuccess}\nDeploy queue files:\n${deployListText}\nBatch scope summary: ${scopeSummaryText}\nGit actions are executed by flow runner, not by this agent.\n`;
+    : `# Context\nTarget repo key: ${runtime.targetRepoKey || "default"}\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nBatch mode: ${batch}\nRelease history mode: false\nDeploy dir: ${deployDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nDeploy mode: ${runtime.deploy.mode}\nFinal push on success: ${runtime.deploy.finalPushOnSuccess}\nDeploy queue files:\n${deployListText}\nBatch scope summary: ${scopeSummaryText}\nGit actions are executed by flow runner, not by this agent.\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("DEPLOY"));

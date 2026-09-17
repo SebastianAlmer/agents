@@ -208,7 +208,7 @@ async function main() {
       .sort((a, b) => a.localeCompare(b))
     : [];
   const secListText = secFiles.length > 0 ? secFiles.map((name) => `- ${name}`).join("\n") : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nSec dir: ${secDir}\nQA dir: ${qaDir}\nUX dir: ${uxDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nSEC queue files:\n${secListText}\n`;
+  const context = `# Context\nTarget repo key: ${runtime.targetRepoKey || "default"}\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nFinal pass: ${finalPass}\nReview only: ${reviewOnly}\nBatch mode: ${batch}\nSec dir: ${secDir}\nQA dir: ${qaDir}\nUX dir: ${uxDir}\nTo-clarify dir: ${clarifyDir}\nBlocked dir: ${blockedDir}\nReleased dir: ${releasedDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nDecision file: ${decisionLine}\nSEC queue files:\n${secListText}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("SEC"));

@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const {
   finalizeGateFile,
+  pendingGateTemplate,
   writeNoItemsPassGate,
   validateGateFile,
 } = require("./uat");
@@ -28,17 +29,7 @@ test("batch empty queue helper writes definitive pass gate", () => {
 test("finalizeGateFile converts pending gate template into technical fail gate", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "uat-pending-gate-"));
   const gatePath = path.join(tempDir, "batch-gate.json");
-  fs.writeFileSync(
-    gatePath,
-    `${JSON.stringify({
-      status: "fail",
-      summary: "pending",
-      blocking_findings: [],
-      findings: [],
-      manual_uat: [],
-    }, null, 2)}\n`,
-    "utf8"
-  );
+  fs.writeFileSync(gatePath, `${JSON.stringify(pendingGateTemplate(), null, 2)}\n`, "utf8");
 
   const result = finalizeGateFile(gatePath, "batch");
   const payload = JSON.parse(fs.readFileSync(gatePath, "utf8"));

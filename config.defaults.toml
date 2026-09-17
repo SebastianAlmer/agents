@@ -36,6 +36,28 @@ docs_dir = ""
 # Fallback fuer alte Projekte: <docs_dir>/product-operating-system
 product_vision_dir = ""
 
+[target_repo_routing]
+# fixed: alle Requirements laufen gegen fixed_target_repo.
+# from_requirement: jedes Requirement braucht target_repo im Frontmatter.
+mode = "fixed"
+fixed_target_repo = "default"
+
+# Optional:
+# [target_repos.agenten]
+# path = "/home/you/git/bA-Agenten"
+# aliases = ["bA-Agenten", "agenten"]
+#
+# [target_repos.agenten.qa]
+# mandatory_checks = ["npm run lint", "npm run test", "npm run build"]
+#
+# [target_repos.agenten.release_automation]
+# enabled = true
+# base_branch = "main"
+#
+# [target_repos.agenten.release_history]
+# enabled = false
+# required = false
+
 [loops]
 # OPTIONAL: Bundle-Groesse fuer Delivery.
 bundle_min_size = 5

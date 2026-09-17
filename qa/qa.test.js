@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
+  finalizeGateFile,
   writeNoItemsPassGate,
   validateGateFile,
   validateFinalPassGateFile,
@@ -195,5 +196,25 @@ test("batch technical failure helper writes definitive fail gate", () => {
   assert.equal(Array.isArray(payload.blocking_findings), true);
   assert.equal(Array.isArray(payload.findings), true);
   assert.equal(Array.isArray(payload.manual_uat), true);
+  assert.doesNotThrow(() => validateGateFile(gatePath, "batch-tests"));
+});
+
+test("finalizeGateFile converts pending batch gate into technical fail gate", () => {
+  const gatePath = writeGate({
+    status: "fail",
+    summary: "pending",
+    blocking_findings: [],
+    findings: [],
+    manual_uat: [],
+  });
+
+  const result = finalizeGateFile(gatePath, "batch-tests");
+  const payload = JSON.parse(fs.readFileSync(gatePath, "utf8"));
+
+  assert.equal(result.recoveredPendingGate, true);
+  assert.equal(payload.status, "fail");
+  assert.equal(payload.failure_type, "technical_gate_pending");
+  assert.notEqual(String(payload.summary || "").toLowerCase(), "pending");
+  assert.match(payload.findings[0].details, /must not remain pending/i);
   assert.doesNotThrow(() => validateGateFile(gatePath, "batch-tests"));
 });

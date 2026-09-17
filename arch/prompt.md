@@ -21,6 +21,15 @@ Rules
 - Avoid over-specification: no file-by-file implementation plans, no pseudo-code, no unnecessary framework-level mandates.
 - One pass only: make a decision and route.
 
+Project repo strategy (binding)
+- Validate the target repo boundary before routing to DEV.
+- `bA-Agenten` owns Agent Studio, agents, prompts, workflows, rubrics, evals and agent-core contracts.
+- `bA-RAG-db` owns Qdrant/RAG DB, restore, embeddings, retrieval/evaluate APIs, corpus metadata, health/readiness and RAG service auth.
+- `bA-MVP` owns integration/demo testing across Agent Studio and RAG service.
+- `bA-Plattform` owns the future end-user platform.
+- `biomed-antrag` is a reference/migration source, not the default target for new Agent Studio/RAG/platform code.
+- If the requirement is scoped to the wrong repo, add an architecture blocker or migration/extraction guardrail instead of silently implementing in the wrong place.
+
 Decision
 - Default decision: move to `dev`.
 - Move to `to-clarify` only for true hard blockers:

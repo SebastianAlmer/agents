@@ -85,6 +85,16 @@ function terminalPassGate(summary) {
   };
 }
 
+function pendingGateTemplate() {
+  return {
+    status: "fail",
+    summary: FINAL_GATE_PENDING_SUMMARY,
+    blocking_findings: [],
+    findings: [],
+    manual_uat: [],
+  };
+}
+
 function writeGatePayload(gateFile, payload) {
   if (!gateFile) {
     throw new Error("UAT gate file path is required");
@@ -303,7 +313,7 @@ async function main() {
   const queueList = queueTargets.length > 0
     ? queueTargets.map((item) => `- ${path.basename(item)}`).join("\n")
     : "- None";
-  const context = `# Context\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nBatch mode: ${batch}\nFull regression: ${fullRegression}\nUAT source queue: ${queueName}\nUAT source dir: ${queueDir}\nQA dir: ${qaDir}\nDeploy dir: ${deployDir}\nReleased dir: ${releasedDir}\nTo-clarify dir: ${toClarifyDir}\nHuman-decision-needed dir: ${decisionNeededDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nUAT source queue files:\n${queueList}\n`;
+  const context = `# Context\nTarget repo key: ${runtime.targetRepoKey || "default"}\nRepository root: ${repoRoot}\nRequirement file: ${reqLine}\nBatch mode: ${batch}\nFull regression: ${fullRegression}\nUAT source queue: ${queueName}\nUAT source dir: ${queueDir}\nQA dir: ${qaDir}\nDeploy dir: ${deployDir}\nReleased dir: ${releasedDir}\nTo-clarify dir: ${toClarifyDir}\nHuman-decision-needed dir: ${decisionNeededDir}\nDocs dir: ${docsDir}\nFinal gate file: ${gateLine}\nUAT source queue files:\n${queueList}\n`;
   const fullPrompt = `${prompt}\n\n${context}`;
 
   const configArgs = readConfigArgs(runtime.resolveAgentCodexConfigPath("UAT"));
@@ -331,11 +341,11 @@ async function main() {
     process.exit(0);
   }
 
-  const result = await runCodexExec({
+  const runUatAgent = (activeThreadId) => runCodexExec({
     prompt: fullPrompt,
     repoRoot,
     configArgs,
-    threadId,
+    threadId: activeThreadId,
     threadFile,
     agentsRoot: runtime.agentsRoot,
     agentLabel: "UAT",
@@ -344,9 +354,22 @@ async function main() {
     autoMode: auto,
   });
 
-  const gateFinalizeResult = (batch || fullRegression)
+  let result = await runUatAgent(threadId);
+
+  let gateFinalizeResult = (batch || fullRegression)
     ? finalizeGateFile(gateFile, batch ? "batch" : "full-regression")
     : { recoveredPendingGate: false };
+
+  if (gateFinalizeResult.recoveredPendingGate && (batch || fullRegression)) {
+    if (threadFile && fs.existsSync(threadFile)) {
+      fs.unlinkSync(threadFile);
+      console.log(`UAT: reset thread after pending gate ${threadFile}`);
+    }
+    console.log("UAT: pending gate after first run; retrying once with fresh thread");
+    writeGatePayload(gateFile, pendingGateTemplate());
+    result = await runUatAgent("");
+    gateFinalizeResult = finalizeGateFile(gateFile, batch ? "batch" : "full-regression");
+  }
 
   if (gateFinalizeResult.recoveredPendingGate) {
     if (threadFile && fs.existsSync(threadFile)) {
@@ -371,6 +394,7 @@ if (require.main === module) {
 module.exports = {
   FINAL_GATE_PENDING_SUMMARY,
   finalizeGateFile,
+  pendingGateTemplate,
   terminalPassGate,
   writeGatePayload,
   writeNoItemsPassGate,

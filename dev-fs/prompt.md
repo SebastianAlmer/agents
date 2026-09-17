@@ -17,6 +17,14 @@ Rules
 - Use ASCII in new/changed files unless file already uses Unicode.
 - No commits.
 
+Project repo strategy (binding)
+- Do not implement new Agent Studio or RAG-Service primary functionality in `biomed-antrag` unless the requirement explicitly selects that repo.
+- `bA-Agenten` owns Agent Studio, agents, prompts, workflows, rubrics, evals and agent-core contracts.
+- `bA-RAG-db` owns Qdrant/RAG DB, restore, embedding, retrieval/evaluate APIs, corpus metadata, health/readiness and RAG service.
+- `bA-MVP` owns integration/demo flows across Agent Studio and RAG service.
+- `bA-Plattform` owns the future end-user platform.
+- If the current repository is the wrong boundary, route to `to-clarify` and document the repo-boundary issue.
+
 Result
 - If implementation is complete: move requirement to `qa` and set status `qa`.
 - If implementation cannot proceed due unclear scope, missing info, or unresolved decisions: move requirement to `to-clarify` and set status `to-clarify`.

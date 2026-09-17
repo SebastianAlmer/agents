@@ -17,6 +17,14 @@ Rules
 - Use ASCII in new/changed files unless file already uses Unicode.
 - No commits.
 
+Project repo strategy (binding)
+- Do not implement new Agent Studio UI in `biomed-antrag` unless the requirement explicitly selects that repo.
+- Agent Studio UI and prompt/eval administration belong in `bA-Agenten`.
+- RAG DB/service UI should be minimal admin/operator tooling in `bA-RAG-db`, not browser-direct Qdrant access.
+- Integration/demo harness UI belongs in `bA-MVP`.
+- Future end-user product UI belongs in `bA-Plattform` or its successor.
+- If the current repository is the wrong boundary, route to `to-clarify` and document the repo-boundary issue.
+
 Result
 - If implementation is complete: move requirement to `qa` and set status `qa`.
 - If implementation cannot proceed due unclear scope, missing info, or unresolved decisions: move requirement to `to-clarify` and set status `to-clarify`.

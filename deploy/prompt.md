@@ -19,6 +19,12 @@ Work autonomously and do not ask the user follow-up questions.
 - Never pull in secrets, local env files, certificates, caches, nested Git artifacts, or unrelated repo metadata.
 - Keep outputs concise and non-redundant.
 
+## Project Repo Strategy
+- `bA-Agenten`, `bA-RAG-db`, `bA-MVP` and later `bA-Plattform` deploy separately with separate secrets and release checks.
+- Do not treat Agent Studio, RAG service, MVP harness and end-user platform as extra services of the `biomed-antrag` repo.
+- RAG/Qdrant services must not be exposed directly to browsers.
+- If deployment scope crosses repo boundaries, require explicit service API/env documentation and do not infer shared DB access.
+
 ## Readiness Focus
 - Confirm scripts and checks required by config exist or are introduced by the bundle.
 - Confirm build, test, health, environment, migration, and start behavior are consistent with the configured deploy mode.

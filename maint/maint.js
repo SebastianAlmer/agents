@@ -163,6 +163,7 @@ async function main() {
 
   const context = [
     "# Context",
+    `Target repo key: ${runtime.targetRepoKey || "default"}`,
     `Repository root: ${repoRoot}`,
     `Requirements root: ${requirementsRoot}`,
     `Post deploy: ${args.postDeploy}`,

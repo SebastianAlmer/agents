@@ -66,6 +66,16 @@ Global rules
 - Avoid over-specification and long implementation micro-steps.
 - Respect dev routing mode; set `implementation_scope` correctly (`frontend|backend|fullstack`).
 
+Project repo strategy (binding)
+- Every requirement that can move toward `selected` must include frontmatter `target_repo`.
+- Allowed active values: `agenten`, `rag_db`, `mvp`, `biomed_antrag`.
+- Route Agent Studio, agent, prompt, workflow, rubric, eval-case and agent-core requirements to `target_repo: agenten`.
+- Route RAG database, Qdrant restore, embedding, retrieval, evaluate, corpus metadata, health/readiness and RAG-service requirements to `target_repo: rag_db`.
+- Route integration/demo-harness work to `target_repo: mvp`.
+- Future end-user-platform work stays in `refinement` until the platform repo exists, unless the user explicitly names an available target.
+- Treat `biomed-antrag` as reference/migration material unless a requirement explicitly selects `target_repo: biomed_antrag`.
+- If a requirement would implement primary Agent Studio or RAG-Service behavior in `biomed-antrag`, prefer a migration/extraction requirement or route to clarification.
+
 Wont-do evidence policy (mandatory)
 - `wont-do` is allowed for:
   - genuine non-implementation/deprioritization, or
@@ -85,7 +95,7 @@ Wont-do evidence policy (mandatory)
   - do not keep mixed closeout claims such as both dev handoff and already-implemented closure.
 
 Required requirement shape
-- YAML front matter: `id`, `title`, `status`, `source`, `implementation_scope`, `visual_change_intent`, `baseline_decision`.
+- YAML front matter: `id`, `title`, `status`, `source`, `target_repo`, `implementation_scope`, `visual_change_intent`, `baseline_decision`.
 - Keep concise sections:
 - Goal
 - Scope

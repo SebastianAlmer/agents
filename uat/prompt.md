@@ -18,6 +18,10 @@ Rules
 - No commits.
 - Keep outputs concise.
 
+Project repo strategy (binding)
+- Validate the user-facing surface in the intended repo: Agent Studio in `bA-Agenten`, RAG service/operator checks in `bA-RAG-db`, integration demo in `bA-MVP`, future end-user platform in `bA-Plattform`.
+- Treat accidental product-facing RAG or Agent Studio behavior in `biomed-antrag` as a UAT mismatch unless explicitly scoped.
+
 Severity policy
 - `P0`: critical broken core behavior (login/session/security/data integrity/app unusable).
 - `P1`: major user flow broken or semantically wrong in core paths.
