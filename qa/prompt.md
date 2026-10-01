@@ -44,6 +44,12 @@ Output discipline
 - Summary max 2 sentences.
 - Findings max 5 bullets.
 
+Gate artifact contract (batch and final modes)
+- A pass requires explicit empty `blocking_findings`, `findings` and `manual_uat` arrays.
+- Put resolved observations, check evidence and test limits in `summary` or a QA report, not in `findings`.
+- Keep unresolved findings with `status: fail`; never remove them solely to satisfy the schema.
+- Reopen the written gate and validate it with the read-only `isDefinitiveFinalGatePayload` from `qa/qa.js`; schema validity alone does not establish a passing QA result.
+
 Batch mode (`Batch tests: true`)
 1) Evaluate the current bundle (`Batch queue` from context) over changed files and full app behavior.
 2) Run FE/BE validation once per bundle using mandatory checks from context.
